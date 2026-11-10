@@ -2,6 +2,7 @@ package tenantreg
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -175,10 +176,11 @@ func registerTenantPortal(api *httpapi.API) {
 			defaultTitle = "欢迎使用" + name + " · 一智算制衣"
 			defaultText = portalDefaultTrialText
 		}
-		var logoURL, systemName, welcomeTitle, welcomeText, logoType *string
+		var logoURL, systemName, welcomeTitle, welcomeText, logoType, styleCode *string
+		var sections []byte
 		var version int64
-		err = api.DB.QueryRow(r.Context(), `SELECT logo_url,system_name,welcome_title,welcome_text,logo_content_type,version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).
-			Scan(&logoURL, &systemName, &welcomeTitle, &welcomeText, &logoType, &version)
+		err = api.DB.QueryRow(r.Context(), `SELECT logo_url,system_name,welcome_title,welcome_text,logo_content_type,style_code,sections,version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).
+			Scan(&logoURL, &systemName, &welcomeTitle, &welcomeText, &logoType, &styleCode, &sections, &version)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
@@ -193,6 +195,36 @@ func registerTenantPortal(api *httpapi.API) {
 			"system_name": deref(systemName), "default_system_name": "一智算",
 			"welcome_title": deref(welcomeTitle), "welcome_text": deref(welcomeText),
 			"default_title": defaultTitle, "default_text": defaultText, "version": version,
+			"style_code": deref(styleCode), "sections": parsePortalSections(sections),
+		})
+	})
+
+	/* 门户视图（设计 5.8）：audience=manager 返回厂长自定义（风格/板块/文字）；audience=employee 固定模板 */
+	api.Handle("GET /api/v1/tenant-portal/view", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		audience := strings.TrimSpace(r.URL.Query().Get("audience"))
+		if audience == "" {
+			audience = "employee"
+		}
+		if audience != "manager" && audience != "employee" {
+			return httpapi.Error(http.StatusBadRequest, "INVALID_REQUEST", "audience 必须为 manager 或 employee")
+		}
+		var code, name string
+		if err := api.DB.QueryRow(r.Context(), `SELECT code,name FROM tenant WHERE id=$1`, p.TenantID).Scan(&code, &name); err != nil {
+			return err
+		}
+		if audience == "employee" {
+			/* 员工门户：服务端固定模板，忽略厂长自定义（设计 6.5） */
+			return httpapi.JSON(w, http.StatusOK, map[string]any{
+				"audience": "employee", "style_code": "classic", "tenant_name": name,
+				"sections": defaultPortalSections(),
+			})
+		}
+		var styleCode *string
+		var sections []byte
+		_ = api.DB.QueryRow(r.Context(), `SELECT style_code,sections FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).Scan(&styleCode, &sections)
+		return httpapi.JSON(w, http.StatusOK, map[string]any{
+			"audience": "manager", "style_code": deref(styleCode), "tenant_name": name,
+			"sections": parsePortalSections(sections),
 		})
 	})
 
@@ -230,6 +262,14 @@ func registerTenantPortal(api *httpapi.API) {
 			SystemName   string `json:"system_name"`
 			WelcomeTitle string `json:"welcome_title"`
 			WelcomeText  string `json:"welcome_text"`
+			StyleCode    string `json:"style_code"`
+			Sections     []struct {
+				Key         string `json:"key"`
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				Enabled     bool   `json:"enabled"`
+			} `json:"sections"`
+			ResetSections bool `json:"reset_sections"`
 			/* 恢复平台默认时一并清除已上传的企业 logo */
 			ResetLogo bool   `json:"reset_logo"`
 			Reason    string `json:"reason"`
@@ -247,16 +287,42 @@ func registerTenantPortal(api *httpapi.API) {
 		if logoURL != "" && !strings.HasPrefix(logoURL, "http://") && !strings.HasPrefix(logoURL, "https://") && !strings.HasPrefix(logoURL, "/") {
 			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "logo 地址需以 http(s):// 或 / 开头")
 		}
+		styleCode := strings.TrimSpace(in.StyleCode)
+		if styleCode != "" && styleCode != "classic" && styleCode != "dark" && styleCode != "fresh" {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "风格必须为 classic / dark / fresh")
+		}
+		/* 板块校验：键必须在允许集合内，文案限长（设计 6.5） */
+		allowed := map[string]bool{"welcome": true, "overview": true, "entries": true, "progress": true}
+		var sectionsJSON []byte
+		if len(in.Sections) > 0 && !in.ResetSections {
+			normalized := make([]map[string]any, 0, len(in.Sections))
+			for _, s := range in.Sections {
+				if !allowed[s.Key] {
+					return httpapi.Error(http.StatusBadRequest, "INVALID_SECTION", "板块键必须是 welcome/overview/entries/progress 之一")
+				}
+				if len(s.Title) > 20 || len(s.Description) > 60 {
+					return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "板块标题 ≤20 字、说明 ≤60 字")
+				}
+				normalized = append(normalized, map[string]any{
+					"key": s.Key, "title": s.Title, "description": s.Description, "enabled": s.Enabled,
+				})
+			}
+			sectionsJSON, _ = json.Marshal(normalized)
+		}
 		/* 填写图片网址即改用以网址为准；留空且未要求恢复默认时，保留已上传的 logo 文件 */
-		if _, err := api.DB.Exec(r.Context(), `INSERT INTO tenant_portal(tenant_id,logo_url,system_name,welcome_title,welcome_text,updated_at,updated_by,version)
-			VALUES($1,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,1)
+		if _, err := api.DB.Exec(r.Context(), `INSERT INTO tenant_portal(tenant_id,logo_url,system_name,welcome_title,welcome_text,style_code,sections,updated_at,updated_by,version)
+			VALUES($1,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($9,''),$10,$6,$7,1)
 			ON CONFLICT(tenant_id) DO UPDATE SET logo_url=EXCLUDED.logo_url,
 			logo_data=CASE WHEN $8 OR NULLIF($2,'') IS NOT NULL THEN NULL ELSE tenant_portal.logo_data END,
 			logo_content_type=CASE WHEN $8 OR NULLIF($2,'') IS NOT NULL THEN NULL ELSE tenant_portal.logo_content_type END,
 			system_name=EXCLUDED.system_name,
 			welcome_title=EXCLUDED.welcome_title,
-			welcome_text=EXCLUDED.welcome_text,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_portal.version+1`,
-			p.TenantID, logoURL, systemName, title, text, platform.Now(), p.UserID, in.ResetLogo); err != nil {
+			welcome_text=EXCLUDED.welcome_text,
+			style_code=COALESCE(EXCLUDED.style_code, tenant_portal.style_code),
+			sections=CASE WHEN $11 THEN NULL ELSE COALESCE($10::JSONB, tenant_portal.sections) END,
+			updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_portal.version+1`,
+			p.TenantID, logoURL, systemName, title, text, platform.Now(), p.UserID, in.ResetLogo,
+			styleCode, sectionsJSON, in.ResetSections); err != nil {
 			return err
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"message": "门户内容已保存，门户页下次打开即生效"})
@@ -337,6 +403,28 @@ func isTenantAdmin(r *http.Request, api *httpapi.API, p auth.Principal) (bool, e
 	err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM user_role ur JOIN role ro ON ro.tenant_id=ur.tenant_id AND ro.id=ur.role_id
 		WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND ro.code='tenant_admin')`, p.TenantID, p.UserID).Scan(&ok)
 	return ok, err
+}
+
+/* defaultPortalSections 平台默认门户板块（设计 6.5）。 */
+func defaultPortalSections() []map[string]any {
+	return []map[string]any{
+		{"key": "welcome", "title": "欢迎区", "description": "厂名、欢迎标题与欢迎语", "enabled": true},
+		{"key": "overview", "title": "生产概览", "description": "今日工单、在制、人数等概览", "enabled": true},
+		{"key": "entries", "title": "工作入口", "description": "按角色显示的工作入口", "enabled": true},
+		{"key": "progress", "title": "体验进度", "description": "体验用户的功能点亮进度", "enabled": true},
+	}
+}
+
+/* parsePortalSections 解析存储的板块 JSONB；为空返回默认板块。 */
+func parsePortalSections(raw []byte) []map[string]any {
+	if len(raw) == 0 {
+		return defaultPortalSections()
+	}
+	var sections []map[string]any
+	if err := json.Unmarshal(raw, &sections); err != nil || len(sections) == 0 {
+		return defaultPortalSections()
+	}
+	return sections
 }
 
 func deref(v *string) string {

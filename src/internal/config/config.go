@@ -27,7 +27,12 @@ type Config struct {
 	AccessTokenTTL    time.Duration
 	OfflineSessionTTL time.Duration
 	Database          Database
-	SMS               sms.Settings
+	/* SecureDatabase 非空时启用双库（plain=Database，secure=SecureDatabase）；
+	 * 为空时保持单库行为，write_mode 强制 plain_only。 */
+	SecureDatabase *Database
+	DataStore      DataStoreConfig
+	Crypto         CryptoConfig
+	SMS            sms.Settings
 }
 
 type Database struct {
@@ -38,6 +43,37 @@ type Database struct {
 	Password string
 	SSLMode  string
 	MaxConns int
+}
+
+/* DataStoreConfig 双库存储口径（设计 3.1/3.2）：默认 write_mode=both、read_source=secure。 */
+type DataStoreConfig struct {
+	ReadSource               string // secure（默认）| plain
+	WriteMode                string // both（默认）| plain_only | secure_only
+	AllowDegradedRead        bool
+	ReconcileIntervalSeconds int
+}
+
+/* CryptoConfig 信封加密与密钥提供方（设计 3.2/3.4）。 */
+type CryptoConfig struct {
+	EnvelopeVersion string // 如 v1
+	DataAlgorithm   string // AES-256-GCM
+	WrapAlgorithm   string // RSA-3072-OAEP-SHA256
+	KMSProvider     string // softhsm2（测试）| cloud_kms（预留）| local（仅迁移旧数据）
+	SoftHSM2        SoftHSM2Config
+	CloudKMS        CloudKMSConfig
+}
+
+type SoftHSM2Config struct {
+	PKCS11ModuleEnv string // 环境变量名，模块路径只从环境注入
+	TokenLabel      string
+	PINEnv          string // 环境变量名，PIN 只从环境注入
+	KeyLabelPrefix  string
+}
+
+type CloudKMSConfig struct {
+	Provider    string
+	Region      string
+	KeyIDPrefix string
 }
 
 type fileConfig struct {
@@ -66,7 +102,45 @@ type fileConfig struct {
 		SSLMode  string `yaml:"sslmode"`
 		MaxConns int    `yaml:"max_conns"`
 	} `yaml:"database"`
+	Databases struct {
+		Plain  fileDatabase `yaml:"plain"`
+		Secure fileDatabase `yaml:"secure"`
+	} `yaml:"databases"`
+	DataStore struct {
+		ReadSource               string `yaml:"read_source"`
+		WriteMode                string `yaml:"write_mode"`
+		AllowDegradedRead        bool   `yaml:"allow_degraded_read"`
+		ReconcileIntervalSeconds int    `yaml:"reconcile_interval_seconds"`
+	} `yaml:"data_store"`
+	Crypto struct {
+		EnvelopeVersion string `yaml:"envelope_version"`
+		DataAlgorithm   string `yaml:"data_algorithm"`
+		WrapAlgorithm   string `yaml:"wrap_algorithm"`
+		KMSProvider     string `yaml:"kms_provider"`
+		SoftHSM2        struct {
+			PKCS11ModuleEnv string `yaml:"pkcs11_module_env"`
+			TokenLabel      string `yaml:"token_label"`
+			PINEnv          string `yaml:"pin_env"`
+			KeyLabelPrefix  string `yaml:"key_label_prefix"`
+		} `yaml:"softhsm2"`
+		CloudKMS struct {
+			Provider    string `yaml:"provider"`
+			Region      string `yaml:"region"`
+			KeyIDPrefix string `yaml:"key_id_prefix"`
+		} `yaml:"cloud_kms"`
+	} `yaml:"crypto"`
 	SMS sms.Settings `yaml:"sms"`
+}
+
+type fileDatabase struct {
+	Host        string `yaml:"host"`
+	Port        int    `yaml:"port"`
+	Name        string `yaml:"name"`
+	User        string `yaml:"user"`
+	Password    string `yaml:"password"`
+	PasswordEnv string `yaml:"password_env"`
+	SSLMode     string `yaml:"sslmode"`
+	MaxConns    int    `yaml:"max_conns"`
 }
 
 func defaults() Config {
@@ -75,8 +149,15 @@ func defaults() Config {
 		NodeID: "center-local", JWTSecret: "local-development-only-change-me",
 		BootstrapAdminPassword: "ChangeMe123!", BootstrapPlatformAdminPassword: "PlatformAdmin123!", AttachmentDir: "data/attachments",
 		AccessTokenTTL: 2 * time.Hour, OfflineSessionTTL: 7 * 24 * time.Hour,
-		Database: Database{Host: "localhost", Port: 5432, Name: "clothpm", User: "postgres", SSLMode: "disable", MaxConns: 20},
-		SMS:      sms.Settings{CooldownSeconds: 60, FailureThreshold: 3, UsageFile: "data/sms_usage.json"},
+		Database:  Database{Host: "localhost", Port: 5432, Name: "clothpm", User: "postgres", SSLMode: "disable", MaxConns: 20},
+		DataStore: DataStoreConfig{ReadSource: "secure", WriteMode: "both", ReconcileIntervalSeconds: 60},
+		Crypto: CryptoConfig{
+			EnvelopeVersion: "v1", DataAlgorithm: "AES-256-GCM", WrapAlgorithm: "RSA-3072-OAEP-SHA256",
+			KMSProvider: "local", // 未配置 SoftHSM2/云 KMS 时仅用于迁移旧数据，不得用于新密钥
+			SoftHSM2:  SoftHSM2Config{TokenLabel: "yzws-mes-test", KeyLabelPrefix: "yzws-tenant-"},
+			CloudKMS:  CloudKMSConfig{},
+		},
+		SMS: sms.Settings{CooldownSeconds: 60, FailureThreshold: 3, UsageFile: "data/sms_usage.json"},
 	}
 }
 
@@ -98,6 +179,9 @@ func Load(explicitPath string) (Config, error) {
 		applyEnv(&cfg)
 		cfg.Database.Password = os.Getenv("CLOTHP_DB_PASSWORD")
 		applyFile(&cfg, fromFile)
+		if cfg.SecureDatabase != nil && cfg.SecureDatabase.Password == "" {
+			cfg.SecureDatabase.Password = os.Getenv("CLOTHP_DB_SECURE_PASSWORD")
+		}
 		log.Printf("config: using specified file %s (file values take precedence over environment)", path)
 	} else {
 		body, err := os.ReadFile("config.yaml")
@@ -117,6 +201,14 @@ func Load(explicitPath string) (Config, error) {
 		if envPassword := os.Getenv("CLOTHP_DB_PASSWORD"); envPassword != "" {
 			cfg.Database.Password = envPassword
 		}
+		if cfg.SecureDatabase != nil && cfg.SecureDatabase.Password == "" {
+			cfg.SecureDatabase.Password = os.Getenv("CLOTHP_DB_SECURE_PASSWORD")
+		}
+	}
+	/* 未配置 secure 库时保持单库行为：只写明文库、从明文库读取 */
+	if cfg.SecureDatabase == nil {
+		cfg.DataStore.WriteMode = "plain_only"
+		cfg.DataStore.ReadSource = "plain"
 	}
 	if err := validate(cfg); err != nil {
 		return Config{}, err
@@ -184,6 +276,58 @@ func applyFile(cfg *Config, file fileConfig) {
 	if file.Database.MaxConns > 0 {
 		cfg.Database.MaxConns = file.Database.MaxConns
 	}
+	/* 双库：databases.plain 覆盖明文库；databases.secure 存在时启用双库 */
+	if file.Databases.Plain.Host != "" {
+		applyDatabase(&cfg.Database, file.Databases.Plain)
+	}
+	if file.Databases.Secure.Host != "" {
+		secure := cfg.Database
+		applyDatabase(&secure, file.Databases.Secure)
+		cfg.SecureDatabase = &secure
+	}
+	if file.DataStore.ReadSource != "" {
+		cfg.DataStore.ReadSource = file.DataStore.ReadSource
+	}
+	if file.DataStore.WriteMode != "" {
+		cfg.DataStore.WriteMode = file.DataStore.WriteMode
+	}
+	cfg.DataStore.AllowDegradedRead = file.DataStore.AllowDegradedRead
+	if file.DataStore.ReconcileIntervalSeconds > 0 {
+		cfg.DataStore.ReconcileIntervalSeconds = file.DataStore.ReconcileIntervalSeconds
+	}
+	if file.Crypto.EnvelopeVersion != "" {
+		cfg.Crypto.EnvelopeVersion = file.Crypto.EnvelopeVersion
+	}
+	if file.Crypto.DataAlgorithm != "" {
+		cfg.Crypto.DataAlgorithm = file.Crypto.DataAlgorithm
+	}
+	if file.Crypto.WrapAlgorithm != "" {
+		cfg.Crypto.WrapAlgorithm = file.Crypto.WrapAlgorithm
+	}
+	if file.Crypto.KMSProvider != "" {
+		cfg.Crypto.KMSProvider = file.Crypto.KMSProvider
+	}
+	if file.Crypto.SoftHSM2.PKCS11ModuleEnv != "" {
+		cfg.Crypto.SoftHSM2.PKCS11ModuleEnv = file.Crypto.SoftHSM2.PKCS11ModuleEnv
+	}
+	if file.Crypto.SoftHSM2.TokenLabel != "" {
+		cfg.Crypto.SoftHSM2.TokenLabel = file.Crypto.SoftHSM2.TokenLabel
+	}
+	if file.Crypto.SoftHSM2.PINEnv != "" {
+		cfg.Crypto.SoftHSM2.PINEnv = file.Crypto.SoftHSM2.PINEnv
+	}
+	if file.Crypto.SoftHSM2.KeyLabelPrefix != "" {
+		cfg.Crypto.SoftHSM2.KeyLabelPrefix = file.Crypto.SoftHSM2.KeyLabelPrefix
+	}
+	if file.Crypto.CloudKMS.Provider != "" {
+		cfg.Crypto.CloudKMS.Provider = file.Crypto.CloudKMS.Provider
+	}
+	if file.Crypto.CloudKMS.Region != "" {
+		cfg.Crypto.CloudKMS.Region = file.Crypto.CloudKMS.Region
+	}
+	if file.Crypto.CloudKMS.KeyIDPrefix != "" {
+		cfg.Crypto.CloudKMS.KeyIDPrefix = file.Crypto.CloudKMS.KeyIDPrefix
+	}
 	/* 短信服务商：文件里配置了才覆盖默认值，未配置时保持演示模式 */
 	if len(file.SMS.Providers) > 0 {
 		cfg.SMS.Providers = file.SMS.Providers
@@ -196,6 +340,34 @@ func applyFile(cfg *Config, file fileConfig) {
 	}
 	if file.SMS.UsageFile != "" {
 		cfg.SMS.UsageFile = file.SMS.UsageFile
+	}
+}
+
+/* applyDatabase 用文件中的数据库段覆盖目标配置；password_env 指定的环境变量优先。 */
+func applyDatabase(target *Database, in fileDatabase) {
+	if in.Host != "" {
+		target.Host = in.Host
+	}
+	if in.Port > 0 {
+		target.Port = in.Port
+	}
+	if in.Name != "" {
+		target.Name = in.Name
+	}
+	if in.User != "" {
+		target.User = in.User
+	}
+	if in.Password != "" {
+		target.Password = in.Password
+	}
+	if in.PasswordEnv != "" {
+		target.Password = os.Getenv(in.PasswordEnv)
+	}
+	if in.SSLMode != "" {
+		target.SSLMode = in.SSLMode
+	}
+	if in.MaxConns > 0 {
+		target.MaxConns = in.MaxConns
 	}
 }
 
@@ -217,6 +389,8 @@ func applyEnv(cfg *Config) {
 	cfg.Database.User = env("DB_USER", cfg.Database.User)
 	cfg.Database.SSLMode = env("DB_SSLMODE", cfg.Database.SSLMode)
 	cfg.Database.MaxConns = envInt("DB_MAX_CONNS", cfg.Database.MaxConns)
+	cfg.DataStore.ReadSource = env("CLOTHP_READ_SOURCE", cfg.DataStore.ReadSource)
+	cfg.DataStore.WriteMode = env("CLOTHP_WRITE_MODE", cfg.DataStore.WriteMode)
 }
 
 func validate(cfg Config) error {
@@ -234,6 +408,38 @@ func validate(cfg Config) error {
 	}
 	if cfg.JWTSecret == "" || cfg.BootstrapAdminPassword == "" || cfg.BootstrapPlatformAdminPassword == "" {
 		return fmt.Errorf("CLOTHP_JWT_SECRET, CLOTHP_ADMIN_PASSWORD and CLOTHP_PLATFORM_ADMIN_PASSWORD cannot be empty")
+	}
+	/* 双库存储口径与密钥提供方（设计 3.1/3.2） */
+	switch cfg.DataStore.ReadSource {
+	case "secure", "plain":
+	default:
+		return fmt.Errorf("config data_store.read_source must be secure or plain")
+	}
+	switch cfg.DataStore.WriteMode {
+	case "both", "plain_only", "secure_only":
+	default:
+		return fmt.Errorf("config data_store.write_mode must be both, plain_only or secure_only")
+	}
+	if cfg.SecureDatabase != nil {
+		if cfg.SecureDatabase.Host == "" || cfg.SecureDatabase.Name == "" || cfg.SecureDatabase.User == "" || cfg.SecureDatabase.SSLMode == "" {
+			return fmt.Errorf("config databases.secure host, name, user and sslmode are required")
+		}
+		/* 单写 + 对端读取会产生旧数据读取，必须显式允许降级（设计 3.2 启动校验） */
+		degraded := (cfg.DataStore.WriteMode == "plain_only" && cfg.DataStore.ReadSource == "secure") ||
+			(cfg.DataStore.WriteMode == "secure_only" && cfg.DataStore.ReadSource == "plain")
+		if degraded && !cfg.DataStore.AllowDegradedRead {
+			return fmt.Errorf("config read_source=%s with write_mode=%s requires data_store.allow_degraded_read=true", cfg.DataStore.ReadSource, cfg.DataStore.WriteMode)
+		}
+	}
+	switch cfg.Crypto.KMSProvider {
+	case "softhsm2", "cloud_kms", "local":
+	default:
+		return fmt.Errorf("config crypto.kms_provider must be softhsm2, cloud_kms or local")
+	}
+	if cfg.Crypto.KMSProvider == "softhsm2" {
+		if cfg.Crypto.SoftHSM2.PKCS11ModuleEnv == "" || cfg.Crypto.SoftHSM2.PINEnv == "" || cfg.Crypto.SoftHSM2.TokenLabel == "" {
+			return fmt.Errorf("config crypto.softhsm2 pkcs11_module_env, pin_env and token_label are required when kms_provider=softhsm2")
+		}
 	}
 	return nil
 }

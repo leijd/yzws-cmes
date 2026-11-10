@@ -452,6 +452,7 @@ func Register(api *httpapi.API) {
 	registerModules(api)
 	registerRoleTemplates(api)
 	registerAssistants(api)
+	registerPhoneLookup(api)
 }
 
 func listTenants(api *httpapi.API, w http.ResponseWriter, r *http.Request, id string) error {

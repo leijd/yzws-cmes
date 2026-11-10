@@ -25,9 +25,11 @@ const loading = ref(false)
 const showPassword = ref(false)
 const error = ref('')
 const notice = ref('')
-const form = reactive({ login_name: '', password: '', node_id: 'web-local' })
+const form = reactive({ tenant_code: '', login_name: '', password: '', node_id: 'web-local' })
+const TENANT_CODE_KEY = 'clothp_last_tenant_code'
 
-/* ===== 账号密码登录：保存密码 / 自动登录 / 历史账号 ===== */
+/* ===== 账号密码登录：厂编码 + 工号/手机号（设计 5.6.1，固定错误顺序 5.6.3） =====
+ * 工号与手机号均为租户内唯一，必须带厂编码；平台管理员请走 /platform/login。 */
 const REMEMBER_KEY = 'clothp_login_remember'
 const HISTORY_KEY = 'clothp_login_history'
 const AUTO_TRY_KEY = 'clothp_autologin_tried'
@@ -54,26 +56,22 @@ function persistCredentials() {
 
 async function login(silent = false) {
   error.value = ''
-  if (!form.login_name || !form.password) {
-    if (!silent) error.value = '请填写账号和密码'
+  if (!form.tenant_code || !form.login_name || !form.password) {
+    if (!silent) error.value = '请填写厂编码、账号和密码'
     return
   }
   loading.value = true
   try {
-    const result = await api<{ account_type: 'tenant' | 'platform'; access_token: string; refresh_token?: string; password_change_required?: boolean; need_contact_phone?: boolean; permissions?: string[]; tenant?: { code: string; name: string; edition?: string; contact_phone?: string } }>(
-      '/auth/unified-login',
-      { method: 'POST', body: JSON.stringify(form) },
+    const result = await api<{ access_token: string; refresh_token?: string; password_change_required?: boolean; need_contact_phone?: boolean; permissions?: string[]; tenant?: { code: string; name: string; edition?: string; contact_phone?: string } }>(
+      '/auth/account-login',
+      { method: 'POST', body: JSON.stringify({ tenant_code: form.tenant_code, account: form.login_name, password: form.password, client_type: 'pc', node_id: form.node_id }) },
       silent ? { silent: true } : {},
     )
     persistCredentials()
     localStorage.removeItem('clothp_access_token')
     localStorage.removeItem('clothp_refresh_token')
     localStorage.removeItem('clothp_platform_access_token')
-    if (result.account_type === 'platform') {
-      localStorage.setItem('clothp_platform_access_token', result.access_token)
-      await router.push('/platform/tenants')
-      return
-    }
+    try { localStorage.setItem(TENANT_CODE_KEY, form.tenant_code) } catch { /* 忽略隐私模式 */ }
     /* 账号登录（注册用户）也清理本机遗留体验会话，避免门户误显示为体验版 */
     clearTrialSession()
     localStorage.setItem('clothp_access_token', result.access_token)
@@ -385,6 +383,7 @@ onMounted(() => {
     if (isValidPhone(qPhone)) phone.value = qPhone
   }
   try {
+    form.tenant_code = localStorage.getItem(TENANT_CODE_KEY) || ''
     const saved = JSON.parse(localStorage.getItem(REMEMBER_KEY) || 'null')
     if (saved) {
       form.login_name = saved.login_name || ''
@@ -440,6 +439,12 @@ onBeforeUnmount(() => { if (flowTimer) window.clearInterval(flowTimer); stopQrPo
 
                 <template v-if="mode === 'account'">
                   <div v-if="error" class="zs-error">{{ error }}</div>
+                  <div class="zs-field zs-with-icon">
+                    <span class="zs-field-icon" aria-hidden="true">
+                      <svg viewBox="0 0 24 24"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg>
+                    </span>
+                    <input v-model.trim="form.tenant_code" autocomplete="organization" placeholder="厂编码（如 YZWS001）" />
+                  </div>
                   <div class="zs-field zs-with-icon">
                     <span class="zs-field-icon" aria-hidden="true">
                       <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-3.4 3.1-5.6 7-5.6s7 2.2 7 5.6"/></svg>

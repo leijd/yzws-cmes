@@ -32,6 +32,9 @@ const nav = [
   { path: '/materials/receipts', label: '物料入库', icon: '▥', group: '生产管理', permission: 'work_order:read' },
   { path: '/materials/master', label: '物料管理', icon: '▦', group: '基础资料', permission: 'masterdata:read' },
   { path: '/rework/E03', label: '返工复检', icon: '⟳', group: '生产管理', permission: 'work_order:read' },
+  { path: '/settings/workshops', label: '车间管理', icon: '⌂', group: '基础资料', permission: 'workshop:read' },
+  { path: '/settings/lines', label: '产线管理', icon: '▤', group: '基础资料', permission: 'line:read' },
+  { path: '/settings/users', label: '人员与组织', icon: '♟', group: '基础资料', permission: 'identity:read' },
   { path: '/masterdata/B06', label: '员工与账号', icon: '♙', group: '基础资料', permission: '' },
   { path: '/tenant/profile', label: '本厂信息', icon: '⌂', group: '系统管理', permission: '' },
   { path: '/portal/settings', label: '门户内容', icon: '▤', group: '系统管理', permission: '' },
@@ -39,6 +42,7 @@ const nav = [
   { path: '/settings/G01', label: '功能设置', icon: '⚙', group: '系统管理', permission: 'settings:read' },
   { path: '/import-export/G09', label: '导入导出', icon: '⇅', group: '系统管理', permission: 'settings:read' },
   { path: '/backup/G10', label: '备份与同步', icon: '⛁', group: '系统管理', permission: 'settings:read' },
+  { path: '/tenant/backups', label: '明文备份导出', icon: '⚿', group: '系统管理', permission: 'backup:export' },
   { path: '/audit/G08', label: '审计与字段', icon: '⌘', group: '系统管理', permission: 'settings:read' },
 ]
 const visibleNav = computed(() => nav.filter(item => !item.permission || permissions.value[item.permission]))

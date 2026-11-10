@@ -31,6 +31,8 @@ type Principal struct {
 	SessionID              string
 	PasswordChangeRequired bool
 	Permissions            map[string]bool
+	/* ClientType 会话终端（pc/mobile，设计 5.6.1）；工人账号仅允许 mobile */
+	ClientType string
 }
 
 type Service struct {
@@ -42,10 +44,11 @@ type Service struct {
 }
 
 type claims struct {
-	TenantID  string `json:"tenant_id"`
-	UserID    string `json:"user_id"`
-	SessionID string `json:"session_id"`
-	Platform  bool   `json:"platform,omitempty"`
+	TenantID   string `json:"tenant_id"`
+	UserID     string `json:"user_id"`
+	SessionID  string `json:"session_id"`
+	ClientType string `json:"client_type,omitempty"`
+	Platform   bool   `json:"platform,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -98,7 +101,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (map[string]any, 
 	if err != nil || tenantStatus != "active" || status != "active" || !verifyPassword(verifier, input.Password) {
 		return nil, ErrInvalidCredentials
 	}
-	return s.issueTokens(ctx, tenantID, userID, employeeID, input.NodeID, "")
+	return s.issueTokens(ctx, tenantID, userID, employeeID, input.NodeID, "", "pc")
 }
 
 /** 手机号 + 制衣厂登录（短信验证通过后凭一次性 ticket 换取真实会话）：一个手机号可在多个厂各绑定员工账号。
@@ -123,7 +126,7 @@ func (s *Service) LoginByPhone(ctx context.Context, phone, tenantCode, password,
 		WHERE tenant_id=$1 AND id=$2`, account.tenantID, account.userID); err != nil {
 		return nil, err
 	}
-	return s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, strings.TrimSpace(phone))
+	return s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, strings.TrimSpace(phone), "mobile")
 }
 
 type phoneAccount struct {
@@ -255,10 +258,13 @@ func (s *Service) SwitchTenant(ctx context.Context, p Principal, tenantCode, nod
 		return nil, err
 	}
 	/* 新会话沿用同一登录手机号（老会话无记录时用当前识别出的手机号），切换后仍能切回其他厂。 */
-	return s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, phones[0])
+	return s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, phones[0], "mobile")
 }
 
-func (s *Service) issueTokens(ctx context.Context, tenantID, userID, employeeID, nodeID, loginPhone string) (map[string]any, error) {
+func (s *Service) issueTokens(ctx context.Context, tenantID, userID, employeeID, nodeID, loginPhone, clientType string) (map[string]any, error) {
+	if clientType == "" {
+		clientType = "pc"
+	}
 	if nodeID == "" {
 		nodeID = s.nodeID
 	}
@@ -272,7 +278,7 @@ func (s *Service) issueTokens(ctx context.Context, tenantID, userID, employeeID,
 	if err != nil {
 		return nil, err
 	}
-	accessToken, err := s.accessToken(tenantID, userID, sessionID, expiresAt)
+	accessToken, err := s.accessToken(tenantID, userID, sessionID, clientType, expiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +286,7 @@ func (s *Service) issueTokens(ctx context.Context, tenantID, userID, employeeID,
 	if err != nil {
 		return nil, err
 	}
+	principal.ClientType = clientType
 	_, _ = s.db.Exec(ctx, "UPDATE user_account SET last_login_at=$1 WHERE tenant_id=$2 AND id=$3", platform.Now(), tenantID, userID)
 	permissions := make([]string, 0, len(principal.Permissions))
 	for permission := range principal.Permissions {
@@ -315,9 +322,9 @@ func (s *Service) issueTokens(ctx context.Context, tenantID, userID, employeeID,
 	}, nil
 }
 
-func (s *Service) accessToken(tenantID, userID, sessionID string, expiresAt time.Time) (string, error) {
+func (s *Service) accessToken(tenantID, userID, sessionID, clientType string, expiresAt time.Time) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
-		TenantID: tenantID, UserID: userID, SessionID: sessionID,
+		TenantID: tenantID, UserID: userID, SessionID: sessionID, ClientType: clientType,
 		RegisteredClaims: jwt.RegisteredClaims{ID: platform.ID(), Issuer: "clothp", ExpiresAt: jwt.NewNumericDate(expiresAt), IssuedAt: jwt.NewNumericDate(time.Now())},
 	})
 	return token.SignedString(s.secret)
@@ -346,7 +353,12 @@ func (s *Service) AuthenticateRequest(r *http.Request) (Principal, error) {
 	if err != nil || revokedAt != nil {
 		return Principal{}, ErrUnauthenticated
 	}
-	return s.loadPrincipal(r.Context(), claims.TenantID, claims.UserID, claims.SessionID)
+	principal, err := s.loadPrincipal(r.Context(), claims.TenantID, claims.UserID, claims.SessionID)
+	if err != nil {
+		return Principal{}, err
+	}
+	principal.ClientType = claims.ClientType
+	return principal, nil
 }
 
 func (s *Service) loadPrincipal(ctx context.Context, tenantID, userID, sessionID string) (Principal, error) {
@@ -378,7 +390,9 @@ func (s *Service) loadPrincipal(ctx context.Context, tenantID, userID, sessionID
 	return principal, nil
 }
 
-func (s *Service) Refresh(ctx context.Context, refreshToken, nodeID string) (map[string]any, error) {
+/* Refresh 刷新会话：clientType 沿用原会话终端，由调用方（客户端刷新请求）带入，
+ * 不得用手机会话刷新出 PC 令牌（设计 5.6.1）。 */
+func (s *Service) Refresh(ctx context.Context, refreshToken, nodeID, clientType string) (map[string]any, error) {
 	hash := platform.Hash([]byte(refreshToken))
 	var tenantID, sessionID, userID, employeeID, loginPhone string
 	err := s.db.QueryRow(ctx, `SELECT s.tenant_id,s.id,s.user_id,u.employee_id,COALESCE(s.login_phone,'') FROM auth_session s
@@ -390,12 +404,17 @@ func (s *Service) Refresh(ctx context.Context, refreshToken, nodeID string) (map
 	if _, err = s.db.Exec(ctx, "UPDATE auth_session SET revoked_at=$1,reason='rotated' WHERE tenant_id=$2 AND id=$3", platform.Now(), tenantID, sessionID); err != nil {
 		return nil, err
 	}
-	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, loginPhone)
+	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, loginPhone, clientType)
 }
 
 func (s *Service) Logout(ctx context.Context, p Principal) error {
 	_, err := s.db.Exec(ctx, "UPDATE auth_session SET revoked_at=$1,reason='logout' WHERE tenant_id=$2 AND id=$3", platform.Now(), p.TenantID, p.SessionID)
 	return err
+}
+
+/* HashPassword 生成 Argon2id 密码验证器（供人员建档/密码重置使用；密码明文不落库）。 */
+func HashPassword(password string) (string, error) {
+	return hashPassword(password)
 }
 
 func hashPassword(password string) (string, error) {

@@ -39,7 +39,7 @@ func (s *Service) UnifiedLogin(ctx context.Context, input PlatformLoginInput) (m
 		return nil, "", ErrAmbiguousLogin
 	}
 	match := matches[0]
-	result, err := s.issueTokens(ctx, match.tenantID, match.userID, match.employeeID, input.NodeID, "")
+	result, err := s.issueTokens(ctx, match.tenantID, match.userID, match.employeeID, input.NodeID, "", "pc")
 	if err != nil {
 		return nil, "", err
 	}

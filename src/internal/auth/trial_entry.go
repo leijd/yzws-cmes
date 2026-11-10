@@ -132,7 +132,7 @@ func (s *Service) LoginTrialAdmin(ctx context.Context, phone, tenantCode, nodeID
 		WHERE tenant_id=$1 AND id=$2`, tenantID, userID); err != nil {
 		return nil, err
 	}
-	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, strings.TrimSpace(phone))
+	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, strings.TrimSpace(phone), "mobile")
 }
 
 // LoginByWechatDevice 微信扫码登录：deviceID 为扫码手机浏览器上持久保存的微信身份标识。
@@ -174,7 +174,7 @@ func (s *Service) LoginByWechatDevice(ctx context.Context, deviceID, phone, tena
 		WHERE tenant_id=$2 AND id=$3`, deviceID, tenantID, userID); err != nil {
 		return nil, err
 	}
-	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, strings.TrimSpace(phone))
+	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, strings.TrimSpace(phone), "mobile")
 }
 
 // WechatBoundAccount 查询本机微信身份已绑定的厂账号（用于扫码页显示“一键确认登录”）。

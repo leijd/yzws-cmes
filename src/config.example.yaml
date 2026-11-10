@@ -19,6 +19,7 @@ security:
   offline_session_hours: 168
 
 # 数据端：复制本文件为 config.yaml 后填写真实连接信息（config.yaml 已被 .gitignore 排除）
+# 未配置 databases.secure 时保持单库行为（plain_only + 从明文库读取），旧部署零改动可跑。
 database:
   host: 127.0.0.1
   port: 5432
@@ -27,6 +28,47 @@ database:
   password: "CHANGE_ME"
   sslmode: disable
   max_conns: 20
+
+# ===== 双数据库与加密（设计文档第 3 章）=====
+# plain=明文库；secure=密文库（默认读取来源）。启用双库需同时配置两库。
+# databases:
+#   plain:
+#     host: 127.0.0.1
+#     port: 5432
+#     name: yzws-v1
+#     user: postgres
+#     password_env: CLOTHP_DB_PLAIN_PASSWORD   # 口令只从环境变量注入
+#     sslmode: disable
+#     max_conns: 20
+#   secure:
+#     host: 127.0.0.1
+#     port: 5432
+#     name: yzws-v1-sec
+#     user: postgres
+#     password_env: CLOTHP_DB_SECURE_PASSWORD
+#     sslmode: disable
+#     max_conns: 20
+#
+# data_store:
+#   read_source: secure        # secure（默认）| plain
+#   write_mode: both           # both（默认 2PC 双写，要求 max_prepared_transactions>0）| plain_only | secure_only
+#   allow_degraded_read: false # 单写+对端读取的降级组合必须显式允许
+#   reconcile_interval_seconds: 60
+#
+# crypto:
+#   envelope_version: v1
+#   data_algorithm: AES-256-GCM
+#   wrap_algorithm: RSA-3072-OAEP-SHA256
+#   kms_provider: softhsm2     # 测试环境 SoftHSM2；cloud_kms 预留；local 仅用于迁移旧数据
+#   softhsm2:
+#     pkcs11_module_env: CLOTHP_SOFTHSM2_MODULE
+#     token_label: yzws-mes-test
+#     pin_env: CLOTHP_SOFTHSM2_PIN
+#     key_label_prefix: yzws-tenant-
+#   cloud_kms:                 # 预留，不在测试环境启用
+#     provider: ""
+#     region: ""
+#     key_id_prefix: ""
 
 # ===== 短信服务商（多实例自动选路）=====
 # 不配置 sms.providers 时为演示模式（验证码在响应中返回，页面会显示）。

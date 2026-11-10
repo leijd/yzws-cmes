@@ -13,7 +13,10 @@ import (
 
 	"clothp/internal/auth"
 	"clothp/internal/config"
+	"clothp/internal/datastore"
+	"clothp/internal/dualwrite"
 	"clothp/internal/platform"
+	"clothp/internal/seccrypto"
 	"clothp/internal/sms"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -25,6 +28,10 @@ type API struct {
 	Auth   *auth.Service
 	Config config.Config
 	SMS    *sms.Router
+	/* 双写与加密依赖：由 main 注入；未配置（单库旧模式）时 Store/Writer 可为 nil */
+	Store  *datastore.Store
+	Writer *dualwrite.Writer
+	Crypto *seccrypto.Service
 	mux    *http.ServeMux
 }
 
@@ -137,6 +144,8 @@ func platformRoutePermission(r *http.Request) string {
 	case strings.HasPrefix(path, "/api/v1/platform/role-templates"),
 		strings.HasPrefix(path, "/api/v1/platform/permissions"):
 		return pick("role_templates.read", "role_templates.write")
+	case strings.HasPrefix(path, "/api/v1/platform/phone-lookup"):
+		return "phone.lookup"
 	case strings.HasPrefix(path, "/api/v1/platform/statistics"):
 		return "tenants.read"
 	case strings.HasPrefix(path, "/api/v1/platform/tenants"):

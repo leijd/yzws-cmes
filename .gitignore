@@ -28,6 +28,9 @@ req/*.7z
 req/~$*
 ~$*
 
+# ===== 本地下载的第三方 HSM 参考资料（含 PIN/压缩包，勿入库） =====
+softhsm-2.6-go/
+
 # ===== IDE / 系统 =====
 .codebuddy/
 .vscode/

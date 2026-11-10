@@ -54,11 +54,12 @@ func (a *API) RegisterAuthRoutes() {
 		var input struct {
 			RefreshToken string `json:"refresh_token"`
 			NodeID       string `json:"node_id"`
+			ClientType   string `json:"client_type"` // 沿用原会话终端：pc/mobile（设计 5.6.1）
 		}
 		if err := Decode(r, &input); err != nil {
 			return err
 		}
-		result, err := a.Auth.Refresh(r.Context(), input.RefreshToken, input.NodeID)
+		result, err := a.Auth.Refresh(r.Context(), input.RefreshToken, input.NodeID, input.ClientType)
 		if errors.Is(err, auth.ErrUnauthenticated) {
 			return Error(http.StatusUnauthorized, "UNAUTHENTICATED", "会话已失效")
 		}

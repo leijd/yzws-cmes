@@ -11,9 +11,19 @@ import { api } from '../api'
 const LOGO_MAX_BYTES = 500 * 1024
 const LOGO_STANDARD = '512 × 512 像素（正方形）'
 
+interface PortalSection { key: string; title: string; description: string; enabled: boolean }
+
 const portal = ref<any>(null)
-const form = reactive({ logo_url: '', system_name: '', welcome_title: '', welcome_text: '' })
+const form = reactive({
+  logo_url: '', system_name: '', welcome_title: '', welcome_text: '',
+  style_code: 'classic', sections: [] as PortalSection[],
+})
 const logoPreview = ref('')
+const STYLE_OPTIONS = [
+  { value: 'classic', label: '经典蓝', hint: '默认商务蓝，适合大多数制衣厂' },
+  { value: 'dark', label: '深色', hint: '暗色底纹，视觉聚焦' },
+  { value: 'fresh', label: '清新', hint: '浅色渐变，轻松明快' },
+]
 const loading = ref(true)
 const saving = ref(false)
 const uploading = ref(false)
@@ -31,6 +41,10 @@ async function load() {
     form.system_name = r.system_name || ''
     form.welcome_title = r.welcome_title || ''
     form.welcome_text = r.welcome_text || ''
+    form.style_code = r.style_code || 'classic'
+    form.sections = (r.sections || []).map((s: any) => ({
+      key: s.key, title: s.title || '', description: s.description || '', enabled: s.enabled !== false,
+    }))
     logoPreview.value = r.logo_preview_url || r.logo_url || ''
   } catch (e) {
     error.value = (e as Error).message || '加载失败'
@@ -45,8 +59,8 @@ async function save(reset = false) {
   notice.value = ''
   try {
     const body = reset
-      ? { logo_url: '', system_name: '', welcome_title: '', welcome_text: '', reset_logo: true, reason: '恢复平台默认门户内容' }
-      : { ...form, reset_logo: false, reason: '本厂管理员修改门户内容' }
+      ? { logo_url: '', system_name: '', welcome_title: '', welcome_text: '', reset_logo: true, reset_sections: true, reason: '恢复平台默认门户内容' }
+      : { ...form, reset_logo: false, reset_sections: false, reason: '本厂管理员修改门户内容' }
     const r = await api<{ message: string }>('/tenant-portal/content', { method: 'PUT', body: JSON.stringify(body) })
     notice.value = r.message || '已保存'
     await load()
@@ -117,6 +131,18 @@ async function removeLogo() {
   } finally {
     uploading.value = false
   }
+}
+
+/* ===== 门户风格与板块（设计 6.5）：勾选启用、上下移动排序、文案编辑 ===== */
+function moveSection(index: number, delta: number) {
+  const target = index + delta
+  if (target < 0 || target >= form.sections.length) return
+  const [item] = form.sections.splice(index, 1)
+  form.sections.splice(target, 0, item)
+}
+
+const sectionKeyText: Record<string, string> = {
+  welcome: '欢迎区', overview: '生产概览', entries: '工作入口', progress: '体验进度',
 }
 
 onMounted(load)
@@ -197,6 +223,42 @@ onMounted(load)
       <p class="text-muted">只有本厂管理员可以修改；修改后门户页下次打开即生效。</p>
     </div>
   </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2>厂长门户风格与板块</h2>
+      <span class="status">{{ form.style_code }}</span>
+    </div>
+    <div class="panel-body">
+      <p class="text-muted" style="margin-top:0">
+        仅影响厂长门户；员工门户使用服务端固定模板，不受此处配置影响。
+      </p>
+      <div class="style-grid">
+        <button v-for="s in STYLE_OPTIONS" :key="s.value" type="button" class="style-card" :class="{ active: form.style_code === s.value }" @click="form.style_code = s.value">
+          <span class="style-swatch" :class="`swatch-${s.value}`"></span>
+          <strong>{{ s.label }}</strong>
+          <small>{{ s.hint }}</small>
+        </button>
+      </div>
+
+      <h3 style="margin:18px 0 8px">门户板块（勾选启用，可排序与改文案）</h3>
+      <div class="section-list">
+        <div v-for="(sec, index) in form.sections" :key="sec.key" class="section-item" :class="{ disabled: !sec.enabled }">
+          <label class="section-enable"><input v-model="sec.enabled" type="checkbox"> {{ sectionKeyText[sec.key] || sec.key }}</label>
+          <input v-model.trim="sec.title" class="section-title" maxlength="20" placeholder="板块标题">
+          <input v-model.trim="sec.description" class="section-desc" maxlength="60" placeholder="板块说明">
+          <span class="section-order">
+            <button type="button" :disabled="index === 0" @click="moveSection(index, -1)">↑</button>
+            <button type="button" :disabled="index === form.sections.length - 1" @click="moveSection(index, 1)">↓</button>
+          </span>
+        </div>
+      </div>
+      <p class="text-muted" style="margin:8px 0 0">员工门户固定显示全部板块；此处配置仅作用于厂长门户视图。</p>
+      <div style="display:flex;gap:10px;margin-top:14px">
+        <button class="button" :disabled="saving || loading" @click="save(false)">{{ saving ? '保存中…' : '保存风格与板块' }}</button>
+      </div>
+    </div>
+  </section>
 </template>
 
 <style scoped>
@@ -206,4 +268,26 @@ onMounted(load)
 .logo-preview img{max-width:100%;max-height:100%;object-fit:contain}
 .logo-actions{display:flex;flex-direction:column;gap:10px;min-width:200px}
 .hidden-file{display:none}
+
+/* 风格选择与板块管理（设计 6.5） */
+.style-grid{display:flex;gap:14px;flex-wrap:wrap}
+.style-card{display:flex;flex-direction:column;align-items:flex-start;gap:6px;width:180px;padding:12px;
+  border:2px solid #e3ecfb;border-radius:14px;background:#fff;cursor:pointer;text-align:left;font-family:inherit}
+.style-card.active{border-color:#2563eb;box-shadow:0 8px 20px rgba(37,99,235,.15)}
+.style-card strong{font-size:14px;color:#17255f}
+.style-card small{font-size:12px;color:#64748b}
+.style-swatch{width:100%;height:56px;border-radius:10px}
+.swatch-classic{background:linear-gradient(135deg,#2563eb,#06b6d4)}
+.swatch-dark{background:linear-gradient(135deg,#0f172a,#334155)}
+.swatch-fresh{background:linear-gradient(135deg,#a7f3d0,#bae6fd)}
+.section-list{display:flex;flex-direction:column;gap:8px}
+.section-item{display:grid;grid-template-columns:150px 160px 1fr auto;gap:10px;align-items:center;
+  padding:8px 10px;border:1px solid #e3ecfb;border-radius:10px;background:#f8fbff}
+.section-item.disabled{opacity:.55}
+.section-enable{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:600;color:#17255f;white-space:nowrap}
+.section-title,.section-desc{border:1px solid #cbd5e1;border-radius:8px;padding:6px 10px;font-size:13px;font-family:inherit}
+.section-order{display:flex;gap:4px}
+.section-order button{border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px}
+.section-order button:disabled{opacity:.4;cursor:not-allowed}
+</style>
 </style>

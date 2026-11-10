@@ -38,10 +38,18 @@ export const router = createRouter({
     { path: '/notifications/A04', component: () => import('./pages/NotificationsPage.vue') },
     { path: '/import-export/G09', component: () => import('./pages/ImportExportPage.vue') },
     { path: '/backup/G10', component: () => import('./pages/BackupPage.vue') },
+    /* 明文离线备份（设计 3.9；backup:export 权限） */
+    { path: '/tenant/backups', component: () => import('./pages/TenantBackupPage.vue') },
     { path: '/audit/G08', component: () => import('./pages/AuditPage.vue') },
     { path: '/products/:id', component: () => import('./pages/ProductDetailPage.vue') },
     { path: '/identity/G05', component: () => import('./pages/IdentityPage.vue') },
-    { path: '/tenant/profile', component: () => import('./pages/TenantProfilePage.vue') },
+    /* 车间/产线/人员管理（设计 6.2-6.4） */
+    { path: '/settings/workshops', component: () => import('./pages/WorkshopListPage.vue') },
+    { path: '/settings/lines', component: () => import('./pages/LineListPage.vue') },
+    { path: '/settings/users', component: () => import('./pages/UserListPage.vue') },
+    /* 员工门户与手机岗位首页（设计 6.5/6.6） */
+    { path: '/portal/employee', component: () => import('./pages/EmployeePortalPage.vue'), meta: { standalone: true } },
+    { path: '/mobile/home', component: () => import('./pages/MobileJobHome.vue'), meta: { standalone: true } },
     { path: '/orders/C03', component: () => import('./pages/OrdersPage.vue') },
     { path: '/tasks/D01', component: () => import('./pages/TasksPage.vue') },
     { path: '/reports/D06', component: () => import('./pages/ReportsPage.vue') },
