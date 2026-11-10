@@ -1,0 +1,7 @@
+/data/
+/.build/
+/server
+/server.exe
+/web/node_modules/
+/web/dist/
+/web/tsconfig.tsbuildinfo

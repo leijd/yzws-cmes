@@ -1,0 +1,47 @@
+mode: center
+
+# 二维码扫码地址前缀（一般为 Web 端访问地址，例如 http://192.168.1.10:18379）。
+# 留空时按请求的 Origin/Referer/Host 自动推导。
+public_base_url: ""
+
+server:
+  listen: ":18370"
+  read_header_timeout_ms: 10000
+
+node:
+  id: center-local
+
+storage:
+  attachment_dir: data/attachments
+
+security:
+  access_token_minutes: 120
+  offline_session_hours: 168
+
+# 数据端：复制本文件为 config.yaml 后填写真实连接信息（config.yaml 已被 .gitignore 排除）
+database:
+  host: 127.0.0.1
+  port: 5432
+  name: yzws-v1
+  user: postgres
+  password: "CHANGE_ME"
+  sslmode: disable
+  max_conns: 20
+
+# ===== 短信服务商（多实例自动选路）=====
+# 不配置 sms.providers 时为演示模式（验证码在响应中返回，页面会显示）。
+# sms:
+#   failure_threshold: 3
+#   cooldown_seconds: 60
+#   usage_file: data/sms_usage.json
+#   providers:
+#     - name: aliyun-sms
+#       url: http://localhost:18440/aliyun/send
+#       token: ""
+#       weight: 100
+#       daily_limit: 100
+#       timeout_ms: 5000
+#       enabled: true
+#       extra:
+#         sign_name: 一智万商
+#         template_code: SMS_123456

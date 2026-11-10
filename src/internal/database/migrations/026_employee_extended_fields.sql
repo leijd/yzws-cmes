@@ -1,0 +1,12 @@
+ALTER TABLE employee ADD COLUMN workshop TEXT;
+ALTER TABLE employee ADD COLUMN production_line TEXT;
+ALTER TABLE employee ADD COLUMN skill_grade TEXT;
+ALTER TABLE employee ADD COLUMN pay_mode TEXT;
+ALTER TABLE employee ADD COLUMN base_salary NUMERIC(12,2);
+ALTER TABLE employee ADD COLUMN rate_level TEXT;
+COMMENT ON COLUMN employee.workshop IS '责任车间（一车间/二车间/三车间/裁床房）';
+COMMENT ON COLUMN employee.production_line IS '生产线（所选车间下的生产线，如 3线）';
+COMMENT ON COLUMN employee.skill_grade IS '技能评级 A 熟练 / B 合格 / C 学徒';
+COMMENT ON COLUMN employee.pay_mode IS '工资模式 piecework 计件 / monthly 月薪';
+COMMENT ON COLUMN employee.base_salary IS '基础底薪（月薪必填，计件为 0）';
+COMMENT ON COLUMN employee.rate_level IS '单价档位 high 高档(1.25) / mid 中档(1.0) / low 低档(0.85)';

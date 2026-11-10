@@ -1,0 +1,35 @@
+# ============================================================
+# Caddy 统一入口：静态前端（web/dist）+ /api 反代到 Go 后端
+#
+# 站点与后端端口都可用环境变量覆盖（{$VAR:默认值} 语法）：
+#   PowerShell:
+#     $env:SITE_ADDRESS=':80'
+#     $env:BACKEND_PORT='18390'          # 后端动态端口变化时只改这里
+#     caddy run  --config deploy/Caddyfile
+#   Linux:
+#     SITE_ADDRESS=:443 BACKEND_PORT=18390 caddy run --config deploy/Caddyfile
+#
+# 后端端口在运行期变化时：更新 BACKEND_PORT 后执行零停机重载
+#     caddy reload --config deploy/Caddyfile
+#
+# 说明：
+# - 站点地址写域名（如 clothp.example.com）时 Caddy 自动申请/续期 HTTPS 证书；
+#   本地测试用 :80 或 http://localhost:18379 即走纯 HTTP。
+# - FRONTEND_ROOT 指向 web/dist 构建产物目录（npm run build 的输出）。
+# ============================================================
+
+{$SITE_ADDRESS::80} {
+	encode zstd gzip
+
+	# ---- 后端 API：/api/* 全部反代（QR 登录等均为普通 HTTP，无需特殊配置）----
+	handle /api/* {
+		reverse_proxy 127.0.0.1:{$BACKEND_PORT:18370}
+	}
+
+	# ---- 前端 SPA：静态文件 + 路由回退 index.html ----
+	handle {
+		root * {$FRONTEND_ROOT:./web/dist}
+		try_files {path} /index.html
+		file_server
+	}
+}

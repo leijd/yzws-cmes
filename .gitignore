@@ -1,0 +1,36 @@
+# ===== 构建产物与依赖 =====
+src/.build/
+src/web/node_modules/
+src/web/dist/
+src/web/tsconfig.tsbuildinfo
+src/mobile/node_modules/
+src/mobile/dist/
+src/server
+src/server.exe
+*.exe
+*.log
+*.tsbuildinfo
+
+# ===== 本地运行数据与密钥（勿入库） =====
+# config.yaml / config-*.yaml 含数据库口令，请复制 config.example.yaml 后自行填写
+src/data/
+src/config.yaml
+src/config-*.yaml
+!src/config.example.yaml
+src/config.zip
+db-backup/
+*.dump
+*.bak
+
+# ===== 需求资料中的临时文件与压缩包 =====
+req/*.zip
+req/*.7z
+req/~$*
+~$*
+
+# ===== IDE / 系统 =====
+.codebuddy/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

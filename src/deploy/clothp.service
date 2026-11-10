@@ -1,0 +1,24 @@
+# clothp 后端 systemd 服务单元（deploy.ps1 首次部署时自动安装）
+# 腾讯云短信等环境变量：取消注释并填写，或集中放到 /etc/default/clothp（去掉 EnvironmentFile 注释）
+[Unit]
+Description=clothp server (服装生产管理平台)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/clothp/server
+ExecStart=/opt/clothp/server/clothp-server -config /opt/clothp/server/config.yaml
+Restart=always
+RestartSec=3
+# EnvironmentFile=/etc/default/clothp
+# 腾讯云短信（配齐 SIGN_NAME/TEMPLATE_ID 后为真实发送，缺省为演示模式）
+# Environment=TENCENT_SECRET_ID=AKIDxxxx
+# Environment=TENCENT_SECRET_KEY=xxxx
+# Environment=TENCENT_SDKAppID=140000000
+# Environment=TENCENT_SMSAppKey=xxxx
+# Environment=TENCENT_SMS_SIGN_NAME=一智万商
+# Environment=TENCENT_SMS_TEMPLATE_ID=123456
+# Environment=TENCENT_SMS_REGION=ap-guangzhou
+
+[Install]
+WantedBy=multi-user.target
