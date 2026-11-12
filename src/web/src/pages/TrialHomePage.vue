@@ -214,8 +214,11 @@ async function lightFeature(f: TrialFeature) {
   }
 }
 
-/* ===== 开始体验：进入该体验厂的 MES 工作台（菜单按权限显示） ===== */
+/* ===== 开始体验：进入该体验厂的 MES 工作台（以命中账号的身份与权限进入） ===== */
 const entering = ref(false)
+/* 普通员工（如厂长）首次进入：需输入厂管理员提供的初始密码 */
+const trialPassword = ref('')
+const needTrialPassword = ref(false)
 const entryStatus = computed(() => session?.status || '')
 const registerLink = computed(() => {
   const phone = session?.phone && isValidPhone(session.phone) ? `&phone=${session.phone}` : ''
@@ -236,8 +239,11 @@ async function startExperience() {
       entry_token: session?.entryToken,
       ticket: session?.ticket,
       phone: session?.phone,
+      password: needTrialPassword.value ? trialPassword.value : undefined,
       tenant_code: tenantCode.value,
     })
+    needTrialPassword.value = false
+    trialPassword.value = ''
     localStorage.removeItem('clothp_platform_access_token')
     localStorage.setItem('clothp_access_token', result.access_token)
     if (result.refresh_token) localStorage.setItem('clothp_refresh_token', result.refresh_token)
@@ -267,6 +273,15 @@ async function startExperience() {
         break
       case 'TRIAL_EXPIRED':
         show('体验期已结束，请联系平台转为正式订阅后再进入工作台。')
+        break
+      case 'PASSWORD_REQUIRED':
+        /* 普通员工首次进入：在页面底部密码条补录厂管理员提供的初始密码后重试 */
+        needTrialPassword.value = true
+        show(error.message || '首次进入需输入厂管理员提供的初始密码')
+        break
+      case 'INVALID_PASSWORD':
+        needTrialPassword.value = true
+        show(error.message || '首次登录密码不正确，请向厂管理员确认后重试')
         break
       case 'INVALID_ENTRY_TOKEN':
       case 'INVALID_TICKET':
@@ -517,6 +532,18 @@ function openModule(name: string) {
         <small>{{ isPaid ? '进入一智算工作台' : '进入一智算工作台（体验）' }}</small>
       </span>
     </button>
+    <!-- 普通员工（如厂长）首次进入体验厂：补录厂管理员提供的初始密码后进入本人工作页面 -->
+    <div v-if="needTrialPassword" class="th-password-bar" role="dialog" aria-label="首次登录密码">
+      <p class="th-password-tip">该手机号是本厂员工账号（如厂长），首次进入需输入厂管理员提供的初始密码，之后只需手机验证码。</p>
+      <div class="th-password-row">
+        <input v-model="trialPassword" type="password" autocomplete="off" placeholder="初始密码（厂管理员提供）"
+          @keyup.enter="startExperience" />
+        <button type="button" class="th-btn solid" :disabled="entering" @click="startExperience">
+          {{ entering ? '正在进入…' : '进入工作台' }}
+        </button>
+        <button type="button" class="th-btn soft" @click="needTrialPassword = false; trialPassword = ''">取消</button>
+      </div>
+    </div>
     <BgAnimToggle />
   </div>
 </template>
@@ -640,6 +667,14 @@ function openModule(name: string) {
 .th-start-fab-text strong{font-size:17px;letter-spacing:.04em;white-space:nowrap}
 .th-start-fab-text small{font-size:11px;color:rgba(255,255,255,.82);white-space:nowrap}
 @keyframes thPulse{0%,100%{opacity:.55}50%{opacity:1}}
+/* 首次进入密码条：固定在页面底部中部 */
+.th-password-bar{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);z-index:95;width:min(560px,calc(100% - 32px));
+  background:rgba(255,255,255,.96);border:1px solid #c7dcff;border-radius:14px;padding:14px 16px;
+  box-shadow:0 18px 44px rgba(23,37,95,.20)}
+.th-password-tip{margin:0 0 10px;font-size:12.5px;line-height:1.7;color:#475569}
+.th-password-row{display:flex;gap:10px;align-items:center}
+.th-password-row input{flex:1;min-width:0;border:1px solid #cbd5e1;border-radius:10px;padding:10px 12px;font-size:14px;font-family:inherit;outline:none}
+.th-password-row input:focus{border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
 @media(max-width:600px){
   .th-start-fab{top:auto;bottom:18px;right:14px;transform:none;border-radius:14px;padding:12px 14px}
   .th-start-fab:hover{transform:none}

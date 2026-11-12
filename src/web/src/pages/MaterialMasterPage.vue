@@ -212,7 +212,7 @@ onMounted(load)
   <ModalDialog v-if="modal === 'material'" :title="editing ? '编辑物料' : '新增物料'" @close="modal = ''">
     <div v-if="error" class="notice error">{{ error }}</div>
     <div class="form-grid">
-      <div class="field"><label class="required">物料编码</label><input v-model.trim="materialForm.code" placeholder="如 FAB-001"></div>
+      <div class="field"><label>物料编码</label><input v-model.trim="materialForm.code" :placeholder="editing ? '' : '留空自动生成（如 WL-00001）'"></div>
       <div class="field"><label class="required">物料名称</label><input v-model.trim="materialForm.name"></div>
       <div class="field"><label>类别</label><FilterSelect v-model="materialForm.category" :options="categoryOptions" /></div>
       <div class="field"><label>规格</label><input v-model.trim="materialForm.specification" placeholder="如 150cm"></div>
@@ -220,31 +220,31 @@ onMounted(load)
       <div class="field"><label>安全库存</label><input v-model.trim="materialForm.safety_stock" inputmode="decimal" placeholder="0"></div>
       <div class="field"><label>默认供应商</label><FilterSelect v-model="materialForm.default_supplier_id" :options="supplierOptions" placeholder="可不选" /></div>
     </div>
-    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !materialForm.code || !materialForm.name || !materialForm.unit" @click="save('material')">保存</button></template>
+    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !materialForm.name || !materialForm.unit || (editing && !materialForm.code)" @click="save('material')">保存</button></template>
   </ModalDialog>
 
   <ModalDialog v-if="modal === 'supplier'" :title="editing ? '编辑供应商' : '新增供应商'" @close="modal = ''">
     <div v-if="error" class="notice error">{{ error }}</div>
     <div class="form-grid">
-      <div class="field"><label class="required">供应商编码</label><input v-model.trim="supplierForm.code" placeholder="如 SUP-001"></div>
+      <div class="field"><label>供应商编码</label><input v-model.trim="supplierForm.code" :placeholder="editing ? '' : '留空自动生成（如 GYS-00001）'"></div>
       <div class="field"><label class="required">供应商名称</label><input v-model.trim="supplierForm.name"></div>
       <div class="field"><label>联系人</label><input v-model.trim="supplierForm.contact_name"></div>
       <div class="field"><label>电话</label><input v-model.trim="supplierForm.phone"></div>
       <div class="field full"><label>地址</label><input v-model.trim="supplierForm.address"></div>
       <div class="field full"><label>备注</label><textarea v-model="supplierForm.remark" rows="2"></textarea></div>
     </div>
-    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !supplierForm.code || !supplierForm.name" @click="save('supplier')">保存</button></template>
+    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !supplierForm.name || (editing && !supplierForm.code)" @click="save('supplier')">保存</button></template>
   </ModalDialog>
 
   <ModalDialog v-if="modal === 'warehouse'" :title="editing ? '编辑仓库' : '新增仓库'" @close="modal = ''">
     <div v-if="error" class="notice error">{{ error }}</div>
     <div class="form-grid">
-      <div class="field"><label class="required">仓库编码</label><input v-model.trim="warehouseForm.code" placeholder="如 WH-RAW-01"></div>
+      <div class="field"><label>仓库编码</label><input v-model.trim="warehouseForm.code" :placeholder="editing ? '' : '留空自动生成（如 CK-00001）'"></div>
       <div class="field"><label class="required">仓库名称</label><input v-model.trim="warehouseForm.name"></div>
       <div class="field"><label>仓库类型</label><FilterSelect v-model="warehouseForm.warehouse_type" :options="warehouseTypeOptions" /></div>
       <div class="field"><label>负责人</label><FilterSelect v-model="warehouseForm.manager_employee_id" :options="employeeOptions" placeholder="可不选" /></div>
     </div>
-    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !warehouseForm.code || !warehouseForm.name" @click="save('warehouse')">保存</button></template>
+    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !warehouseForm.name || (editing && !warehouseForm.code)" @click="save('warehouse')">保存</button></template>
   </ModalDialog>
 
   <ModalDialog v-if="modal === 'issue'" title="新增生产领料" @close="modal = ''">

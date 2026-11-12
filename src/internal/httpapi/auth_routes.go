@@ -107,14 +107,14 @@ func (a *API) RegisterAuthRoutes() {
 	/* 当前登录手机号名下的制衣厂（员工手机号命中，或该厂注册联系电话命中）：门户顶层菜单据此切换制衣厂。 */
 	a.Handle("GET /api/v1/auth/my-factories", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		items := []map[string]any{}
-		phones, err := a.Auth.PrincipalPhones(r.Context(), p)
+		phones, err := a.Auth.PrincipalPhones(r.Context(), p, a.phoneCrypto())
 		if err != nil {
 			return err
 		}
 		var currentCode string
 		_ = a.DB.QueryRow(r.Context(), `SELECT code FROM tenant WHERE id=$1`, p.TenantID).Scan(&currentCode)
 		if len(phones) > 0 {
-			factories, err := a.Auth.PhoneTenants(r.Context(), phones)
+			factories, err := a.Auth.PhoneTenants(r.Context(), phones, a.phoneCrypto())
 			if err != nil {
 				return err
 			}
@@ -138,7 +138,7 @@ func (a *API) RegisterAuthRoutes() {
 		if tenantCode == "" {
 			return Error(http.StatusBadRequest, "INVALID_REQUEST", "缺少制衣厂编码")
 		}
-		result, err := a.Auth.SwitchTenant(r.Context(), p, tenantCode, input.NodeID)
+		result, err := a.Auth.SwitchTenant(r.Context(), p, tenantCode, input.NodeID, a.phoneCrypto())
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			return Error(http.StatusForbidden, "NO_ACCOUNT", "该手机号在此制衣厂没有绑定的账号")
 		}

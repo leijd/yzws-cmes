@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"clothp/internal/platform"
+	"clothp/internal/seccrypto"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -107,8 +108,8 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (map[string]any, 
 /** 手机号 + 制衣厂登录（短信验证通过后凭一次性 ticket 换取真实会话）：一个手机号可在多个厂各绑定员工账号。
  * 匹配规则：员工档案手机号（e.phone），或该厂「制衣厂信息」登记的注册联系电话（t.contact_phone，限厂管理员账号）。
  * 非管理员用户首次登录还须输入厂管理员提供的密码；成功登录后，以后只需手机验证码。 */
-func (s *Service) LoginByPhone(ctx context.Context, phone, tenantCode, password, nodeID string) (map[string]any, error) {
-	account, err := s.lookupPhoneAccount(ctx, []string{strings.TrimSpace(phone)}, tenantCode)
+func (s *Service) LoginByPhone(ctx context.Context, phone, tenantCode, password, nodeID string, crypto *seccrypto.Service) (map[string]any, error) {
+	account, err := s.lookupPhoneAccount(ctx, []string{strings.TrimSpace(phone)}, tenantCode, crypto)
 	if err != nil {
 		return nil, err
 	}
@@ -135,10 +136,34 @@ type phoneAccount struct {
 	isAdmin                                bool
 }
 
-/** 按手机号定位某制衣厂下可登录的账号：优先员工档案手机号，其次厂联系电话对应的管理员账号。 */
-func (s *Service) lookupPhoneAccount(ctx context.Context, phones []string, tenantCode string) (phoneAccount, error) {
+/** 按手机号定位某制衣厂下可登录的账号：优先员工档案手机号，其次厂联系电话对应的管理员账号。
+ * crypto 非 nil（密文库读模式）时手机号列已是 enc:v1 密文，必须按盲索引 phone_hash 匹配
+ * （哈希按租户密钥计算，先定位租户再算哈希）；crypto 为 nil（明文库模式）用明文等值比较。 */
+func (s *Service) lookupPhoneAccount(ctx context.Context, phones []string, tenantCode string, crypto *seccrypto.Service) (phoneAccount, error) {
 	var account phoneAccount
-	err := s.db.QueryRow(ctx, `SELECT t.id,u.id,COALESCE(u.employee_id,''),u.password_verifier,u.last_login_at,
+	/* 盲索引（phone_hash）为主，明文等值兜底兼容历史明文行（早期写入路径未加密/未建盲索引）；
+	 * 密文行等值比较自然不中，不会绕过盲索引。 */
+	match := `(e.phone = ANY($2::text[]) OR (t.contact_phone = ANY($2::text[]) AND EXISTS(
+			SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin')))`
+	matchOrder := `COALESCE(e.phone = ANY($2::text[]),FALSE)`
+	args := []any{tenantCode, phones, platform.Now()}
+	if crypto != nil {
+		var tenantID string
+		if err := s.db.QueryRow(ctx, `SELECT id FROM tenant WHERE code=$1`, strings.TrimSpace(tenantCode)).Scan(&tenantID); err != nil {
+			return phoneAccount{}, ErrInvalidCredentials
+		}
+		hashes, err := s.phoneHashes(ctx, crypto, tenantID, phones)
+		if err != nil || len(hashes) == 0 {
+			return phoneAccount{}, ErrInvalidCredentials
+		}
+		match = `(e.phone_hash = ANY($2::text[]) OR e.phone = ANY($4::text[]) OR ((t.contact_phone_hash = ANY($2::text[]) OR t.contact_phone = ANY($4::text[])) AND EXISTS(
+			SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin')))`
+		matchOrder = `COALESCE(e.phone_hash = ANY($2::text[]),FALSE)`
+		args = []any{tenantCode, hashes, platform.Now(), normalizedPhones(phones)}
+	}
+	err := s.db.QueryRow(ctx, fmt.Sprintf(`SELECT t.id,u.id,COALESCE(u.employee_id,''),u.password_verifier,u.last_login_at,
 		EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
 			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin')
 		FROM tenant t
@@ -146,19 +171,53 @@ func (s *Service) lookupPhoneAccount(ctx context.Context, phones []string, tenan
 		LEFT JOIN employee e ON e.tenant_id=t.id AND e.id=u.employee_id AND e.status='active'
 		LEFT JOIN tenant_subscription ts ON ts.tenant_id=t.id
 		WHERE t.code=$1 AND t.status='active'
-		AND (e.phone = ANY($2::text[]) OR (t.contact_phone = ANY($2::text[]) AND EXISTS(
-			SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
-			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin')))
+		AND %s
 		AND (t.customer_type<>'trial' OR (ts.status='trial' AND ts.trial_ends_at>$3))
-		ORDER BY COALESCE(e.phone = ANY($2::text[]),FALSE) DESC,
+		ORDER BY %s DESC,
 		EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
 			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin') DESC,
-		u.created_at ASC LIMIT 1`, tenantCode, phones, platform.Now()).
+		u.created_at ASC LIMIT 1`, match, matchOrder), args...).
 		Scan(&account.tenantID, &account.userID, &account.employeeID, &account.verifier, &account.lastLogin, &account.isAdmin)
 	if err != nil {
 		return phoneAccount{}, ErrInvalidCredentials
 	}
 	return account, nil
+}
+
+/* normalizedPhones 去空格去重的明文手机号列表（密文库明文兜底比较用）。 */
+func normalizedPhones(phones []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, p := range phones {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+/* phoneHashes 按租户密钥计算手机号在 employee.phone / tenant.contact_phone 两个域的盲索引值。 */
+func (s *Service) phoneHashes(ctx context.Context, crypto *seccrypto.Service, tenantID string, phones []string) ([]string, error) {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, phone := range phones {
+		phone = strings.TrimSpace(phone)
+		if phone == "" || seen[phone] {
+			continue
+		}
+		seen[phone] = true
+		for _, domain := range []string{"employee.phone", "tenant.contact_phone"} {
+			h, err := crypto.PhoneHash(ctx, tenantID, domain, phone)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, h)
+		}
+	}
+	return out, nil
 }
 
 /* PhoneTenant 手机号可进入的制衣厂（员工档案手机号或该厂注册联系电话）。 */
@@ -171,10 +230,15 @@ type PhoneTenant struct {
 }
 
 /** 按手机号列出可进入的收费制衣厂（已审批）：员工手机号命中，或注册联系电话命中且账号为厂管理员。
- * 同一厂只返回一条，优先员工手机号匹配的账号，其次厂管理员账号；厂按注册时间倒序。 */
-func (s *Service) PhoneTenants(ctx context.Context, phones []string) ([]PhoneTenant, error) {
+ * 同一厂只返回一条，优先员工手机号匹配的账号，其次厂管理员账号；厂按注册时间倒序。
+ * crypto 非 nil（密文库读模式）时按盲索引 phone_hash 逐候选厂匹配（哈希按租户密钥，
+ * 无法单条 SQL；租户数量级小、仅在登录/切换厂时触发）。 */
+func (s *Service) PhoneTenants(ctx context.Context, phones []string, crypto *seccrypto.Service) ([]PhoneTenant, error) {
 	if len(phones) == 0 {
 		return []PhoneTenant{}, nil
+	}
+	if crypto != nil {
+		return s.phoneTenantsHashed(ctx, phones, crypto)
 	}
 	rows, err := s.db.Query(ctx, `SELECT t.code,t.name,t.short_code,u.login_name,COALESCE(e.name,'')
 		FROM tenant t
@@ -208,6 +272,98 @@ func (s *Service) PhoneTenants(ctx context.Context, phones []string) ([]PhoneTen
 	return items, rows.Err()
 }
 
+/* phoneTenantsHashed 盲索引模式的收费厂列表：候选厂 × 手机号逐厂计算哈希匹配 phone_hash。 */
+func (s *Service) phoneTenantsHashed(ctx context.Context, phones []string, crypto *seccrypto.Service) ([]PhoneTenant, error) {
+	candRows, err := s.db.Query(ctx, `SELECT id,code,name,COALESCE(short_code,'') FROM tenant
+		WHERE status='active' AND registration_status='approved' AND customer_type<>'trial'
+		ORDER BY registered_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	type cand struct{ id, code, name, short string }
+	var cands []cand
+	for candRows.Next() {
+		var c cand
+		if err := candRows.Scan(&c.id, &c.code, &c.name, &c.short); err != nil {
+			candRows.Close()
+			return nil, err
+		}
+		cands = append(cands, c)
+	}
+	candRows.Close()
+	if err := candRows.Err(); err != nil {
+		return nil, err
+	}
+	hitIDs := []string{}
+	allHashes := []string{}
+	plainPhones := normalizedPhones(phones)
+	for _, c := range cands {
+		empSet := []string{}
+		contactSet := []string{}
+		for _, phone := range phones {
+			phone = strings.TrimSpace(phone)
+			if phone == "" {
+				continue
+			}
+			if h, err := crypto.PhoneHash(ctx, c.id, "employee.phone", phone); err == nil {
+				empSet = append(empSet, h)
+				allHashes = append(allHashes, h)
+			}
+			if h, err := crypto.PhoneHash(ctx, c.id, "tenant.contact_phone", phone); err == nil {
+				contactSet = append(contactSet, h)
+				allHashes = append(allHashes, h)
+			}
+		}
+		if len(empSet) == 0 && len(contactSet) == 0 {
+			continue
+		}
+		var empHit, contactHit bool
+		if len(empSet) > 0 {
+			_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM employee WHERE tenant_id=$1 AND status='active' AND (phone_hash=ANY($2::text[]) OR phone=ANY($3::text[])))`, c.id, empSet, plainPhones).Scan(&empHit)
+		}
+		if !empHit && len(contactSet) > 0 {
+			_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1 AND (contact_phone_hash=ANY($2::text[]) OR contact_phone=ANY($3::text[])))`, c.id, contactSet, plainPhones).Scan(&contactHit)
+		}
+		if empHit || contactHit {
+			hitIDs = append(hitIDs, c.id)
+		}
+	}
+	if len(hitIDs) == 0 {
+		return []PhoneTenant{}, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT t.code,t.name,t.short_code,u.login_name,COALESCE(e.name,'')
+		FROM tenant t
+		JOIN user_account u ON u.tenant_id=t.id AND u.status='active'
+		LEFT JOIN employee e ON e.tenant_id=t.id AND e.id=u.employee_id AND e.status='active'
+		WHERE t.id=ANY($1::text[])
+		AND (e.phone_hash=ANY($2::text[]) OR e.phone=ANY($3::text[]) OR ((t.contact_phone_hash=ANY($2::text[]) OR t.contact_phone=ANY($3::text[])) AND EXISTS(
+			SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin')))
+		ORDER BY t.registered_at DESC,
+		COALESCE(e.phone_hash=ANY($2::text[]) OR e.phone=ANY($3::text[]),FALSE) DESC,
+		EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+			WHERE ur.tenant_id=t.id AND ur.user_id=u.id AND r.code='tenant_admin') DESC,
+		u.created_at ASC`, hitIDs, allHashes, plainPhones)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]PhoneTenant, 0, 4)
+	seen := map[string]bool{}
+	for rows.Next() {
+		var item PhoneTenant
+		if err := rows.Scan(&item.Code, &item.Name, &item.ShortCode, &item.LoginName, &item.UserName); err != nil {
+			return nil, err
+		}
+		if seen[item.Code] {
+			continue
+		}
+		seen[item.Code] = true
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 /** 当前会话在登录时验证过的手机号（短信/微信登录时写入，切换制衣厂后仍沿用）。 */
 func (s *Service) sessionLoginPhone(ctx context.Context, p Principal) string {
 	var phone string
@@ -217,8 +373,9 @@ func (s *Service) sessionLoginPhone(ctx context.Context, p Principal) string {
 }
 
 /** 当前用户可用于识别名下制衣厂的手机号：优先会话验证过的登录手机号，其次员工手机号与本厂注册联系电话。
- * 登录手机号在切换制衣厂后保持不变，保证同一手机号名下的多个厂可以互相切换。 */
-func (s *Service) PrincipalPhones(ctx context.Context, p Principal) ([]string, error) {
+ * 登录手机号在切换制衣厂后保持不变，保证同一手机号名下的多个厂可以互相切换。
+ * crypto 非 nil（密文库读模式）时读出的手机号列是 enc:v1 密文，先解密再返回。 */
+func (s *Service) PrincipalPhones(ctx context.Context, p Principal, crypto *seccrypto.Service) ([]string, error) {
 	if phone := s.sessionLoginPhone(ctx, p); phone != "" {
 		return []string{phone}, nil
 	}
@@ -230,6 +387,22 @@ func (s *Service) PrincipalPhones(ctx context.Context, p Principal) ([]string, e
 		WHERE t.id=$1`, p.TenantID, p.UserID).Scan(&employeePhone, &contactPhone)
 	if err != nil {
 		return nil, ErrInvalidCredentials
+	}
+	if crypto != nil {
+		if seccrypto.IsEncrypted(employeePhone) && p.EmployeeID != "" {
+			if plain, err := crypto.DecryptField(ctx, p.TenantID, "employee", p.EmployeeID, "phone", employeePhone); err == nil {
+				employeePhone = plain
+			} else {
+				employeePhone = ""
+			}
+		}
+		if seccrypto.IsEncrypted(contactPhone) {
+			if plain, err := crypto.DecryptField(ctx, p.TenantID, "tenant", p.TenantID, "contact_phone", contactPhone); err == nil {
+				contactPhone = plain
+			} else {
+				contactPhone = ""
+			}
+		}
 	}
 	phones := make([]string, 0, 2)
 	for _, phone := range []string{employeePhone, contactPhone} {
@@ -244,12 +417,12 @@ func (s *Service) PrincipalPhones(ctx context.Context, p Principal) ([]string, e
 
 /** 已登录用户切换到名下另一家制衣厂门户：手机号须登记在该厂（员工手机号或注册联系电话）。
  * 手机号在短信登录时已验证，切换门户不再重复要求首次登录密码。 */
-func (s *Service) SwitchTenant(ctx context.Context, p Principal, tenantCode, nodeID string) (map[string]any, error) {
-	phones, err := s.PrincipalPhones(ctx, p)
+func (s *Service) SwitchTenant(ctx context.Context, p Principal, tenantCode, nodeID string, crypto *seccrypto.Service) (map[string]any, error) {
+	phones, err := s.PrincipalPhones(ctx, p, crypto)
 	if err != nil || len(phones) == 0 {
 		return nil, ErrInvalidCredentials
 	}
-	account, err := s.lookupPhoneAccount(ctx, phones, tenantCode)
+	account, err := s.lookupPhoneAccount(ctx, phones, tenantCode, crypto)
 	if err != nil {
 		return nil, err
 	}
@@ -415,6 +588,20 @@ func (s *Service) Logout(ctx context.Context, p Principal) error {
 /* HashPassword 生成 Argon2id 密码验证器（供人员建档/密码重置使用；密码明文不落库）。 */
 func HashPassword(password string) (string, error) {
 	return hashPassword(password)
+}
+
+/* VerifyPassword 校验指定用户的当前登录密码（敏感信息查看等二次确认场景）。
+ * 用户不存在与密码错误都返回 false，防用户枚举。 */
+func (s *Service) VerifyPassword(ctx context.Context, tenantID, userID, password string) (bool, error) {
+	var verifier string
+	err := s.db.QueryRow(ctx, "SELECT password_verifier FROM user_account WHERE tenant_id=$1 AND id=$2", tenantID, userID).Scan(&verifier)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return verifyPassword(verifier, password), nil
 }
 
 func hashPassword(password string) (string, error) {

@@ -210,8 +210,8 @@ onMounted(() => { void load(); void loadWorkshops(); void loadManagers() })
         </select>
       </div>
       <div v-if="!editing" class="field">
-        <label class="required">产线编码</label>
-        <input v-model.trim="form.code" maxlength="32">
+        <label>产线编码</label>
+        <input v-model.trim="form.code" maxlength="32" placeholder="留空自动生成（如 CX-00001）">
         <small v-if="codeError" class="field-error">{{ codeError }}</small>
       </div>
       <div class="field"><label class="required">产线名称</label><input v-model.trim="form.name" maxlength="60"></div>
@@ -240,7 +240,7 @@ onMounted(() => { void load(); void loadWorkshops(); void loadManagers() })
     </div>
     <div class="form-actions">
       <button class="button secondary" @click="modalOpen = false">取消</button>
-      <button class="button" :disabled="saving || !form.name || (!editing && (!form.code || !form.workshop_id))" @click="save">
+      <button class="button" :disabled="saving || !form.name || (!editing && !form.workshop_id)" @click="save">
         {{ saving ? '保存中…' : '保存' }}
       </button>
     </div>

@@ -9,11 +9,21 @@ import (
 	"strings"
 
 	"clothp/internal/auth"
+	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
+	"clothp/internal/seccrypto"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
+
+/* firstHandle 取双写事务的第一个可用库句柄（secure 优先）做只读校验。 */
+func firstHandle(tx *dualwrite.Tx) pgx.Tx {
+	if tx.Secure() != nil {
+		return tx.Secure()
+	}
+	return tx.Plain()
+}
 
 func registerIdentity(api *httpapi.API) {
 	api.Handle("GET /api/v1/permissions", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
@@ -233,32 +243,59 @@ func registerIdentity(api *httpapi.API) {
 		if in.EmployeeNo == "" || in.Name == "" || len(in.Password) < 12 {
 			return httpapi.Error(400, "VALIDATION_ERROR", "工号、姓名和至少12位密码必填")
 		}
-		tx, err := api.DB.Begin(r.Context())
+		if api.Writer == nil || api.Store == nil {
+			return httpapi.Error(500, "DUALWRITE_REQUIRED", "双写存储未配置，无法创建员工账号")
+		}
+		/* 敏感列加密与盲索引前置到事务外（HSM/密钥读取不占事务持锁时间） */
+		employeeID := platform.ID()
+		var phone, securePhone *string
+		phoneHash := ""
+		if in.Phone != nil && strings.TrimSpace(*in.Phone) != "" {
+			normalized := seccrypto.NormalizePhone(*in.Phone)
+			phone = &normalized
+			if api.Crypto != nil && api.Store.Secure != nil {
+				h, err := api.Crypto.PhoneHash(r.Context(), p.TenantID, "employee.phone", normalized)
+				if err != nil {
+					return err
+				}
+				phoneHash = h
+				enc, err := api.Crypto.EncryptField(r.Context(), p.TenantID, "employee", employeeID, "phone", []byte(normalized))
+				if err != nil {
+					return err
+				}
+				securePhone = &enc
+			}
+		}
+		tx, err := api.Writer.Begin(r.Context(), p.TenantID)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback(r.Context())
 		var employeeExists bool
-		if err := tx.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM employee WHERE tenant_id=$1 AND employee_no=$2)", p.TenantID, in.EmployeeNo).Scan(&employeeExists); err != nil {
+		if err := api.DB.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM employee WHERE tenant_id=$1 AND employee_no=$2)", p.TenantID, in.EmployeeNo).Scan(&employeeExists); err != nil {
 			return err
 		}
 		if employeeExists {
 			return httpapi.Error(409, "DUPLICATE_EMPLOYEE", "员工工号已存在")
 		}
-		if err := validateRoleIDs(r.Context(), tx, p.TenantID, in.RoleIDs); err != nil {
+		if err := validateRoleIDs(r.Context(), firstHandle(tx), p.TenantID, in.RoleIDs); err != nil {
 			return err
 		}
-		if err := checkUserQuota(r.Context(), tx, p.TenantID); err != nil {
+		if err := checkUserQuota(r.Context(), firstHandle(tx), p.TenantID); err != nil {
 			return err
 		}
-		id, employeeID, err := api.Auth.CreateTenantUser(r.Context(), tx, p.TenantID, in.LoginName, in.Password, in.RoleIDs, auth.TenantUserEmployee{EmployeeNo: in.EmployeeNo, Name: in.Name, Gender: in.Gender, BirthDate: in.BirthDate, Phone: in.Phone, OrgUnitID: in.OrgUnitID, Position: in.Position})
+		id, employeeID, err := api.Auth.CreateTenantUser(r.Context(), tx, p.TenantID, in.LoginName, in.Password, in.RoleIDs, auth.TenantUserEmployee{EmployeeID: employeeID, EmployeeNo: in.EmployeeNo, Name: in.Name, Gender: in.Gender, BirthDate: in.BirthDate, Phone: phone, SecurePhone: securePhone, PhoneHash: phoneHash, OrgUnitID: in.OrgUnitID, Position: in.Position})
 		if isUniqueViolation(err) {
 			return httpapi.Error(409, "DUPLICATE_USER", "登录名已存在")
 		}
 		if err != nil {
 			return err
 		}
-		if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "create_user", "user_account", id, nil, map[string]any{"employee_id": employeeID, "login_name": in.LoginName}, ""); err != nil {
+		auditTx := tx.Secure()
+		if auditTx == nil {
+			auditTx = tx.Plain()
+		}
+		if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "create_user", "user_account", id, nil, map[string]any{"employee_id": employeeID, "login_name": in.LoginName}, ""); err != nil {
 			return err
 		}
 		if err := tx.Commit(r.Context()); err != nil {
@@ -382,20 +419,24 @@ func registerIdentity(api *httpapi.API) {
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
-		tx, err := api.DB.Begin(r.Context())
+		if api.Writer == nil || api.Store == nil {
+			return httpapi.Error(500, "DUALWRITE_REQUIRED", "双写存储未配置，无法开通账号")
+		}
+		tx, err := api.Writer.Begin(r.Context(), p.TenantID)
 		if err != nil {
 			return err
 		}
 		defer tx.Rollback(r.Context())
+		readTx := firstHandle(tx)
 		var employeeNo string
-		if err := tx.QueryRow(r.Context(), "SELECT employee_no FROM employee WHERE tenant_id=$1 AND id=$2 FOR UPDATE", p.TenantID, r.PathValue("id")).Scan(&employeeNo); err != nil {
+		if err := readTx.QueryRow(r.Context(), "SELECT employee_no FROM employee WHERE tenant_id=$1 AND id=$2 FOR UPDATE", p.TenantID, r.PathValue("id")).Scan(&employeeNo); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpapi.Error(404, "NOT_FOUND", "员工档案不存在")
 			}
 			return err
 		}
 		var existing string
-		err = tx.QueryRow(r.Context(), "SELECT id FROM user_account WHERE tenant_id=$1 AND employee_id=$2", p.TenantID, r.PathValue("id")).Scan(&existing)
+		err = readTx.QueryRow(r.Context(), "SELECT id FROM user_account WHERE tenant_id=$1 AND employee_id=$2", p.TenantID, r.PathValue("id")).Scan(&existing)
 		if err == nil {
 			return httpapi.Error(409, "ACCOUNT_EXISTS", "该员工已开通账号")
 		}
@@ -416,10 +457,13 @@ func registerIdentity(api *httpapi.API) {
 		if len(password) < 12 {
 			return httpapi.Error(400, "WEAK_PASSWORD", "初始密码至少 12 位")
 		}
-		if err := validateRoleIDs(r.Context(), tx, p.TenantID, in.RoleIDs); err != nil {
+		if api.Writer == nil || api.Store == nil {
+			return httpapi.Error(500, "DUALWRITE_REQUIRED", "双写存储未配置，无法开通账号")
+		}
+		if err := validateRoleIDs(r.Context(), firstHandle(tx), p.TenantID, in.RoleIDs); err != nil {
 			return err
 		}
-		if err := checkUserQuota(r.Context(), tx, p.TenantID); err != nil {
+		if err := checkUserQuota(r.Context(), firstHandle(tx), p.TenantID); err != nil {
 			return err
 		}
 		id, err := api.Auth.CreateEmployeeAccount(r.Context(), tx, p.TenantID, r.PathValue("id"), loginName, password, p.UserID, in.RoleIDs)
@@ -429,7 +473,11 @@ func registerIdentity(api *httpapi.API) {
 		if err != nil {
 			return err
 		}
-		if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "create_account", "user_account", id, nil, map[string]any{"employee_id": r.PathValue("id"), "login_name": loginName, "auto_password": generated}, ""); err != nil {
+		auditTx := tx.Secure()
+		if auditTx == nil {
+			auditTx = tx.Plain()
+		}
+		if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "create_account", "user_account", id, nil, map[string]any{"employee_id": r.PathValue("id"), "login_name": loginName, "auto_password": generated}, ""); err != nil {
 			return err
 		}
 		if err := tx.Commit(r.Context()); err != nil {

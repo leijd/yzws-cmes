@@ -13,6 +13,30 @@
 
 ---
 
+## 0. 特别说明（2026-11-12 增补，作为长期设计原则）
+
+以下两条为全系统强制设计原则，后续所有设计与代码编写必须遵守；既有模块在新需求触及或出现故障时应按本原则改造。
+
+### 0.1 租户事务隔离原则
+
+每一个租户的事务必须隔离在该租户的业务和数据范围内，不得影响其他租户的业务和数据访问与操作：
+
+1. **禁止跨租户共享锁**：任何事务不得锁定多租户共享行/表（如全局计数器行、全表锁、无条件全表 UPDATE）；序号、短码、工号等分配必须按租户维度进行，跨租户只读探测不得升级为写锁。
+2. **禁止长事务**：多步写入一律拆分为可独立提交的小事务（Saga），配合 `lock_timeout`（当前 5s）与请求级超时（当前 60s）兜底；任何锁等待必须快速失败，严禁无限阻塞——一个租户撞锁时，故障半径限于该租户该请求，不得拖垮连接池或波及其他租户。
+3. **连接资源隔离**：连接池获取、事务持有、后台任务（恢复/对账/备份）均不得因单一租户的异常而长期占用共享资源；备份/导出使用 MVCC 快照（REPEATABLE READ 只读），对在线业务零阻塞。
+4. **回滚以日志为准**：小事务失败按逆序补偿，补偿现场持久化（`dual_write_saga`/`dual_write_saga_step`），进程崩溃由恢复循环继续补偿或标记人工核对，绝不静默留下半成品数据。
+
+### 0.2 租户事务锁定处置与快照恢复原则
+
+租户因事务锁住（锁等待超限、悬挂事务、补偿失败等）时，按以下处置链路设计：
+
+1. **锁定日志**：锁冲突、锁等待超时（SQLSTATE 55P03）、悬挂 2PC 事务、Saga 补偿失败等事件必须结构化记录（租户、聚合、事务/ Saga ID、阻塞源、发生时刻），可供检索定位。
+2. **问题反馈页面（规划新建，含紧急程序）**：平台管理员通过该页面按租户/时间/事务查找锁定事件，查看阻塞链与被阻塞语句，可执行**强制解锁**（终止阻塞源 backend / 处置悬挂 prepared 事务）；页面提供紧急程序入口，操作全程审计。
+3. **强制暂停与快照恢复**：无论解锁成功与否，平台管理员可**强制暂停该租户全部业务**（租户级熔断：拒绝该租户新的写请求并撤销活动会话），将该租户数据**恢复到执行事务前的快照点**（以备份/快照为准的定点恢复，恢复前自动留存现状备份），恢复完成核对无误后解除暂停继续服务。
+4. **状态可观测**：锁定、解锁、暂停、恢复各阶段状态与结果对平台管理员可见，失败原因如实呈现，不允许以"成功"掩盖部分失败。
+
+---
+
 ## 1. 需求解释与总体规则
 
 ### 1.1 业务对象
@@ -116,6 +140,10 @@
 4. API 返回领域明文对象。密文格式、DEK、私钥、KMS 引用、HMAC 密钥不得返回前端。
 5. 密文库只改变持久化表示，不改变业务 API 契约；读取后由服务端解密、按权限脱敏。
 6. 禁止因密文库查询失败而自动改读明文库。读库切换只能由受控配置变更完成并记录审计，防止静默降级和绕过权限。
+7. **明文库（plain）是对账库：业务运行中禁止读取明文库进行对比或执行其他业务操作。** 业务读一律走 `Store.ReadPool()`（默认 secure）；业务写经双写事务同时落两库。仅以下两类例外：
+   - 管理员数据对照/转换工具：`datatool`（convert / repair-phone-hash / verify / export）、`dbprobe`、双写对账补偿（catchup/recover），及平台受控的"手机号归属核实"（`/platform/phone-lookup`，限流+全量平台审计+不返回 PII 明文）；
+   - 测试程序（含端到端验收脚本）可对两库对账。
+   例外工具必须只读不写（除其转换/修复职责内的目标库写入），不得将明文库结果用于在线业务判断；其读取与输出均不进入业务缓存或业务事务。
 
 ### 2.3 技术基线、认证与迁移机制
 
@@ -140,7 +168,7 @@
 
 | 数据库 | 角色 | 敏感字段 | 非敏感字段 |
 |---|---|---|---|
-| `yzws-v1` | 明文数据库（plain） | 按业务类型保存明文 | 正常保存 |
+| `yzws-v1` | 明文数据库（plain）——**对账库**，业务运行中不读取（例外见 2.2 第 7 条） | 按业务类型保存明文 | 正常保存 |
 | `yzws-v1-sec` | 密文数据库（secure），默认读取来源 | 保存带版本密文信封；手机号等另存 HMAC 盲索引 | 与明文库相同 |
 
 - 两库保存相同的租户、业务主键、公共列和记录版本，以便对账与互转。
@@ -181,13 +209,24 @@ data_store:
 crypto:
   envelope_version: v1
   data_algorithm: AES-256-GCM
-  wrap_algorithm: RSA-3072-OAEP-SHA256
-  kms_provider: softhsm2     # 测试环境固定使用 SoftHSM2；cloud_kms 为预留
+  wrap_algorithm: RSA-PKCS1v15        # 测试环境取值（原因见 3.2.2：SoftHSM2 Botan2 后端 OAEP 解密不可用）；生产 OpenSSL 后端/云 KMS 应切回 RSA-OAEP-SHA256
+  kms_provider: softhsm2     # 测试环境 SoftHSM2；cloud_kms 为预留
   softhsm2:
-    pkcs11_module_env: CLOTHP_SOFTHSM2_MODULE
-    token_label: yzws-mes-test
-    pin_env: CLOTHP_SOFTHSM2_PIN
-    key_label_prefix: yzws-tenant-
+    # 远程模式（server_url 非空即生效）：主服务经 HTTP 调用多租户 hsm-sign-service 完成包装/解包，
+    # 无需本机 PKCS#11 库，Windows 开发机经 SSH 隧道（http://127.0.0.1:8443）即可使用。
+    server_url: "http://127.0.0.1:8443"   # 也可用环境变量 CLOTHP_HSM_SERVER_URL 覆盖
+    api_key_env: CLOTHP_HSM_API_KEY       # X-API-Key 只从环境注入
+    ca_cert_file: ""                      # HTTPS 自签证书时指向服务端 CA 证书
+    timeout_ms: 10000
+    # 租户密钥自动开通（可选）：新租户首次用加密时若服务端未开通（404），自动经 SSH 执行
+    # add-tenant.sh（密钥生成只允许运维脚本，HTTP 无此接口）；留空则未开通租户报 KEY_UNAVAILABLE。
+    ssh_target: ""                        # 如 root@服务器IP（需免密）；生产同机可用 root@127.0.0.1；也可 CLOTHP_HSM_SSH_TARGET 覆盖
+    # provision_script: /app/HSM/softhsm2/scripts/add-tenant.sh   # 默认值
+    token_label: yzws-mes-test            # 落库 KeyWrapRef 的 token 标识
+    key_label_prefix: yzws-tenant-        # 本地 PKCS#11 模式使用
+    # 本地 PKCS#11 模式备用字段（server_url 留空时生效，需 -tags softhsm2 构建的 Linux 环境）：
+    # pkcs11_module_env: CLOTHP_SOFTHSM2_MODULE
+    # pin_env: CLOTHP_SOFTHSM2_PIN
   cloud_kms:                 # 预留，不在测试环境启用
     provider: ""
     region: ""
@@ -199,9 +238,10 @@ crypto:
 - `both` 模式必须能连接两库，且两库迁移版本、字段映射版本兼容，否则拒绝提供业务写服务。
 - `plain_only + read_source=secure` 或 `secure_only + read_source=plain` 会产生旧数据读取；只有 `allow_degraded_read=true` 才允许启动，并持续告警。
 - 单写模式不影响所选库自身事务完整性；恢复 `both` 前先执行 3.8 的增量补偿。
-- `kms_provider=softhsm2` 时必须能够加载 PKCS#11 模块、定位 token、登录会话并执行一次包装/解包自检；PIN 只从环境变量或安全注入读取。
-- SoftHSM2 不可用不得自动回退本地明文私钥或 JWTSecret 派生密钥；涉及密文的写入与解密读取应返回 `KEY_UNAVAILABLE`。
-- 配置切换写入平台审计，记录操作者、旧值、新值、时间和原因，不记录密码、PIN 或密钥。
+- `kms_provider=softhsm2` 远程模式必须配置 `api_key_env`；启动时执行一次 `/healthz` 自检，不可用仅告警不拒绝启动，涉及密文的读写返回 `KEY_UNAVAILABLE`。本地 PKCS#11 模式必须能够加载模块、定位 token、登录会话并执行一次包装/解包自检。
+- SoftHSM2/HSM 服务不可用不得自动回退本地明文私钥或 JWTSecret 派生密钥；涉及密文的写入与解密读取应返回 `KEY_UNAVAILABLE`。
+- HSM 服务所有接口要求 `X-API-Key`；网络抖动/5xx 自动重试（最多 3 次指数退避），4xx 立即失败。
+- 配置切换写入平台审计，记录操作者、旧值、新值、时间和原因，不记录密码、PIN、API Key 或密钥。
 
 #### 3.2.1 SoftHSM2 与云端 KMS 适配边界
 
@@ -221,7 +261,26 @@ crypto:
 | 生产预留 | cloud_kms | 云端 KMS 内，不可导出 | 通过同一 KeyProvider 接入，数据库只保存云 key_id/版本引用；厂商、区域和凭据后续配置 |
 | 旧数据迁移 | local 兼容适配器 | 旧包装私钥/主密钥的受控存储 | 仅用于读取既有数据并迁移，不再用于新密钥 |
 
-SoftHSM2 的 token_label+key_label+key_version 组成 `key_wrap_ref`；云端使用 provider+key_id+version。数据库不保存 PKCS#11 PIN、云 Secret 或明文私钥。SoftHSM2 token 丢失与云 KMS 密钥被提前删除都会导致历史密文无法恢复，因此离线备份与密钥灾难恢复必须分别演练。
+SoftHSM2 的 token_label+key_label+key_version 组成 `key_wrap_ref`；云端使用 provider+key_id+version。远程多租户模式下 `key_wrap_ref` 形如 `softhsm2:<token_label>:<tenantID>:<version>`，第三段为服务端租户路由 ID。数据库不保存 PKCS#11 PIN、API Key、云 Secret 或明文私钥。SoftHSM2 token 丢失与云 KMS 密钥被提前删除都会导致历史密文无法恢复，因此离线备份与密钥灾难恢复必须分别演练。
+
+#### 3.2.2 远程多租户 HSM 服务形态（hsm-sign-service，测试环境落地口径）
+
+密钥生成/删除是最高危操作，**不进 HTTP 接口**：服务端只暴露签名与包装类接口，租户密钥由运维脚本在 HSM 容器内开通：
+
+| 接口 | 说明 |
+|---|---|
+| `POST /sign` | `X-Tenant-ID` 路由；请求体原始字节做 SHA256-RSA 签名，返回 base64（`X-Tenant-ID` 缺省走默认密钥） |
+| `GET /pubkey?tenant=<id>` | 返回租户公钥 PEM（包装在调用方本地完成，公钥公开） |
+| `GET /tenants` | 注册表（运维用） |
+| `POST /wrap` / `POST /unwrap` | `X-Tenant-ID` 路由，RSA 包装/解包（DEK/盲索引密钥解包） |
+| `GET /healthz` | 健康检查 |
+
+- 租户→密钥映射为服务端 `tenants.json` 注册表，按 mtime 热加载（原地重写保持 inode，bind mount 单文件场景禁止 `mv` 替换）；密钥句柄进程内缓存。
+- 开通/删除租户：`scripts/add-tenant.sh <tenantID>` / `del-tenant.sh <tenantID>`（幂等；CKA_ID 取租户 ID 逐字节 hex 编码，兼容任意字符集；`del-tenant.sh` 原地重写注册表）。脚本执行后循环验证 `GET /pubkey?tenant=` 可取才算完成（SoftHSM 新对象对 sign-svc 进程可见有秒级延迟）；仍失败时重启 sign-svc 刷新对象缓存。
+- 主服务侧 `GenerateTenantKeyPair` = 探测该租户密钥是否已开通（`GET /pubkey?tenant=`）；**Wrap（包装 DEK）在调用方本地用租户公钥完成**（公钥公开，密钥材料不经网络）；Unwrap（解包）走服务端 `/unwrap` 私钥解密。
+- 配置了 `ssh_target` 且探测返回 404 时，自动经 SSH 执行 add-tenant.sh 并轮询生效（生产同机 `root@127.0.0.1` 亦可）。
+- **包装算法**：Debian SoftHSM 2.6.1 为 Botan2 后端，其 `CKM_RSA_PKCS_OAEP` 解密 DecryptInit 恒报 `CKR_ARGUMENTS_BAD`（与参数编码无关，实测全变体）；`CKM_RSA_PKCS`（v1.5）正常。测试环境两端统一用 RSA PKCS#1 v1.5 包装，v1.5 的 padding-oracle 风险由 API Key + 内网/SSH 隧道缓解；生产切换 OpenSSL 后端 SoftHSM 或云 KMS 时，`wrap_algorithm` 改回 `RSA-OAEP-SHA256` 并同步两端机制。
+- 部署：sign-svc 与 SoftHSM 同机 compose（后端与 HSM 同机时 `server_url=http://hsm-sign:8443`）；Windows 开发机经 `ssh -N -L 8443:127.0.0.1:8443` 隧道访问 `http://127.0.0.1:8443`。审计只记哈希与长度，绝不记密钥材料。
 
 ### 3.3 双写事务与一致性
 
@@ -286,6 +345,7 @@ AES-GCM 每次密文不同，不能用于手机号等值登录。新增 `employe
 4. 登录、唯一性校验、多厂手机号匹配只查 `phone_hash`，不对密文解密扫描。
 5. 建立 `(tenant_id,phone_hash)` 部分唯一索引。工号同样只在租户内唯一。
 6. 不使用无密钥 SHA-256 代替 HMAC，避免对低熵手机号进行字典枚举。
+7. `phone_hash` 按租户密钥 HMAC，跨租户无法用单条 SQL 匹配；登录选厂（`/auth/trial/verify`、`/auth/my-factories`）、短信进厂（`/auth/phone-login`）、切换厂（`/auth/switch-tenant`）与体验厂进入（`LoginTrialAdmin`）在密文库读模式下按"候选租户 × 手机号逐厂计算哈希"匹配（租户数量级小、仅登录时触发）；指定厂内的账号定位直接按本厂哈希查 `phone_hash`。明文库读模式（`read_source=plain`）仍用明文等值比较。
 
 身份证、银行卡等本版不提供等值查询，不建立盲索引；列表仅脱敏展示。
 
@@ -325,6 +385,8 @@ mes-datatool catch-up --from plain --to secure --tenant <tenant-id>
 - 完成标准为：行数一致、逐行版本一致、非敏感字段一致、敏感字段解密后一致、盲索引一致、外键/唯一约束通过。
 - 日志只记录表、主键、字段名、错误分类，不记录明文、密文、密码、DEK 或私钥。
 - 从单写恢复 `both` 时先暂停该租户写流量或使用租户级写栅栏，执行 catch-up + verify，再开放双写；否则无法保证转换期间新写不丢失。
+
+后台补偿（dualwrite catchup）逐表结构感知：按 `information_schema`/`pg_index` 探测各表真实列与主键/唯一键，无 `version` 列的表用 `updated_at` 比较新旧、两者都没有的表只补缺失行；冲突键不一定是 `(tenant_id,id)`（如 `inbox_event` 主键为 `(tenant_id,event_id)`），`ON CONFLICT` 与更新守卫按实际约束构造。密文库独有行只告警不自动删除。
 
 ### 3.9 密文库解密导出与用户离线明文备份
 
@@ -406,6 +468,7 @@ mes-datatool restore-plain --input <backup.zip> --to plain --tenant <tenant-id> 
 | 公共列 | 可变业务表含 created_at/by/node、updated_at/by/node、version |
 | 删除 | 主数据以停用为主；有业务引用时禁止物理删除 |
 | 乐观锁 | 编辑携带 version；更新成功 version+1，冲突返回 409 |
+| 自动编码 | 设计未特别规定编码格式的实体（车间/产线/班组、客户/供应商/仓库/物料/产品/工序、字典项），新建时编码留空即自动生成 `{类型名拼音首字母}-{5位流水}`（如车间 `CJ-00032`）；前缀在 `code_prefix` 表平台级注册（先到先得），同首字母类型冲突时追加数字后缀（厂检与车间同为 CJ → `CJ1-00020`）；流水按前缀各自连续、按租户隔离；编码填了仍用手填值。工号（`{租户标识}-{5位流水}`）、业务单号（GZB 等）、租户编码/短码有专门规则，不适用本条 |
 | 迁移 | 两库分别执行同版本迁移并记录 `schema_migration.version/checksum`；密文库含 3.5 类型差异 |
 
 现有平台表 `system_release`、`visitor_lead`、`subscription_agreement`、`subscription_payment`、`tenant_subscription`、`tenant` 及体验、审批、短信、扫码登录等设计继续有效。本版重点扩展以下表组：
@@ -1117,6 +1180,21 @@ standard 在新厂开通时生成；厂管理员保存 custom 后，新建/编�
 
 `UNIQUE(tenant_id,subject_type,subject_id)`。数据来源于产能、质量、货期、工资汇总投影，不是人员考核表。
 
+### 4.23 sensitive_view_grant — 敏感信息查看授权表（新增，两库同结构）
+
+| 字段 | 类型 | 约束 | 说明 |
+|---|---|---|---|
+| id | TEXT | PK | 授权记录 ID |
+| tenant_id | TEXT | NOT NULL | 租户 |
+| table_name | TEXT | NOT NULL | 服务端白名单（当前仅 `employee`） |
+| row_id | TEXT | NOT NULL DEFAULT '' | 限定行；空串 = 该表全部行 |
+| code_hash | TEXT | NOT NULL | sha256hex(授权码明文)；明文仅此一次返回（生成接口） |
+| status | TEXT | NOT NULL DEFAULT active | active / revoked |
+| expires_at | BIGINT | NOT NULL | 过期时间（微秒时间戳） |
+| created_by / created_at |  | NOT NULL | 签发人/时间 |
+
+配套机制（见 5.12 与 7.3）：加密字段默认以 `***` 占位返回；`POST /employees/{id}/reveal` 验证"租户管理员本人登录密码"或"本表有效授权码"后签发 5 分钟查看票据（HMAC 签名，无服务端状态，到期自动收回恢复 `***`）；查看行为全部写审计且不记录明文。
+
 ---
 
 ## 5. 后端接口与事务设计
@@ -1177,7 +1255,13 @@ standard 在新厂开通时生成；厂管理员保存 custom 后，新建/编�
 | PATCH | `/users/{id}` | `identity:write` + 数据范围 | 编辑档案、角色、在职状态；乐观锁 |
 | PUT | `/users/{id}/org-binding` | `identity:write` | 换线/调岗，先新后旧 |
 | POST | `/users/{id}/reset-password` | `identity:write` | 重置密码、撤销会话，临时密码只显示一次 |
+| POST | `/users` | `identity:write` | 同事务创建人员、账号、角色、归属、工序专长 |
+| GET | `/users/{id}` | `identity:read` + 数据范围 | 默认 `***` 占位（加密字段）；解锁查看走 5.12 reveal |
+| PATCH | `/users/{id}` | `identity:write` + 数据范围 | 编辑档案、角色、在职状态；乐观锁；加密字段留空表示不修改 |
+| PUT | `/users/{id}/org-binding` | `identity:write` | 换线/调岗，先新后旧 |
+| POST | `/users/{id}/reset-password` | `identity:write` | 重置密码、撤销会话，临时密码只显示一次 |
 | POST | `/users/{id}/disable` | `identity:write` | 停用账号并撤销会话；不等于删除员工档案 |
+| GET | `/employees/next-no` | `identity:write`/`masterdata:write` | 工号自动生成：{租户标识}-{5 位流水号}，序号按前缀（租户）递增 |
 | GET | `/processes?status=active` | `process:read` | 工人工序专长候选 |
 
 创建请求核心字段：
@@ -1185,23 +1269,23 @@ standard 在新厂开通时生成；厂管理员保存 custom 后，新建/编�
 ```jsonc
 {
   "person_type":"manager",             // manager | worker
-  "employee_no":"A0001","name":"张三","phone":"13800000000",
+  "employee_no":"留空自动生成","name":"张三","phone":"13800000000",
   "password":"至少12位初始密码",
   "role_ids":["…"],
-  "workshop_org_id":"…","line_org_id":"…","team_org_id":null,
+  "workshop_org_id":"可空","line_org_id":"可空","team_org_id":null,   // 车间/产线非必填：都填或都不填；不填表示暂不分配归属
   "skill_process_ids":[],                // 仅工人
   "id_card_no":"…","bank_name":"…","bank_card":"…",
   "emergency_contact":"…","emergency_phone":"…","address":"…",
-  "status":"active","remark":""
+  "remark":""
 }
 ```
 
 创建事务顺序：
 
-1. 锁定租户账号配额并校验 user_limit；校验工号、login_name、phone_hash 唯一。
-2. 校验车间/产线/班组层级及状态、角色均属本厂；工人角色不得包含 PC 权限。
+1. 锁定租户账号配额并校验 user_limit；`employee_no` 为空时自动生成（`{租户标识}-{5 位流水号}`）；校验工号、login_name、phone_hash 唯一。
+2. 校验车间/产线/班组层级及状态（车间与产线须成对填写或都不填）、角色均属本厂；工人角色不得包含 PC 权限。
 3. 规范化手机号并计算 HMAC；生成 Argon2id 验证器，不保存密码明文。
-4. 插入 employee 当前归属、employee_org_binding 当前主归属、user_account、user_role；工人写 employee_skill，client_scope=mobile。
+4. 插入 employee 当前归属、user_account、user_role；工人写 employee_skill，client_scope=mobile；**仅当填写了车间/产线归属时**才插入 employee_org_binding 当前主归属（未分配归属的人员之后走换线接口补归属，不进入任何车间/产线数据范围）。
 5. 若该人员被指定为线长，校验/更新 org_unit.manager_employee_id；一条产线可有多个管理人员，但只能有一个当前登记线长。
 6. 写审计，双库提交；响应不包含完整身份证、银行卡或密码验证器。
 
@@ -1215,7 +1299,9 @@ standard 在新厂开通时生成；厂管理员保存 custom 后，新建/编�
 
 ### 5.5 角色与权限配置 API
 
-沿用 `/roles`、`/roles/{id}/permissions`，增加 `default_data_scope` 和角色终端校验。初始权限模板如下：
+沿用 `/roles`、`/roles/{id}/permissions`，增加 `default_data_scope` 和角色终端校验。保存角色权限时后端按 `platform_module` 目录校验权限点存在、启用且非仅固定管理员（校验通过后自动补齐租户级 `permission` 记录）。
+
+组织资源模块权限点（`workshop:*`、`line:*`、`team:*`、`equipment:*` 读/写）已注册进平台权限点目录与 `platform_module` 菜单（车间管理、生产线管理；生产组挂在产线下、设备挂在车间下，设备表/API 预留）。角色模板默认：厂长（factory_manager）组织资源读写，生产主管（production_supervisor）车间只读、产线/生产组读写；是否授予其他角色由租户管理员在"用户角色权限"页分配。初始权限模板如下：
 
 | 角色编码 | 名称 | 账号类型 | 菜单/操作权限 | 默认数据范围 |
 |---|---|---|---|---|
@@ -1283,6 +1369,8 @@ POST /api/v1/auth/sms-login
 ```
 
 短信校验通过后只证明手机号控制权；服务端仍须通过 phone_hash 找本厂账号并校验账号/租户状态。验证码 6 位、3 分钟有效、60 秒重发限制、最多 5 次错误，一次性 ticket 登录成功后立即作废。本版不再要求普通员工首次短信登录额外输入密码，以落实“手机号+短信验证码即可登录”。
+
+验证码校验（`/auth/trial/verify`）同时返回该手机号名下的体验厂与收费制衣厂列表：密文库读模式下全部按 3.6 第 7 条的盲索引口径匹配（`tenant.contact_phone_hash` / `employee.phone_hash` / 管理员 `login_name`），任何环节不得明文等值比较密文列。
 
 #### 5.6.3 校验顺序与错误契约
 
@@ -1415,6 +1503,10 @@ type AccessPolicy struct {
 | POST | `/auth/phone-login` | ticket+tenant_code 换取真实 JWT；新需求目标短信登录不再额外要求首次密码 |
 | GET | `/auth/my-factories` | 根据会话验证手机号列出名下厂 |
 | POST | `/auth/switch-tenant` | 在 PC/管理门户切换到手机号已绑定的另一厂并签发新会话 |
+| POST | `/sensitive-view-grants` | `identity:write` 签发敏感信息查看授权码（默认 30 分钟，1-720 可调；表名白名单，可限定行） |
+| POST | `/employees/{id}/reveal` | 验证管理员本人密码或授权码，签发 5 分钟查看票据（见 7.3） |
+
+`/auth/my-factories`、`/auth/switch-tenant`、`/auth/phone-login` 及体验厂进入的手机号识别统一按 3.6 第 7 条盲索引口径执行；`PrincipalPhones` 在密文库读模式下先解密再返回，不得把 `enc:v1` 密文当作手机号参与匹配。角色权限调整后须重新登录刷新会话权限。
 | GET | `/public/login-qr/wechat-status` | 查询本机微信演示身份是否绑定厂账号 |
 | POST | `/public/login-qr/wechat-login` | 手机扫码确认，绑定 device_id 并写一次性 login_ticket |
 | POST | `/public/login-qr/exchange` | PC 一次性取走扫码登录会话 |
@@ -1481,6 +1573,7 @@ type AccessPolicy struct {
 | `/settings/workshops` | WorkshopListPage | 本版新增；PC，workshop:read |
 | `/settings/lines` | LineListPage | 本版新增；PC，line:read + 数据范围 |
 | `/settings/users` | UserListPage | 现有用户管理增强；identity:read + 数据范围 |
+| `/settings/dictionaries` | DictionaryPage | 字典维护（下拉选项数据源）；masterdata:read 查看、masterdata:write 维护；字典写入走双库 2PC |
 | `/mobile/home` | MobileJobHome | 本版新增；固定岗位入口，不显示切换账号入口 |
 | `/platform/login` | PlatformLoginPage | 平台独立登录，已实现 |
 | `/platform/tenants` | PlatformAdminPage | 平台租户/注册审批/体验延期/参数/审计/辅助人员页签，按平台权限显示 |
@@ -1515,6 +1608,7 @@ type AccessPolicy struct {
   - 共同字段：工号、姓名、手机号、初始密码、车间、产线、身份证、开户行、银行卡、紧急联系人/电话、现住址、在职状态、备注；
   - 管理人员：角色、终端范围；
   - 工人：角色固定工人模板、工序专长多选、所属班组，终端范围固定手机端且不可修改。
+- **下拉选项一律从数据库实际数据获取**（不写死在前端）：民族/岗位/技能评级/单价档位等取本厂字典项（`GET /dictionaries/{type}/options`，任何登录本厂用户可读，服务端 60 秒内存缓存、写字典按租户+类型精确失效，前端另有 60 秒模块级缓存）；责任车间/生产线取 `/workshops`、`/lines` 实时数据并受数据范围约束，切换车间联动刷新产线；编辑回填时当前值不在选项中则注入兜底保证回显。默认字典（nation/position/skill_grade/rate_level）由迁移 066 为存量租户补种、新租户由 tenant seed 落种；业务侧可在字典维护页增改选项（编码留空按 4.1 自动编码规则生成）。性别、工资模式、在职状态等固定枚举域不在此列。
 - 车间变化时清空并重新加载产线；产线变化时清空并重新加载班组，防止旧下拉值被误提交。
 - 编辑支持换线原因；重置密码/停用需二次确认。前端校验只改善体验，后端校验才是最终约束。
 
@@ -1606,10 +1700,11 @@ TrialHomePage/ManagerPortalPage 包含：
 
 任一层拒绝即拒绝。前端菜单、路由守卫和按钮隐藏均不是安全依据。
 
-### 7.3 脱敏与审计
+### 7.3 脱敏、加密字段占位查看与审计
 
-- 手机号：`138****5678`；身份证：前 6 位 + 掩码 + 后 4 位；银行卡：仅后 4 位。
-- 从明文库读取也必须执行相同脱敏；从密文库读取先解密再脱敏，不把密文交给前端处理。
+- 列表与明细的默认口径：加密敏感字段一律以 `***` 占位返回（本人查看自己档案除外），不返回部分掩码明文（如 `138****5678` 仅用于非敏感场景的手机号展示），绝不把 `enc:v1` 密文交给前端。
+- 从明文库读取也必须执行相同占位/脱敏；从密文库读取先解密再按权限返回，不把密文交给前端处理。
+- **解锁查看（已实现）**：员工档案编辑页点字段旁眼睛图标 → 租户管理员输入本人登录密码、其他角色输入管理员签发的授权码（4.23 表，`/sensitive-view-grants` 签发，默认 30 分钟有效）→ 验证通过后签发 **5 分钟查看票据**（HMAC-SHA256 签名，含租户/用户/过期时间，无服务端状态，进程重启即失效），票据有效期内详情/列表接口返回该员工敏感列明文，到期自动收回恢复 `***`；前端展示倒计时并可立即收回。解锁值仅用于查看，保存不回写加密字段。每次解锁（含方式与授权码 ID）写审计，绝不记录明文值。
 - 查看完整敏感字段、导出人员资料、修改手机号/银行卡、转换数据库、切换读来源/写模式均写审计。
 - 审计 before/after 对敏感值保存掩码或“已变更”标记，不把敏感明文再次写入日志。
 
@@ -1664,6 +1759,9 @@ TrialHomePage/ManagerPortalPage 包含：
 | VERSION_CONFLICT | 409 | 乐观锁冲突 |
 | DUAL_WRITE_UNAVAILABLE | 503 | 默认双写无法保证一致，业务未成功 |
 | KEY_UNAVAILABLE | 503 | 本厂密钥不可用，密文读写停止而非降级写明文 |
+| INVALID_PERMISSION | 400 | 权限点不存在、已停用或仅限固定租户管理员 |
+| GRANT_INVALID | 403 | 敏感信息查看授权码无效或已过期 |
+| AUTH_REQUIRED | 400 | 解锁敏感信息须提供管理员密码或授权码 |
 | TRANSFER_CONFLICT | 409 | 转换目标有更新版本，需人工复核 |
 
 ---
@@ -1706,6 +1804,10 @@ TrialHomePage/ManagerPortalPage 包含：
 | 扫码登录全链路 | `login_qr_routes.go`、QrLoginPage | 已实现 |
 | 多产品首页/登录、扫菲公开落地 | PortalPageV1、Matcher/SanshengLoginPage、ScanLandingPage | 已实现 |
 | 启动迁移与 Reconcile 自修复 | `internal/database/database.go`、`reconcile.go` | 已实现 |
+| 远程多租户 HSM 包装/解包与自动开通 | `internal/seccrypto/hsmservice.go`、`softhsm-2.6-go/hsm-sign-service`（/wrap /unwrap /sign /pubkey /tenants）、`scripts/add-tenant.sh`、`ssh-tunel.bat` | 已实现（3.2.2） |
+| 敏感字段 *** 占位与授权查看 | `internal/masterdata`（reveal + sensitive_view_grant）、`MasterdataPage.vue` 眼睛图标与 5 分钟解锁窗口 | 已实现（4.23、7.3） |
+| 手机号登录全链路盲索引化 | `auth.PhoneTenants/LoginByPhone/SwitchTenant/LoginTrialAdmin/PrincipalPhones`、`trial_routes.verify` | 已实现（3.6 第 7 条） |
+| 组织资源权限点 | 迁移 063/064、`platform_permission`/`platform_module`、角色模板默认赋权 | 已实现 |
 
 已知实现差异：当前体验注册 lead 以 trial_tenant_id 关联，而审批置 won 仅按 converted_tenant_id 更新，体验厂审批后 lead 可能仍停留 promotion；实现时应按 5.9 同时覆盖两种关联。
 
@@ -1716,7 +1818,7 @@ TrialHomePage/ManagerPortalPage 包含：
 | 到期扫描 | main.go 无定时任务；需将 trial/协议到期置 expired，读取时校验继续保留 |
 | 厂二维码签名 | tenant.qr_code_content 已建，Go 生成/校验与重置接口未实现；扫菲页面不等于厂二维码 |
 | 045 业务 API | line_resource、user_profile_template、process_standard 两确认/授权及 mgmt_level 全量计算需补齐 |
-| 字段级加密 | 当前无 `enc:` 业务读写；按第 3 章实施，不得只在文档层视为完成 |
+| 字段级加密 | ✅ 已落地（迁移 053-064）：`enc:v1` 信封（AES-256-GCM+AAD）读写、tenant/employee 读接口解密、盲索引登录全链路、远程多租户 HSM 包装/解包（见 3.2.2）；遗留：PUT /tenant/profile 等旧写路径暂写明文靠 catchup 补偿加密，逐步改为 ForSecure 直写 |
 | 厂内参数扩展 | feature_setting 已有，未覆盖的业务参数按模块逐项补充 |
 | 本版新增功能 | 专用车间/产线 API、人员归属历史、三种登录统一错误、登录日志、门户板块和双库均为目标设计 |
 
@@ -1785,6 +1887,22 @@ TrialHomePage/ManagerPortalPage 包含：
 | 052_tenant_portal_system_name | 厂门户系统名称 |
 
 053 起为本版规划，未创建前不得标记已落地。迁移文件一旦发布不得原地修改；纠错通过新迁移完成，双库分别记录 checksum。
+
+| 053_dual_store_control | 双库读写开关、双写日志与转换任务表 |
+| 054_tenant_key_envelope | tenant_crypto_key 密钥信封列（key_type 等） |
+| 055_phone_hash | employee.phone_hash / tenant.contact_phone_hash 盲索引 |
+| 056/057 | 租户密钥唯一性与平台主体映射 |
+| 058_org_people_login | org_unit/employee/user_account/role 扩展、employee_org_binding、person_type、mgmt_level |
+| 059_tenant_portal_layout | 门户风格与板块 |
+| 060_plaintext_backup_control | 明文备份导出控制列 |
+| 061_platform_phone_lookup | 平台手机号查询支撑 |
+| 062_sensitive_view_grant | 敏感信息查看授权码表（见 4.23） |
+| 063_org_resource_permissions | 组织资源权限点目录（workshop/line/team/equipment 读/写）、platform_module 菜单与租户权限点补录、角色模板默认赋权 |
+| 064_org_resource_module_read_buttons | 063 补漏：team:read / equipment:read 注册 platform_module（保存角色权限按该目录校验） |
+| 065_code_prefix | 自动编码前缀注册表与已知类型种子（见 4.1 自动编码；平台级表，无 tenant_id，catchup 不同步） |
+| 066_seed_dictionaries | 下拉选项默认字典（nation/position/skill_grade/rate_level）存量租户补种；新租户由 tenant seed 落同样种子（见 6.4） |
+
+加密相关落地补充：平台租户详情/注册列表/本厂资料与员工详情/列表/本人资料读接口已接入 `RowCrypto.FromSecure` 解密；组织资源 CRUD 走 `dualwrite` 2PC；catchup 补偿为结构感知（3.8）；手机号登录选厂/切换厂/体验厂进入全链路盲索引化（3.6 第 7 条、5.11）。
 
 ---
 

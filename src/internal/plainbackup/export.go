@@ -32,8 +32,15 @@ const FormatVersion = "v1"
 var excludedTables = map[string]bool{
 	"tenant_crypto_key": true, "auth_session": true, "platform_session": true,
 	"auth_login_log": true, "audit_log": true, "platform_audit_log": true, "deletion_log": true,
-	"dual_write_journal": true, "data_transfer_job": true, "data_transfer_item": true,
+	"dual_write_journal": true, "dual_write_saga": true, "dual_write_saga_step": true,
+	"data_transfer_job": true, "data_transfer_item": true,
 	"outbox_event": true, "command_request": true, "sync_queue": true, "print_job": true,
+}
+
+/* querier 连接池与事务的公共读接口（快照事务内复用）。 */
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 type tableManifest struct {
@@ -65,13 +72,22 @@ func Export(ctx context.Context, store *datastore.Store, crypto *seccrypto.Servi
 		return nil, err
 	}
 	rowCrypto := dualwrite.NewRowCrypto(crypto)
-	tables, err := tenantTables(ctx, secure, tenantID)
+	/* 备份口径：只保证备份时刻的快照一致——REPEATABLE READ 只读事务定格全表同一快照，
+	 * MVCC 不阻塞任何写入；snapshot_at 即快照建立时刻。 */
+	snapTx, err := secure.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("begin snapshot: %w", err)
+	}
+	defer func() { _ = snapTx.Rollback(ctx) }()
+	tables, err := tenantTables(ctx, snapTx, tenantID)
+	if err != nil {
+		_ = os.RemoveAll(dir)
 		return nil, err
 	}
 	m := &manifest{FormatVersion: FormatVersion, TenantID: tenantID, SnapshotAt: now, CreatedBy: requestedBy}
 	for _, table := range tables {
-		tm, err := exportTable(ctx, secure, rowCrypto, tenantID, table, dir)
+		tm, err := exportTable(ctx, snapTx, rowCrypto, tenantID, table, dir)
 		if err != nil {
 			_ = os.RemoveAll(dir)
 			return nil, fmt.Errorf("export table %s: %w", table, err)
@@ -79,19 +95,30 @@ func Export(ctx context.Context, store *datastore.Store, crypto *seccrypto.Servi
 		m.Tables = append(m.Tables, tm)
 		m.TotalRows += tm.Rows
 	}
+	if err := snapTx.Commit(ctx); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("close snapshot: %w", err)
+	}
 	manifestBody, _ := json.MarshalIndent(m, "", "  ")
 	manifestHash := sha256.Sum256(manifestBody)
 	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), manifestBody, 0o600); err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	/* 任务元数据（失败清理目录，不留部分明文包——设计 3.9.5） */
-	if _, err := store.Plain.Exec(ctx, `INSERT INTO backup_job(tenant_id,id,node_id,backup_type,storage_key,manifest_sha256,includes_attachments,status,
+	/* 任务元数据双写两库（运行期读取一律走主库 secure，明文库为对账副本；
+	 * 失败清理目录，不留部分明文包——设计 3.9.5） */
+	insertJob := `INSERT INTO backup_job(tenant_id,id,node_id,backup_type,storage_key,manifest_sha256,includes_attachments,status,
 		started_at,finished_at,source_db,format_version,snapshot_at,requested_by,total_rows,table_count)
-		VALUES($1,$2,'center','plaintext_export',$3,$4,TRUE,'succeeded',$5,$5,'secure',$6,$5,$7,$8,$9)`,
-		tenantID, jobID, dir, hex.EncodeToString(manifestHash[:]), now, FormatVersion, requestedBy, m.TotalRows, len(m.Tables)); err != nil {
-		_ = os.RemoveAll(dir)
-		return nil, err
+		VALUES($1,$2,'center','plaintext_export',$3,$4,TRUE,'succeeded',$5,$5,'secure',$6,$5,$7,$8,$9)`
+	for _, pool := range []*pgxpool.Pool{store.Secure, store.Plain} {
+		if pool == nil {
+			continue
+		}
+		if _, err := pool.Exec(ctx, insertJob,
+			tenantID, jobID, dir, hex.EncodeToString(manifestHash[:]), now, FormatVersion, requestedBy, m.TotalRows, len(m.Tables)); err != nil {
+			_ = os.RemoveAll(dir)
+			return nil, err
+		}
 	}
 	return map[string]any{
 		"job_id": jobID, "tables": len(m.Tables), "total_rows": m.TotalRows,
@@ -100,7 +127,7 @@ func Export(ctx context.Context, store *datastore.Store, crypto *seccrypto.Servi
 }
 
 /* tenantTables 本厂相关、且不在排除清单内的表（拓扑无关：JSONL 按表独立文件）。 */
-func tenantTables(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]string, error) {
+func tenantTables(ctx context.Context, db querier, tenantID string) ([]string, error) {
 	rows, err := db.Query(ctx, `SELECT DISTINCT c.relname
 		FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
 		JOIN pg_attribute a ON a.attrelid=c.oid AND a.attname='tenant_id' AND a.attnum>0 AND NOT a.attisdropped
@@ -133,8 +160,8 @@ func tenantTables(ctx context.Context, db *pgxpool.Pool, tenantID string) ([]str
 	return tables, nil
 }
 
-/* exportTable 单表导出：secure 读 → 解密 → JSONL 写盘（0600，私有目录）。 */
-func exportTable(ctx context.Context, db *pgxpool.Pool, rowCrypto *dualwrite.RowCrypto, tenantID, table, dir string) (*tableManifest, error) {
+/* exportTable 单表导出：快照读 → 解密 → JSONL 写盘（0600，私有目录）。 */
+func exportTable(ctx context.Context, db querier, rowCrypto *dualwrite.RowCrypto, tenantID, table, dir string) (*tableManifest, error) {
 	var rows pgx.Rows
 	var err error
 	if table == "tenant" {
@@ -246,10 +273,10 @@ func Verify(ctx context.Context, store *datastore.Store, tenantID, jobID string)
 			result.Mismatch = append(result.Mismatch, fmt.Sprintf("%s: rows %d != manifest %d", tm.Name, lines, tm.Rows))
 		}
 	}
-	/* 包级 manifest 哈希与任务记录一致 */
+	/* 包级 manifest 哈希与任务记录一致（任务记录主库优先，明文库兜底） */
 	manifestHash := sha256.Sum256(body)
-	var recorded string
-	if err := store.Plain.QueryRow(ctx, `SELECT manifest_sha256 FROM backup_job WHERE tenant_id=$1 AND id=$2`, tenantID, jobID).Scan(&recorded); err != nil {
+	_, _, recorded, err := jobRowOf(ctx, store, tenantID, jobID)
+	if err != nil {
 		return nil, err
 	}
 	if recorded != hex.EncodeToString(manifestHash[:]) {
@@ -259,11 +286,29 @@ func Verify(ctx context.Context, store *datastore.Store, tenantID, jobID string)
 	return result, nil
 }
 
+/* jobRowOf 读取备份任务记录：主库 yzws-v1-sec 优先，明文库（对账副本）兜底；
+ * 兼容双写切换前仅明文库存在记录的历史任务。 */
+func jobRowOf(ctx context.Context, store *datastore.Store, tenantID, jobID string) (dir, status, manifestSHA string, err error) {
+	for _, pool := range []*pgxpool.Pool{store.Secure, store.Plain} {
+		if pool == nil {
+			continue
+		}
+		err = pool.QueryRow(ctx, `SELECT storage_key,status,COALESCE(manifest_sha256,'') FROM backup_job WHERE tenant_id=$1 AND id=$2`,
+			tenantID, jobID).Scan(&dir, &status, &manifestSHA)
+		if err == nil {
+			return dir, status, manifestSHA, nil
+		}
+		if err != pgx.ErrNoRows {
+			return "", "", "", err
+		}
+	}
+	return "", "", "", fmt.Errorf("backup job not found")
+}
+
 func jobDirOf(ctx context.Context, store *datastore.Store, tenantID, jobID string) (string, string, error) {
-	var dir, status string
-	err := store.Plain.QueryRow(ctx, `SELECT storage_key,status FROM backup_job WHERE tenant_id=$1 AND id=$2`, tenantID, jobID).Scan(&dir, &status)
+	dir, status, _, err := jobRowOf(ctx, store, tenantID, jobID)
 	if err != nil {
-		return "", "", fmt.Errorf("backup job not found")
+		return "", "", err
 	}
 	return dir, status, nil
 }
@@ -283,13 +328,22 @@ func IssueDownloadToken(ctx context.Context, store *datastore.Store, tenantID, j
 	token := platform.Token(32)
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(token)))
 	expires := platform.Now() + int64((10 * time.Minute).Microseconds())
-	/* 未下载过才允许签发新凭证；下载一次后凭证通道关闭（设计 3.9.4 一次性） */
-	result, err := store.Plain.Exec(ctx, `UPDATE backup_job SET download_token_hash=$3,download_expires_at=$4
-		WHERE tenant_id=$1 AND id=$2 AND downloaded_at IS NULL`, tenantID, jobID, tokenHash, expires)
-	if err != nil {
-		return "", err
+	/* 未下载过才允许签发新凭证；下载一次后凭证通道关闭（设计 3.9.4 一次性）。
+	 * 两库同写：主库为准，明文库对账副本保持同步。 */
+	updateSQL := `UPDATE backup_job SET download_token_hash=$3,download_expires_at=$4
+		WHERE tenant_id=$1 AND id=$2 AND downloaded_at IS NULL`
+	affected := int64(0)
+	for _, pool := range []*pgxpool.Pool{store.Secure, store.Plain} {
+		if pool == nil {
+			continue
+		}
+		result, err := pool.Exec(ctx, updateSQL, tenantID, jobID, tokenHash, expires)
+		if err != nil {
+			return "", err
+		}
+		affected += result.RowsAffected()
 	}
-	if result.RowsAffected() == 0 {
+	if affected == 0 {
 		return "", fmt.Errorf("backup package already downloaded (one-time)")
 	}
 	return token, nil
@@ -305,13 +359,20 @@ func ConsumeDownloadToken(ctx context.Context, store *datastore.Store, tenantID,
 		return "", fmt.Errorf("backup job status=%s, cannot download", status)
 	}
 	tokenHash := fmt.Sprintf("%x", sha256.Sum256([]byte(strings.TrimSpace(token))))
-	result, err := store.Plain.Exec(ctx, `UPDATE backup_job SET downloaded_at=$4
-		WHERE tenant_id=$1 AND id=$2 AND download_token_hash=$3 AND downloaded_at IS NULL AND download_expires_at>$5`,
-		tenantID, jobID, tokenHash, platform.Now(), platform.Now())
-	if err != nil {
-		return "", err
+	consumeSQL := `UPDATE backup_job SET downloaded_at=$4
+		WHERE tenant_id=$1 AND id=$2 AND download_token_hash=$3 AND downloaded_at IS NULL AND download_expires_at>$5`
+	affected := int64(0)
+	for _, pool := range []*pgxpool.Pool{store.Secure, store.Plain} {
+		if pool == nil {
+			continue
+		}
+		result, err := pool.Exec(ctx, consumeSQL, tenantID, jobID, tokenHash, platform.Now(), platform.Now())
+		if err != nil {
+			return "", err
+		}
+		affected += result.RowsAffected()
 	}
-	if result.RowsAffected() == 0 {
+	if affected == 0 {
 		return "", fmt.Errorf("download token invalid, expired or already used")
 	}
 	return dir, nil

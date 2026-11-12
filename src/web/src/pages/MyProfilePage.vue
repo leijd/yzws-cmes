@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import PageState from '../components/PageState.vue'
 import FilterSelect from '../components/FilterSelect.vue'
+import { dictOptions, type DictOption } from '../dictionaries'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -10,7 +11,12 @@ const error = ref('')
 const notice = ref('')
 const profile = ref<any>(null)
 const form = reactive({ phone: '', id_card_no: '', bank_card: '', bank_name: '', emergency_contact: '', emergency_phone: '', address: '', nation: '汉', native_place: '' })
-const nationOptions = ['汉', '回', '壮', '苗', '其他'].map(v => ({ value: v, label: v }))
+/* 民族选项从数据库字典获取（带缓存），当前值缺失时注入兜底 */
+const nationOptions = ref<DictOption[]>([])
+async function loadNationOptions() {
+  nationOptions.value = await dictOptions('nation', 'name')
+  if (form.nation && !nationOptions.value.some(o => o.value === form.nation)) nationOptions.value.push({ value: form.nation, label: form.nation })
+}
 
 async function load() {
   loading.value = true; error.value = ''
@@ -32,7 +38,7 @@ const readOnlyInfo = computed(() => {
     ['生产线', p.production_line], ['技能评级', p.skill_grade], ['工资模式', p.pay_mode === 'monthly' ? '月薪' : '计件'],
   ].filter(([, v]) => v)
 })
-onMounted(load)
+onMounted(async () => { await load(); void loadNationOptions() })
 </script>
 <template>
   <div class="page-header"><div><h1>我的资料</h1><p>敏感信息仅本人可查看与修改，其他人在其视图中看到的是脱敏内容</p></div><button class="button" :disabled="saving" @click="save">保存修改</button></div>

@@ -145,8 +145,11 @@ func (p *softHSM2Provider) GenerateTenantKeyPair(ctx context.Context, tenantID s
 	return &KeyRef{TenantID: tenantID, KeyVersion: keyVersion, KeyLabel: label, KeyWrapRef: p.ref(tenantID, keyVersion)}, nil
 }
 
-func (p *softHSM2Provider) oaepMechanism() []*pkcs11.Mechanism {
-	return []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS_OAEP, pkcs11.NewOAEPParams(pkcs11.CKM_SHA256, pkcs11.CKG_MGF1_SHA256, pkcs11.CKZ_DATA_SPECIFIED, nil))}
+func (p *softHSM2Provider) wrapMechanism() []*pkcs11.Mechanism {
+	/* CKM_RSA_PKCS（PKCS#1 v1.5）：SoftHSM 2.6.1 Botan2 后端 OAEP 解密不可用
+	 * （DecryptInit 恒 CKR_ARGUMENTS_BAD，已实测），与 hsm-sign-service 服务端一致；
+	 * 生产（OpenSSL 后端/云 KMS）应切回 OAEP-SHA256。 */
+	return []*pkcs11.Mechanism{pkcs11.NewMechanism(pkcs11.CKM_RSA_PKCS, nil)}
 }
 
 func (p *softHSM2Provider) findKey(objectClass uint) (pkcs11.ObjectHandle, error) {
@@ -174,7 +177,7 @@ func (p *softHSM2Provider) Wrap(ctx context.Context, ref *KeyRef, plaintext []by
 	if p.ctx == nil {
 		return "", ErrKeyUnavailable
 	}
-	if err := p.ctx.EncryptInit(p.session, p.oaepMechanism(), p.mustObject(pkcs11.CKO_PUBLIC_KEY, ref)); err != nil {
+	if err := p.ctx.EncryptInit(p.session, p.wrapMechanism(), p.mustObject(pkcs11.CKO_PUBLIC_KEY, ref)); err != nil {
 		return "", fmt.Errorf("wrap init: %w", err)
 	}
 	ciphertext, err := p.ctx.Encrypt(p.session, plaintext)
@@ -194,7 +197,7 @@ func (p *softHSM2Provider) Unwrap(ctx context.Context, ref *KeyRef, wrapped stri
 	if err != nil {
 		return nil, fmt.Errorf("decode wrapped key: %w", err)
 	}
-	if err := p.ctx.DecryptInit(p.session, p.oaepMechanism(), p.mustObject(pkcs11.CKO_PRIVATE_KEY, ref)); err != nil {
+	if err := p.ctx.DecryptInit(p.session, p.wrapMechanism(), p.mustObject(pkcs11.CKO_PRIVATE_KEY, ref)); err != nil {
 		return nil, fmt.Errorf("unwrap init: %w", err)
 	}
 	plaintext, err := p.ctx.Decrypt(p.session, ciphertext)
@@ -204,12 +207,17 @@ func (p *softHSM2Provider) Unwrap(ctx context.Context, ref *KeyRef, wrapped stri
 	return plaintext, nil
 }
 
-/* mustObject 按 label 定位密钥对象；找不到视为 KEY_UNAVAILABLE。 */
+/* mustObject 按 ref 定位密钥对象（label 统一经 labelFromRef 解析，兼容 service.go 只回传
+ * KeyWrapRef 的调用方式）；找不到视为 KEY_UNAVAILABLE。 */
 func (p *softHSM2Provider) mustObject(class uint, ref *KeyRef) pkcs11.ObjectHandle {
+	label, err := labelFromRef(ref)
+	if err != nil {
+		return 0
+	}
 	template := []*pkcs11.Attribute{
 		pkcs11.NewAttribute(pkcs11.CKA_CLASS, class),
 		pkcs11.NewAttribute(pkcs11.CKA_TOKEN, true),
-		pkcs11.NewAttribute(pkcs11.CKA_LABEL, ref.KeyLabel),
+		pkcs11.NewAttribute(pkcs11.CKA_LABEL, label),
 	}
 	_ = p.ctx.FindObjectsInit(p.session, template)
 	objects, _, _ := p.ctx.FindObjects(p.session, 1)
@@ -221,7 +229,7 @@ func (p *softHSM2Provider) mustObject(class uint, ref *KeyRef) pkcs11.ObjectHand
 }
 
 func (p *softHSM2Provider) GetKeyMetadata(ctx context.Context, ref *KeyRef) (*KeyMetadata, error) {
-	return &KeyMetadata{Provider: "softhsm2", Algorithm: "RSA-3072-OAEP-SHA256", Version: ref.KeyVersion, Status: "active"}, nil
+	return &KeyMetadata{Provider: "softhsm2", Algorithm: "RSA-PKCS1v15", Version: ref.KeyVersion, Status: "active"}, nil
 }
 
 func (p *softHSM2Provider) Rotate(ctx context.Context, tenantID string, current *KeyRef) (*KeyRef, error) {
@@ -244,13 +252,13 @@ func (p *softHSM2Provider) HealthCheck(ctx context.Context) error {
 	}
 	found := false
 	for _, m := range mechanisms {
-		if m.Mechanism == pkcs11.CKM_RSA_PKCS_OAEP {
+		if m.Mechanism == pkcs11.CKM_RSA_PKCS {
 			found = true
 			break
 		}
 	}
 	if !found {
-		return fmt.Errorf("%w: CKM_RSA_PKCS_OAEP not supported by token", ErrKeyUnavailable)
+		return fmt.Errorf("%w: CKM_RSA_PKCS not supported by token", ErrKeyUnavailable)
 	}
 	_ = probe
 	return nil

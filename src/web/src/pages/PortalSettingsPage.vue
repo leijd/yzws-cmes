@@ -290,4 +290,3 @@ onMounted(load)
 .section-order button{border:1px solid #cbd5e1;background:#fff;border-radius:6px;padding:2px 8px;cursor:pointer;font-size:12px}
 .section-order button:disabled{opacity:.4;cursor:not-allowed}
 </style>
-</style>

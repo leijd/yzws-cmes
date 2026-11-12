@@ -15,7 +15,8 @@ const router = useRouter()
 const route = useRoute()
 
 type Mode = 'account' | 'register' | 'sms' | 'select-tenant'
-const mode = ref<Mode>('account')
+/* 默认手机短信登录（需求口径）；记住密码的自动登录不受影响（onMounted 独立触发） */
+const mode = ref<Mode>('sms')
 const panelTitle = computed(() =>
   mode.value === 'register' ? '极速注册'
     : mode.value === 'sms' ? '短信登录'

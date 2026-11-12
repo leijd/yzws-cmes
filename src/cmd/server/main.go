@@ -27,9 +27,9 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "指定配置文件路径（该文件中的配置优先于环境变量；也可用 CLOTHP_CONFIG 环境变量指定）")
-	datatoolCmd := flag.String("datatool", "", "数据互转工具：convert=全量转换（执行后退出，需配置 databases.secure）")
+	datatoolCmd := flag.String("datatool", "", "数据互转工具：convert=全量转换；repair-phone-hash=修复手机号盲索引（执行后退出，需配置 databases.secure）")
 	datatoolDirection := flag.String("direction", "plain2secure", "convert 方向：plain2secure（明文→密文）| secure2plain（密文→明文）")
-	datatoolDryRun := flag.Bool("dry-run", true, "convert 仅预检不落库；确认行数后用 -dry-run=false 执行")
+	datatoolDryRun := flag.Bool("dry-run", true, "convert/repair-phone-hash 仅预检不落库；确认行数后用 -dry-run=false 执行")
 	flag.Parse()
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -57,6 +57,12 @@ func main() {
 			TokenLabel:      cfg.Crypto.SoftHSM2.TokenLabel,
 			PINEnv:          cfg.Crypto.SoftHSM2.PINEnv,
 			KeyLabelPrefix:  cfg.Crypto.SoftHSM2.KeyLabelPrefix,
+			ServerURL:       cfg.Crypto.SoftHSM2.ServerURL,
+			APIKeyEnv:       cfg.Crypto.SoftHSM2.APIKeyEnv,
+			CACertFile:      cfg.Crypto.SoftHSM2.CACertFile,
+			TimeoutMS:       cfg.Crypto.SoftHSM2.TimeoutMS,
+			SSHTarget:       cfg.Crypto.SoftHSM2.SSHTarget,
+			ProvisionScript: cfg.Crypto.SoftHSM2.ProvisionScript,
 		},
 		CloudKMS: seccrypto.CloudKMSSettings{
 			Provider:    cfg.Crypto.CloudKMS.Provider,
@@ -76,6 +82,14 @@ func main() {
 	/* 数据互转工具（设计 3.8）：历史数据回补/反向迁移；执行后退出，不启动 HTTP 服务 */
 	if *datatoolCmd == "convert" {
 		result, err := datatool.Convert(ctx, store, cryptoSvc, *datatoolDirection, *datatoolDryRun, "cli:"+cfg.NodeID, "datatool convert")
+		datatool.LogResult(result)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *datatoolCmd == "repair-phone-hash" {
+		result, err := datatool.RepairPhoneHash(ctx, store, cryptoSvc, *datatoolDryRun)
 		datatool.LogResult(result)
 		if err != nil {
 			log.Fatal(err)

@@ -131,6 +131,10 @@ function openCreate() {
   formTeams.value = []
   formError.value = ''
   modalOpen.value = true
+  /* 工号自动生成：{制衣厂代码}-{5 位流水号}（后端 next-no 按租户分配） */
+  api<{ employee_no: string }>('/employees/next-no', {}, { silent: true })
+    .then(r => { if (!form.employee_no) form.employee_no = r.employee_no })
+    .catch(() => { /* 拉取失败时保持空，由服务端建档兜底 */ })
 }
 
 async function save() {
@@ -288,23 +292,23 @@ onMounted(() => { void load(); void loadFilters() })
           <option value="manager">管理人员</option>
         </select>
       </div>
-      <div class="field"><label class="required">工号</label><input v-model.trim="form.employee_no" maxlength="32"></div>
+      <div class="field"><label class="required">工号（自动生成：厂代码-5位流水号）</label><input v-model.trim="form.employee_no" maxlength="32" placeholder="打开弹窗自动分配"></div>
       <div class="field"><label class="required">姓名</label><input v-model.trim="form.name" maxlength="30"></div>
       <div class="field"><label>手机号</label><input v-model.trim="form.phone" maxlength="11" type="tel"></div>
       <div class="field"><label class="required">初始密码（至少 12 位，仅显示一次）</label><input v-model="form.password" maxlength="64"></div>
       <div class="field"><label>岗位</label><input v-model.trim="form.position" maxlength="40"></div>
 
       <div class="field">
-        <label class="required">所属车间</label>
+        <label>所属车间（可不选）</label>
         <select v-model="form.workshop_org_id" @change="onFormWorkshop">
-          <option value="" disabled>请选择</option>
+          <option value="">暂不分配</option>
           <option v-for="w in workshops" :key="w.id" :value="w.id">{{ w.name }}</option>
         </select>
       </div>
       <div class="field">
-        <label class="required">所属产线</label>
+        <label>所属产线（可不选）</label>
         <select v-model="form.line_org_id" :disabled="!formLines.length" @change="onFormLine">
-          <option value="" disabled>{{ formLines.length ? '请选择' : '请先选择车间' }}</option>
+          <option value="">{{ formLines.length ? '暂不分配' : '请先选择车间' }}</option>
           <option v-for="l in formLines" :key="l.id" :value="l.id">{{ l.name }}</option>
         </select>
       </div>

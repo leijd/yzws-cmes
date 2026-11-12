@@ -18,6 +18,7 @@ import (
 	"clothp/internal/platform"
 	"clothp/internal/seccrypto"
 	"clothp/internal/sms"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,6 +34,16 @@ type API struct {
 	Writer *dualwrite.Writer
 	Crypto *seccrypto.Service
 	mux    *http.ServeMux
+}
+
+/* phoneCrypto 手机号识别用加密服务：密文库读模式（secure）下 employee.phone /
+ * tenant.contact_phone 列内是 enc:v1 密文，必须走盲索引 phone_hash；明文库模式
+ * 这些列是明文，返回 nil（走明文等值比较路径）。 */
+func (a *API) phoneCrypto() *seccrypto.Service {
+	if a.Crypto == nil || a.Config.DataStore.ReadSource == "plain" {
+		return nil
+	}
+	return a.Crypto
 }
 
 type AppError struct {
@@ -154,6 +165,15 @@ func platformRoutePermission(r *http.Request) string {
 	return ""
 }
 
+/* requestTimeout 单请求处理上限：超时后 ctx 取消使数据库等阻塞调用快速失败
+ * （映射 504），避免某一步卡死导致前端无限转圈。 */
+const requestTimeout = 60 * time.Second
+
+/* longRunningPath 豁免请求超时的慢操作（明文备份导出/下载等大任务）。 */
+func longRunningPath(path string) bool {
+	return strings.Contains(path, "/plain-backups")
+}
+
 func (a *API) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-Id")
@@ -179,7 +199,13 @@ func (a *API) Handler() http.Handler {
 				log.Printf("http request %s method=%s path=%s status=%d duration=%s", requestID, r.Method, r.URL.Path, recorder.status, time.Since(started).Round(time.Millisecond))
 			}
 		}()
-		a.mux.ServeHTTP(recorder, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID)))
+		ctx := r.Context()
+		if !longRunningPath(r.URL.Path) {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, requestTimeout)
+			defer cancel()
+		}
+		a.mux.ServeHTTP(recorder, r.WithContext(context.WithValue(ctx, requestIDKey{}, requestID)))
 	})
 }
 
@@ -219,6 +245,15 @@ func JSON(w http.ResponseWriter, status int, value any) error {
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, auth.ErrUnauthenticated) {
 		err = Error(http.StatusUnauthorized, "UNAUTHENTICATED", "登录状态已失效，请重新登录")
+	}
+	/* 请求超时：ctx 取消传到数据库/外部调用后原样返回，映射为明确可重试的 504 */
+	if errors.Is(err, context.DeadlineExceeded) {
+		err = Error(http.StatusGatewayTimeout, "REQUEST_TIMEOUT", "处理超时，请稍后重试")
+	}
+	/* 锁等待超限（lock_timeout，SQLSTATE 55P03）：悬挂事务/并发写占用，提示稍后重试 */
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+		err = Error(http.StatusConflict, "RESOURCE_LOCKED", "数据正被其他操作占用，请稍后重试")
 	}
 	var appError *AppError
 	if !errors.As(err, &appError) {

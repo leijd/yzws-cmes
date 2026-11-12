@@ -154,22 +154,42 @@ func registerRoleTemplates(api *httpapi.API) {
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
-		tx, err := api.DB.Begin(r.Context())
+		ctx := r.Context()
+		tenantID := r.PathValue("id")
+		/* 计划事务外完成（读读主库 api.DB，即 secure；设计 2.2 第 7 条：业务不得读明文库）；
+		 * 单步双写事务落两库（设计原则：禁止长事务） */
+		plan, err := planRoleTemplates(ctx, api.DB, tenantID, in.TemplateIDs, p.AdminID, api.Config.NodeID)
 		if err != nil {
 			return err
 		}
-		defer tx.Rollback(r.Context())
-		result, err := applyRoleTemplates(r.Context(), tx, r.PathValue("id"), in.TemplateIDs, p.AdminID, api.Config.NodeID)
+		tx, err := api.Writer.Begin(ctx, tenantID)
 		if err != nil {
 			return err
 		}
-		if err := platformAudit(r.Context(), tx, p.AdminID, "tenant_role_template_apply", "tenant", r.PathValue("id"), nil, result, ""); err != nil {
+		tx.MarkAggregate("tenant", tenantID)
+		if err := func() error {
+			if tx.Plain() != nil {
+				if err := plan.apply(ctx, tx.Plain()); err != nil {
+					return err
+				}
+			}
+			if tx.Secure() != nil {
+				if err := plan.apply(ctx, tx.Secure()); err != nil {
+					return err
+				}
+			}
+			if tx.Plain() != nil {
+				return platformAudit(ctx, tx.Plain(), p.AdminID, "tenant_role_template_apply", "tenant", tenantID, nil, plan.Summary(), "")
+			}
+			return nil
+		}(); err != nil {
+			_ = tx.Rollback(ctx)
 			return err
 		}
-		if err := tx.Commit(r.Context()); err != nil {
+		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
-		return httpapi.JSON(w, 200, result)
+		return httpapi.JSON(w, 200, plan.Summary())
 	})
 }
 
@@ -190,14 +210,46 @@ func insertTemplatePermission(ctx context.Context, tx pgx.Tx, templateID, permis
 	return err
 }
 
-func applyRoleTemplates(ctx context.Context, tx pgx.Tx, tenantID string, templateIDs []string, actorID, nodeID string) (map[string]any, error) {
+/* 角色模板应用：计划与执行分离（设计原则：禁止长事务；双写两库 ID 必须一致）。
+ * planRoleTemplates 事务外只读解析模板/权限并预生成全部 ID；apply 为纯写入，
+ * 可在 plain/secure 两个事务各执行一遍而结果一致。 */
+
+type plannedPermission struct {
+	Code, Resource, Action string
+	PermissionID           string
+	InsertPermission       bool // 该权限点本厂尚无，需要插入
+	RolePermissionID       string
+}
+
+type plannedRole struct {
+	RoleID, Code, Name, Description, TemplateID string
+	IsNew                                      bool
+	Permissions                                []plannedPermission
+}
+
+type roleApplyPlan struct {
+	TenantID string
+	ActorID  string
+	NodeID   string
+	Now      int64
+	Roles    []plannedRole
+	Created  []string
+	Updated  []string
+}
+
+type templateQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+func planRoleTemplates(ctx context.Context, db templateQuerier, tenantID string, templateIDs []string, actorID, nodeID string) (*roleApplyPlan, error) {
 	query := `SELECT id,code,name,description FROM platform_role_template WHERE status='active' ORDER BY sort_no,code`
 	args := []any{}
 	if len(templateIDs) > 0 {
 		query = `SELECT id,code,name,description FROM platform_role_template WHERE status='active' AND id=ANY($1) ORDER BY sort_no,code`
 		args = append(args, templateIDs)
 	}
-	rows, err := tx.Query(ctx, query, args...)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -212,65 +264,104 @@ func applyRoleTemplates(ctx context.Context, tx pgx.Tx, tenantID string, templat
 		templates = append(templates, v)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if len(templateIDs) > 0 && len(templates) != len(templateIDs) {
 		return nil, httpapi.Error(400, "INVALID_TEMPLATE", "角色模板不存在或已停用")
 	}
-	now := platform.Now()
-	created := []string{}
-	updated := []string{}
+	plan := &roleApplyPlan{TenantID: tenantID, ActorID: actorID, NodeID: nodeID, Now: platform.Now()}
 	for _, item := range templates {
 		if item.code == "tenant_admin" {
 			return nil, httpapi.Error(400, "INVALID_TEMPLATE", "角色模板不能覆盖固定租户管理员")
 		}
-		var roleID string
-		err = tx.QueryRow(ctx, "SELECT id FROM role WHERE tenant_id=$1 AND code=$2", tenantID, item.code).Scan(&roleID)
+		role := plannedRole{Code: item.code, Name: item.name, Description: item.description, TemplateID: item.id}
+		err = db.QueryRow(ctx, "SELECT id FROM role WHERE tenant_id=$1 AND code=$2", tenantID, item.code).Scan(&role.RoleID)
 		if errors.Is(err, pgx.ErrNoRows) {
-			roleID = platform.ID()
-			if _, err = tx.Exec(ctx, "INSERT INTO role(tenant_id,id,code,name,description,is_system,source,platform_template_id,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,FALSE,'platform',$6,$7,$8,$9,$7,$8,$9)", tenantID, roleID, item.code, item.name, item.description, item.id, now, actorID, nodeID); err != nil {
-				return nil, err
-			}
-			created = append(created, item.code)
+			role.IsNew = true
+			role.RoleID = platform.ID()
+			plan.Created = append(plan.Created, item.code)
 		} else if err != nil {
 			return nil, err
 		} else {
-			if _, err = tx.Exec(ctx, "UPDATE role SET name=$1,description=$2,source='platform',platform_template_id=$3,version=version+1,updated_at=$4,updated_by=$5,updated_node=$6 WHERE tenant_id=$7 AND id=$8", item.name, item.description, item.id, now, actorID, nodeID, tenantID, roleID); err != nil {
-				return nil, err
-			}
-			updated = append(updated, item.code)
+			plan.Updated = append(plan.Updated, item.code)
 		}
-		if _, err = tx.Exec(ctx, "DELETE FROM role_permission WHERE tenant_id=$1 AND role_id=$2", tenantID, roleID); err != nil {
-			return nil, err
-		}
-		permissions, err := tx.Query(ctx, "SELECT permission_code FROM platform_role_template_permission WHERE template_id=$1 ORDER BY permission_code", item.id)
+		permRows, err := db.Query(ctx, "SELECT permission_code FROM platform_role_template_permission WHERE template_id=$1 ORDER BY permission_code", item.id)
 		if err != nil {
 			return nil, err
 		}
 		codes := []string{}
-		for permissions.Next() {
+		for permRows.Next() {
 			var code string
-			if err := permissions.Scan(&code); err != nil {
-				permissions.Close()
+			if err := permRows.Scan(&code); err != nil {
+				permRows.Close()
 				return nil, err
 			}
 			codes = append(codes, code)
 		}
-		permissions.Close()
+		permRows.Close()
 		for _, code := range codes {
-			var resource, action string
-			if err = tx.QueryRow(ctx, "SELECT split_part(permission_code,':',1),split_part(permission_code,':',2) FROM platform_module WHERE permission_code=$1 AND status='active' AND is_admin_only=FALSE", code).Scan(&resource, &action); err != nil {
+			perm := plannedPermission{Code: code, RolePermissionID: platform.ID()}
+			if err = db.QueryRow(ctx, "SELECT split_part(permission_code,':',1),split_part(permission_code,':',2) FROM platform_module WHERE permission_code=$1 AND status='active' AND is_admin_only=FALSE", code).Scan(&perm.Resource, &perm.Action); err != nil {
 				return nil, httpapi.Error(400, "INVALID_PERMISSION", "模板包含无效权限点："+code)
 			}
-			permissionID := platform.ID()
-			if _, err = tx.Exec(ctx, "INSERT INTO permission(tenant_id,id,code,resource,action) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,code) DO NOTHING", tenantID, permissionID, code, resource, action); err != nil {
+			err = db.QueryRow(ctx, "SELECT id FROM permission WHERE tenant_id=$1 AND code=$2", tenantID, code).Scan(&perm.PermissionID)
+			if errors.Is(err, pgx.ErrNoRows) {
+				perm.InsertPermission = true
+				perm.PermissionID = platform.ID()
+			} else if err != nil {
 				return nil, err
 			}
-			if err = tx.QueryRow(ctx, "SELECT id FROM permission WHERE tenant_id=$1 AND code=$2", tenantID, code).Scan(&permissionID); err != nil {
-				return nil, err
+			role.Permissions = append(role.Permissions, perm)
+		}
+		plan.Roles = append(plan.Roles, role)
+	}
+	return plan, nil
+}
+
+/* Summary 与原 applyRoleTemplates 返回口径一致。 */
+func (p *roleApplyPlan) Summary() map[string]any {
+	return map[string]any{"created_roles": p.Created, "updated_roles": p.Updated, "applied_templates": len(p.Roles)}
+}
+
+/* apply 纯写入：角色 upsert + 授权重建 + 权限点补齐（同一计划在两库各执行一遍）。 */
+func (p *roleApplyPlan) apply(ctx context.Context, tx pgx.Tx) error {
+	for _, role := range p.Roles {
+		if role.IsNew {
+			if _, err := tx.Exec(ctx, "INSERT INTO role(tenant_id,id,code,name,description,is_system,source,platform_template_id,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,FALSE,'platform',$6,$7,$8,$9,$7,$8,$9)", p.TenantID, role.RoleID, role.Code, role.Name, role.Description, role.TemplateID, p.Now, p.ActorID, p.NodeID); err != nil {
+				return err
 			}
-			if _, err = tx.Exec(ctx, "INSERT INTO role_permission(tenant_id,id,role_id,permission_id) VALUES($1,$2,$3,$4)", tenantID, platform.ID(), roleID, permissionID); err != nil {
-				return nil, err
+		} else {
+			if _, err := tx.Exec(ctx, "UPDATE role SET name=$1,description=$2,source='platform',platform_template_id=$3,version=version+1,updated_at=$4,updated_by=$5,updated_node=$6 WHERE tenant_id=$7 AND id=$8", role.Name, role.Description, role.TemplateID, p.Now, p.ActorID, p.NodeID, p.TenantID, role.RoleID); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM role_permission WHERE tenant_id=$1 AND role_id=$2", p.TenantID, role.RoleID); err != nil {
+			return err
+		}
+		for _, perm := range role.Permissions {
+			if perm.InsertPermission {
+				if _, err := tx.Exec(ctx, "INSERT INTO permission(tenant_id,id,code,resource,action) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,code) DO NOTHING", p.TenantID, perm.PermissionID, perm.Code, perm.Resource, perm.Action); err != nil {
+					return err
+				}
+			}
+			if _, err := tx.Exec(ctx, "INSERT INTO role_permission(tenant_id,id,role_id,permission_id) VALUES($1,$2,$3,$4)", p.TenantID, perm.RolePermissionID, role.RoleID, perm.PermissionID); err != nil {
+				return err
 			}
 		}
 	}
-	return map[string]any{"created_roles": created, "updated_roles": updated, "applied_templates": len(templates)}, nil
+	return nil
+}
+
+/* applyRoleTemplates 单事务兼容入口（计划+执行同事务）。新代码请用 planRoleTemplates
+ * 事务外计划、双写事务分别 apply。 */
+func applyRoleTemplates(ctx context.Context, tx pgx.Tx, tenantID string, templateIDs []string, actorID, nodeID string) (map[string]any, error) {
+	plan, err := planRoleTemplates(ctx, tx, tenantID, templateIDs, actorID, nodeID)
+	if err != nil {
+		return nil, err
+	}
+	if err := plan.apply(ctx, tx); err != nil {
+		return nil, err
+	}
+	return plan.Summary(), nil
 }

@@ -469,17 +469,25 @@ func tenantOfRow(table string, row map[string]any) string {
 	return "platform"
 }
 
-/* dbIssuer 直接落库发行密钥（只写明文库：密文库的密钥行随表复制落地，
- * tenant_crypto_key 引用 tenant(id)，必须等 tenant 行复制后才能进密文库）。 */
+/* dbIssuer 直接落库发行密钥（两库同写：运行期一律从主库 yzws-v1-sec 读取密钥记录，
+ * 明文库仅作对账副本；057 已移除 tenant_id 外键以支持 platform 主体，无需等待表复制顺序）。 */
 type dbIssuer struct{ store *datastore.Store }
 
 func (i *dbIssuer) InsertKey(ctx context.Context, tenantID string, keyVersion int64, keyType seccrypto.KeyType, provider, wrapped, wrapRef, actorID string, now int64) error {
-	_, err := i.store.Plain.Exec(ctx, `INSERT INTO tenant_crypto_key
+	insertSQL := `INSERT INTO tenant_crypto_key
 		(id,tenant_id,key_version,wrap_key_type,algorithm,wrapped_key,key_provider,key_wrap_ref,status,activated_at,created_by,created_at)
 		VALUES($1,$2,$3,$4,'AES-256-GCM',$5,$6,$7,'active',$8,$9,$8)
-		ON CONFLICT(tenant_id,wrap_key_type,key_version) DO NOTHING`,
-		platform.ID(), tenantID, keyVersion, string(keyType), wrapped, provider, wrapRef, now, actorID)
-	return err
+		ON CONFLICT(tenant_id,wrap_key_type,key_version) DO NOTHING`
+	for _, pool := range []*pgxpool.Pool{i.store.Secure, i.store.Plain} {
+		if pool == nil {
+			continue
+		}
+		if _, err := pool.Exec(ctx, insertSQL,
+			platform.ID(), tenantID, keyVersion, string(keyType), wrapped, provider, wrapRef, now, actorID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 /* collectSubjects 收集所有涉及租户主体（各表 distinct tenant_id + tenant 表 id）。 */

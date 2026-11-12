@@ -19,8 +19,10 @@ import (
 	"time"
 
 	"clothp/internal/auth"
+	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
+	"clothp/internal/seccrypto"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -631,6 +633,7 @@ func registerPlatform(api *httpapi.API) {
 			return err
 		}
 		defer rows.Close()
+		rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
 		items := []map[string]any{}
 		for rows.Next() {
 			var id, code, name, shortCode, contactName, contactPhone, contactWechat, contactQQ, contactAlipay, address, region, scale, remark, regStatus, customerType string
@@ -641,6 +644,21 @@ func registerPlatform(api *httpapi.API) {
 				&address, &region, &scale, &remark, &regStatus, &created, &approvedAt, &customerType, &isTrial, &expedited); err != nil {
 				return err
 			}
+			/* 密文库敏感列解密回明文（迁移过渡期明文透传；tenant 表 AAD 的 tenantID 与主键均为 t.id） */
+			dec, err := rowCrypto.FromSecure(r.Context(), id, "tenant", id, map[string]any{
+				"contact_name": contactName, "contact_phone": contactPhone,
+				"contact_wechat": contactWechat, "contact_qq": contactQQ,
+				"contact_alipay": contactAlipay, "address": address,
+			})
+			if err != nil {
+				return fmt.Errorf("解密租户 %s 联系信息失败: %w", id, err)
+			}
+			contactName, _ = dec["contact_name"].(string)
+			contactPhone, _ = dec["contact_phone"].(string)
+			contactWechat, _ = dec["contact_wechat"].(string)
+			contactQQ, _ = dec["contact_qq"].(string)
+			contactAlipay, _ = dec["contact_alipay"].(string)
+			address, _ = dec["address"].(string)
 			items = append(items, map[string]any{"id": id, "code": code, "name": name, "short_code": shortCode,
 				"contact_name": contactName, "contact_phone": contactPhone, "contact_wechat": contactWechat,
 				"contact_qq": contactQQ, "contact_alipay": contactAlipay, "address": address, "region": region,
@@ -676,18 +694,17 @@ func registerPlatform(api *httpapi.API) {
 		if shortCode != "" && !shortCodePattern.MatchString(shortCode) {
 			return httpapi.Error(http.StatusBadRequest, "INVALID_SHORT_CODE", "租户标识须为 5 位英文字母或数字")
 		}
-		tx, err := api.DB.Begin(r.Context())
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback(r.Context())
+		ctx := r.Context()
 		tenantID := r.PathValue("id")
-		var code, name, currentShort, regStatus, contactPhone string
+		/* 预检（权威防重在 Saga 第一步 claim 的 CAS：UPDATE ... WHERE registration_status='pending'） */
+		var code, name, currentShort, regStatus, contactPhone, oldCustomerType, oldTimezone string
 		var isTrial bool
-		err = tx.QueryRow(r.Context(), `SELECT code,name,short_code,registration_status,COALESCE(contact_phone,''),
+		var oldExpediteAt *int64
+		err := api.DB.QueryRow(ctx, `SELECT code,name,COALESCE(short_code,''),registration_status,COALESCE(contact_phone,''),
+			COALESCE(customer_type,'paid'),expedite_requested_at,timezone,
 			EXISTS(SELECT 1 FROM tenant_subscription ts WHERE ts.tenant_id=tenant.id AND ts.customer_type='trial')
-			FROM tenant WHERE id=$1 FOR UPDATE`, tenantID).
-			Scan(&code, &name, &currentShort, &regStatus, &contactPhone, &isTrial)
+			FROM tenant WHERE id=$1`, tenantID).
+			Scan(&code, &name, &currentShort, &regStatus, &contactPhone, &oldCustomerType, &oldExpediteAt, &oldTimezone, &isTrial)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "注册申请不存在")
 		}
@@ -705,7 +722,8 @@ func registerPlatform(api *httpapi.API) {
 		if isTrial && adminLoginName == "" {
 			adminLoginName = contactPhone
 		}
-		ids, err := api.Auth.SeedTenant(r.Context(), tx, auth.TenantSeed{
+		/* 种子计划：短码/登录名/工号解析与全部 ID 在事务外预生成（两库写入一致） */
+		plan, err := api.Auth.PrepareTenantSeed(ctx, api.DB, auth.TenantSeed{
 			ExistingTenantID: tenantID, Code: code, Name: name, ShortCode: shortCode,
 			AdminLoginName: adminLoginName, AdminName: strings.TrimSpace(in.AdminName),
 			AdminPassword: in.AdminPassword,
@@ -713,9 +731,10 @@ func registerPlatform(api *httpapi.API) {
 		if err != nil {
 			return httpapi.Error(http.StatusConflict, "SEED_TENANT_FAILED", "启用失败：短码或管理员账号不可用（"+err.Error()+"）")
 		}
-		adminUserID := ids["tenant_admin_user_id"]
-		var adminLogin, verifier, employeeID string
-		if err := tx.QueryRow(r.Context(), `SELECT login_name,password_verifier,COALESCE(employee_id,'') FROM user_account WHERE tenant_id=$1 AND id=$2`, tenantID, adminUserID).Scan(&adminLogin, &verifier, &employeeID); err != nil {
+		/* 补偿现场：旧订阅快照（体验厂一键体验可能已建行，点亮进度须可恢复） */
+		var oldSubscription string
+		if err := api.DB.QueryRow(ctx, `SELECT COALESCE(row_to_json(s)::text,'') FROM
+			(SELECT * FROM tenant_subscription WHERE tenant_id=$1) s`, tenantID).Scan(&oldSubscription); err != nil {
 			return err
 		}
 		now := platform.Now()
@@ -723,63 +742,140 @@ func registerPlatform(api *httpapi.API) {
 		if isTrial {
 			customerType = "trial"
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE tenant SET registration_status='approved',customer_type=$1,approved_at=$2,approved_by=$3,
-			admin_login_name=$4,admin_password_verifier=$5,admin_employee_id=NULLIF($6,''),expedite_requested_at=NULL,version=version+1 WHERE id=$7`,
-			customerType, now, p.AdminID, adminLogin, verifier, employeeID, tenantID); err != nil {
+		/* 体验厂管理员手机号（回填步骤在 crypto_key 之后执行，步骤内再加密/取盲索引） */
+		trialPhone := seccrypto.NormalizePhone(contactPhone)
+		keyID, keyWrapped, err := prepareTenantCryptoKey(ctx, api, tenantID)
+		if err != nil {
 			return err
 		}
-		if isTrial {
-			/* 体验订阅：审批通过才正式开始 30 天，功能点亮进度保留。 */
-			trialEnds := now + int64((30*24*time.Hour)/time.Microsecond)
-			if _, err := tx.Exec(r.Context(), `INSERT INTO tenant_subscription(id,tenant_id,edition,features,customer_type,status,user_limit,
-				trial_ends_at,activated_at,created_at,created_by,updated_at,updated_by)
-				VALUES($1,$2,$3,'{}','trial','trial',$4,$5,$6,$6,'platform:' || $7,$6,'platform:' || $7)
-				ON CONFLICT(tenant_id) DO UPDATE SET edition=EXCLUDED.edition,user_limit=EXCLUDED.user_limit,
-				customer_type='trial',status='trial',trial_ends_at=EXCLUDED.trial_ends_at,activated_at=EXCLUDED.activated_at,
-				updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_subscription.version+1`,
-				platform.ID(), tenantID, in.Edition, in.UserLimit, trialEnds, now, p.AdminID); err != nil {
-				return err
+		payload := tenantApprovePayload{
+			TenantID: tenantID, AdminUserID: plan.UserID, AdminEmployeeID: plan.EmployeeID,
+			IsTrial: isTrial, OldShortCode: currentShort, OldTimezone: oldTimezone,
+			OldCustomerType: oldCustomerType, OldExpediteAt: oldExpediteAt,
+			HadSubscription: oldSubscription != "", OldSubscription: oldSubscription,
+		}
+		stageBoth := func(stage func(context.Context, pgx.Tx) error) func(context.Context, *dualwrite.Tx) error {
+			return func(ctx context.Context, tx *dualwrite.Tx) error {
+				if tx.Plain() != nil {
+					if err := stage(ctx, tx.Plain()); err != nil {
+						return err
+					}
+				}
+				if tx.Secure() != nil {
+					if err := stage(ctx, tx.Secure()); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
-			/* 管理员员工档案回填注册手机号：微信扫码/短信登录都按该手机号识别到管理员。 */
-			if contactPhone != "" {
-				if _, err := tx.Exec(r.Context(), `UPDATE employee SET phone=$1,updated_at=$2
-					WHERE tenant_id=$3 AND id=$4`, contactPhone, now, tenantID, employeeID); err != nil {
+		}
+		steps := tenantApproveSteps(payload, map[string]func(context.Context, *dualwrite.Tx) error{
+			"claim": func(ctx context.Context, tx *dualwrite.Tx) error {
+				if tx.Plain() != nil {
+					result, err := tx.Plain().Exec(ctx, `UPDATE tenant SET registration_status='approving',version=version+1 WHERE id=$1 AND registration_status='pending'`, tenantID)
+					if err != nil {
+						return err
+					}
+					if result.RowsAffected() == 0 {
+						return httpapi.Error(http.StatusConflict, "NOT_PENDING", "该注册申请已处理，不能重复审批")
+					}
+				}
+				if tx.Secure() != nil {
+					/* 历史分叉库可能尚无该行：尽力而为，以明文库为准 */
+					_, _ = tx.Secure().Exec(ctx, `UPDATE tenant SET registration_status='approving',version=version+1 WHERE id=$1 AND registration_status='pending'`, tenantID)
+				}
+				return nil
+			},
+			"ensure_root": func(ctx context.Context, tx *dualwrite.Tx) error {
+				return ensureSecureTenantRoot(ctx, api, tenantID, tx)
+			},
+			"seed_root":     stageBoth(plan.ExecRoot),
+			"seed_admin":    stageBoth(plan.ExecAdmin),
+			"seed_role":     stageBoth(plan.ExecRole),
+			"seed_settings": stageBoth(plan.ExecSettings),
+			"approve_core": func(ctx context.Context, tx *dualwrite.Tx) error {
+				if err := execBothTx(ctx, tx, `UPDATE tenant SET registration_status='approved',customer_type=$1,approved_at=$2,approved_by=$3,
+					admin_login_name=$4,admin_password_verifier=$5,admin_employee_id=NULLIF($6,''),expedite_requested_at=NULL,version=version+1 WHERE id=$7`,
+					customerType, now, p.AdminID, plan.AdminLogin, plan.Verifier, plan.EmployeeID, tenantID); err != nil {
 					return err
 				}
-			}
-			/* 体验厂管理员以手机号/微信登录，不强制改密；初始密码供其他员工首次短信/微信登录使用。 */
-			if _, err := tx.Exec(r.Context(), `UPDATE user_account SET password_change_required=FALSE
-				WHERE tenant_id=$1 AND id=$2`, tenantID, adminUserID); err != nil {
-				return err
-			}
-		} else {
-			if _, err := tx.Exec(r.Context(), `INSERT INTO tenant_subscription(id,tenant_id,edition,features,customer_type,status,user_limit,
-				activated_at,features_confirmed_by,features_confirmed_at,created_at,created_by,updated_at,updated_by)
-				VALUES($1,$2,$3,'[]','paid','active',$4,$5,$6,$5,$5,$6,$5,$6)
-				ON CONFLICT(tenant_id) DO UPDATE SET edition=EXCLUDED.edition,user_limit=EXCLUDED.user_limit,
-				customer_type='paid',status='active',activated_at=EXCLUDED.activated_at,
-				features_confirmed_by=EXCLUDED.features_confirmed_by,features_confirmed_at=EXCLUDED.features_confirmed_at,
-				updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_subscription.version+1`,
-				platform.ID(), tenantID, in.Edition, in.UserLimit, now, "platform:"+p.AdminID); err != nil {
-				return err
-			}
-		}
-		if err := ensureTenantCryptoKey(r.Context(), api, tx, tenantID, p.AdminID, now); err != nil {
+				if isTrial {
+					/* 体验订阅：审批通过才正式开始 30 天，功能点亮进度保留。 */
+					trialEnds := now + int64((30*24*time.Hour)/time.Microsecond)
+					if err := execBothTx(ctx, tx, `INSERT INTO tenant_subscription(id,tenant_id,edition,features,customer_type,status,user_limit,
+						trial_ends_at,activated_at,created_at,created_by,updated_at,updated_by)
+						VALUES($1,$2,$3,'{}','trial','trial',$4,$5,$6,$6,'platform:' || $7,$6,'platform:' || $7)
+						ON CONFLICT(tenant_id) DO UPDATE SET edition=EXCLUDED.edition,user_limit=EXCLUDED.user_limit,
+						customer_type='trial',status='trial',trial_ends_at=EXCLUDED.trial_ends_at,activated_at=EXCLUDED.activated_at,
+						updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_subscription.version+1`,
+						platform.ID(), tenantID, in.Edition, in.UserLimit, trialEnds, now, p.AdminID); err != nil {
+						return err
+					}
+					/* 管理员员工档案回填注册手机号：微信扫码/短信登录都按该手机号识别到管理员。
+					 * 密文库需 enc:v1 + 盲索引；密钥已由前序 crypto_key 步骤落库。 */
+					if trialPhone != "" && api.Crypto != nil {
+						trialPhoneHash, err := api.Crypto.PhoneHash(ctx, tenantID, "employee.phone", trialPhone)
+						if err != nil {
+							return err
+						}
+						trialPhoneEnc := trialPhone
+						rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
+						enc, err := rowCrypto.ForSecure(ctx, tenantID, "employee", plan.EmployeeID, map[string]any{"phone": trialPhone})
+						if err != nil {
+							return err
+						}
+						if v, ok := enc["phone"].(string); ok && v != "" {
+							trialPhoneEnc = v
+						}
+						if tx.Plain() != nil {
+							if _, err := tx.Plain().Exec(ctx, `UPDATE employee SET phone=$1,phone_hash=NULLIF($2,''),updated_at=$3
+								WHERE tenant_id=$4 AND id=$5`, trialPhone, trialPhoneHash, now, tenantID, plan.EmployeeID); err != nil {
+								return err
+							}
+						}
+						if tx.Secure() != nil {
+							if _, err := tx.Secure().Exec(ctx, `UPDATE employee SET phone=$1,phone_hash=NULLIF($2,''),updated_at=$3
+								WHERE tenant_id=$4 AND id=$5`, trialPhoneEnc, trialPhoneHash, now, tenantID, plan.EmployeeID); err != nil {
+								return err
+							}
+						}
+					}
+					/* 体验厂管理员以手机号/微信登录，不强制改密；初始密码供其他员工首次短信/微信登录使用。 */
+					return execBothTx(ctx, tx, `UPDATE user_account SET password_change_required=FALSE
+						WHERE tenant_id=$1 AND id=$2`, tenantID, plan.UserID)
+				}
+				return execBothTx(ctx, tx, `INSERT INTO tenant_subscription(id,tenant_id,edition,features,customer_type,status,user_limit,
+					activated_at,features_confirmed_by,features_confirmed_at,created_at,created_by,updated_at,updated_by)
+					VALUES($1,$2,$3,'[]','paid','active',$4,$5,$6,$5,$5,$6,$5,$6)
+					ON CONFLICT(tenant_id) DO UPDATE SET edition=EXCLUDED.edition,user_limit=EXCLUDED.user_limit,
+					customer_type='paid',status='active',activated_at=EXCLUDED.activated_at,
+					features_confirmed_by=EXCLUDED.features_confirmed_by,features_confirmed_at=EXCLUDED.features_confirmed_at,
+					updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_subscription.version+1`,
+					platform.ID(), tenantID, in.Edition, in.UserLimit, now, "platform:"+p.AdminID)
+			},
+			"crypto_key": func(ctx context.Context, tx *dualwrite.Tx) error {
+				return execBothTx(ctx, tx, `INSERT INTO tenant_crypto_key(id,tenant_id,key_version,algorithm,wrapped_key,key_wrap_ref,status,activated_at,created_by,created_at)
+					VALUES($1,$2,1,'AES-256-GCM',$3,'local-master:v1','active',$4,$5,$4)
+					ON CONFLICT(tenant_id,key_version) DO NOTHING`, keyID, tenantID, keyWrapped, now, "platform:"+p.AdminID)
+			},
+			"lead_audit": func(ctx context.Context, tx *dualwrite.Tx) error {
+				if tx.Plain() == nil {
+					return nil
+				}
+				if _, err := tx.Plain().Exec(ctx, `UPDATE visitor_lead SET intent_status='won',updated_at=$1,updated_by=$2
+					WHERE converted_tenant_id=$3 AND intent_status NOT IN ('won','lost')`, now, "platform:"+p.AdminID, tenantID); err != nil {
+					return err
+				}
+				return platformAudit(ctx, tx.Plain(), p.AdminID, "tenant_registration_approve", "tenant", tenantID,
+					map[string]any{"registration_status": "pending"},
+					map[string]any{"registration_status": "approved", "customer_type": customerType, "edition": in.Edition,
+						"user_limit": in.UserLimit, "admin_login_name": plan.AdminLogin}, in.Reason)
+			},
+		})
+		if err := api.Writer.RunSaga(ctx, tenantID, "tenant.approve", payload, steps); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE visitor_lead SET intent_status='won',updated_at=$1,updated_by=$2
-			WHERE converted_tenant_id=$3 AND intent_status NOT IN ('won','lost')`, now, "platform:"+p.AdminID, tenantID); err != nil {
-			return err
-		}
-		if err := platformAudit(r.Context(), tx, p.AdminID, "tenant_registration_approve", "tenant", tenantID,
-			map[string]any{"registration_status": "pending"},
-			map[string]any{"registration_status": "approved", "customer_type": customerType, "edition": in.Edition,
-				"user_limit": in.UserLimit, "admin_login_name": adminLogin}, in.Reason); err != nil {
-			return err
-		}
-		if err := tx.Commit(r.Context()); err != nil {
-			return err
-		}
+		adminLogin := plan.AdminLogin
 		message := "已启用该制衣厂；请将管理员账号与初始密码安全传达给厂家，首次登录须修改密码"
 		if isTrial {
 			message = "体验制衣厂已通过审核：注册手机号即该厂管理员账户，初始密码供本厂其他员工首次短信/微信登录使用"
@@ -833,37 +929,105 @@ func registerPlatform(api *httpapi.API) {
 	})
 }
 
-// ensureTenantCryptoKey 为制衣厂生成本厂数据加密主密钥（DEK），用本地主密钥（由 JWTSecret 派生）包装后落库。
-func ensureTenantCryptoKey(ctx context.Context, api *httpapi.API, tx pgx.Tx, tenantID, adminID string, now int64) error {
-	var exists bool
-	if err := tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM tenant_crypto_key WHERE tenant_id=$1 AND status='active')", tenantID).Scan(&exists); err != nil {
+/* ensureSecureTenantRoot 把 plain 的 tenant 根行加密后幂等补入 secure（审批专用：
+ * 待审批租户无 DEK 时 catchup 跳过，审批时密钥已就绪）。 */
+func ensureSecureTenantRoot(ctx context.Context, api *httpapi.API, tenantID string, tx *dualwrite.Tx) error {
+	if tx.Secure() == nil {
+		return nil
+	}
+	rows, err := api.DB.Query(ctx, `SELECT * FROM tenant WHERE id=$1`, tenantID)
+	if err != nil {
 		return err
 	}
-	if exists {
-		return nil
+	defer rows.Close()
+	fields := rows.FieldDescriptions()
+	if !rows.Next() {
+		return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "注册申请不存在")
+	}
+	values, err := rows.Values()
+	if err != nil {
+		return err
+	}
+	row := map[string]any{}
+	columns := make([]string, len(fields))
+	for i, f := range fields {
+		columns[i] = string(f.Name)
+		row[columns[i]] = values[i]
+	}
+	if api.Crypto != nil {
+		rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
+		encrypted, err := rowCrypto.ForSecure(ctx, tenantID, "tenant", tenantID, row)
+		if err != nil {
+			return err
+		}
+		row = encrypted
+	}
+	var colList, ph []string
+	args := make([]any, len(columns))
+	for i, col := range columns {
+		colList = append(colList, `"`+col+`"`)
+		ph = append(ph, fmt.Sprintf("$%d", i+1))
+		args[i] = row[col]
+	}
+	_, err = tx.Secure().Exec(ctx, fmt.Sprintf(`INSERT INTO tenant(%s) VALUES(%s) ON CONFLICT(id) DO NOTHING`,
+		strings.Join(colList, ","), strings.Join(ph, ",")), args...)
+	return err
+}
+
+/* prepareTenantCryptoKey 准备租户 DEK 落库材料（事务外）：任一库已有 active 密钥则复用其
+ * id/wrapped（运行期一律从 secure 读，故优先 secure 记录），否则新生成。双写步骤两库
+ * 写同一值，保证 plain/secure 加解密口径一致。 */
+func prepareTenantCryptoKey(ctx context.Context, api *httpapi.API, tenantID string) (string, string, error) {
+	pools := []struct {
+		name string
+		pool interface {
+			QueryRow(context.Context, string, ...any) pgx.Row
+		}
+	}{}
+	if api.Store != nil && api.Store.Secure != nil {
+		pools = append(pools, struct {
+			name string
+			pool interface {
+				QueryRow(context.Context, string, ...any) pgx.Row
+			}
+		}{"secure", api.Store.Secure})
+	}
+	pools = append(pools, struct {
+		name string
+		pool interface {
+			QueryRow(context.Context, string, ...any) pgx.Row
+		}
+	}{"plain", api.DB})
+	for _, p := range pools {
+		var id, wrapped string
+		err := p.pool.QueryRow(ctx, `SELECT id,wrapped_key FROM tenant_crypto_key WHERE tenant_id=$1 AND status='active'
+			ORDER BY key_version DESC LIMIT 1`, tenantID).Scan(&id, &wrapped)
+		if err == nil {
+			return id, wrapped, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", "", fmt.Errorf("check %s tenant_crypto_key: %w", p.name, err)
+		}
 	}
 	dek := make([]byte, 32)
 	if _, err := rand.Read(dek); err != nil {
-		return err
+		return "", "", err
 	}
 	master := sha256.Sum256([]byte("yzws-tenant-crypto:v1:" + api.Config.JWTSecret))
 	block, err := aes.NewCipher(master[:])
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
-		return err
+		return "", "", err
 	}
 	wrapped := base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, dek, nil))
-	_, err = tx.Exec(ctx, `INSERT INTO tenant_crypto_key(id,tenant_id,key_version,algorithm,wrapped_key,key_wrap_ref,status,activated_at,created_by,created_at)
-		VALUES($1,$2,1,'AES-256-GCM',$3,'local-master:v1','active',$4,$5,$4)
-		ON CONFLICT(tenant_id,key_version) DO NOTHING`, platform.ID(), tenantID, wrapped, now, "platform:"+adminID)
-	return err
+	return platform.ID(), wrapped, nil
 }
 
 func platformAudit(ctx context.Context, tx pgx.Tx, adminID, action, ownerType, ownerID string, before, after any, reason string) error {
@@ -904,6 +1068,36 @@ func registerTenantProfile(api *httpapi.API) {
 		if err := api.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM user_account WHERE tenant_id=$1 AND status='active'", p.TenantID).Scan(&activeUsers); err != nil {
 			return err
 		}
+		/* 密文库敏感列解密回明文（迁移过渡期明文透传；*string 先归一为 string 解密，
+		 * 再按原 NULL/非 NULL 语义回填——NULL 仍返回 null） */
+		rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
+		deref := func(v *string) string {
+			if v == nil {
+				return ""
+			}
+			return *v
+		}
+		dec, err := rowCrypto.FromSecure(r.Context(), p.TenantID, "tenant", p.TenantID, map[string]any{
+			"contact_name": deref(contactName), "contact_phone": deref(contactPhone),
+			"contact_wechat": deref(contactWechat), "contact_qq": deref(contactQQ),
+			"contact_alipay": deref(contactAlipay), "address": deref(address),
+		})
+		if err != nil {
+			return fmt.Errorf("解密本厂联系信息失败: %w", err)
+		}
+		repoin := func(key string, orig *string) *string {
+			if orig == nil {
+				return nil
+			}
+			s, _ := dec[key].(string)
+			return &s
+		}
+		contactName = repoin("contact_name", contactName)
+		contactPhone = repoin("contact_phone", contactPhone)
+		contactWechat = repoin("contact_wechat", contactWechat)
+		contactQQ = repoin("contact_qq", contactQQ)
+		contactAlipay = repoin("contact_alipay", contactAlipay)
+		address = repoin("address", address)
 		profile := map[string]any{
 			"id": p.TenantID, "code": code, "name": name, "short_code": shortCode,
 			"customer_type": customerType, "registration_status": regStatus, "registered_at": registeredAt,

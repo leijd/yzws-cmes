@@ -6,6 +6,7 @@ import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 import DatePicker from '../components/DatePicker.vue'
 import FilterSelect from '../components/FilterSelect.vue'
+import { dictOptions, type DictOption } from '../dictionaries'
 
 const { has, ready } = usePermissions()
 const canManage = computed(() => has('masterdata:read'))
@@ -26,15 +27,52 @@ const notice = ref('')
 const myEmployeeId = ref('')
 
 const genderOptions = [{ value: 'male', label: '男' }, { value: 'female', label: '女' }]
-const positionOptions = ['车工', '裁床师傅', '组长', '质检', '仓管', '整烫工', '生产工艺员'].map(v => ({ value: v, label: v }))
-const workshopOptions = ['一车间', '二车间', '三车间', '裁床房'].map(v => ({ value: v, label: v }))
-const lineOptions = ['1线', '2线', '3线', '4线', '裁床房'].map(v => ({ value: v, label: v }))
-const gradeOptions = [{ value: 'A', label: 'A 熟练' }, { value: 'B', label: 'B 合格' }, { value: 'C', label: 'C 学徒' }]
-const nationOptions = ['汉', '回', '壮', '苗', '其他'].map(v => ({ value: v, label: v }))
-const rateOptions = [{ value: 'high', label: '高档（系数 1.25）' }, { value: 'mid', label: '中档（系数 1.0）' }, { value: 'low', label: '低档（系数 0.85）' }]
 const modeOptions = [{ value: 'piecework', label: '计件' }, { value: 'monthly', label: '月薪' }]
 const statusOptions = [{ value: 'active', label: '在职' }, { value: 'disabled', label: '离职' }]
 const accountStatusOptions = [{ value: 'active', label: '启用' }, { value: 'disabled', label: '停用' }]
+
+/* ===== 下拉选项从数据库实际数据获取（字典接口带 60s 缓存；车间/产线取组织实时数据）===== */
+const nationOptions = ref<DictOption[]>([])
+const positionOptions = ref<DictOption[]>([])
+const gradeOptions = ref<DictOption[]>([])
+const rateOptions = ref<DictOption[]>([])
+const workshopOptions = ref<DictOption[]>([])
+const lineOptions = ref<DictOption[]>([])
+const workshops = ref<any[]>([])
+
+async function loadDictSelects() {
+  const [nation, position, grade, rate] = await Promise.all([
+    dictOptions('nation', 'name'), dictOptions('position', 'name'),
+    dictOptions('skill_grade', 'code'), dictOptions('rate_level', 'code'),
+  ])
+  nationOptions.value = nation
+  positionOptions.value = position
+  gradeOptions.value = grade
+  rateOptions.value = rate
+}
+async function loadWorkshops() {
+  try {
+    const r = await api<{ items: any[] }>('/workshops', {}, { silent: true })
+    workshops.value = r.items || []
+    workshopOptions.value = workshops.value.filter(w => w.status === 'active').map(w => ({ value: w.name, label: w.name }))
+  } catch { /* 无 workshop:read 权限时留空；编辑回填会注入当前值兜底 */ }
+}
+async function loadLines(workshopName: string) {
+  const w = workshops.value.find(x => x.name === workshopName)
+  if (!w) { lineOptions.value = []; return }
+  try {
+    const r = await api<{ items: any[] }>(`/lines?workshop_id=${w.id}`, {}, { silent: true })
+    lineOptions.value = (r.items || []).map(l => ({ value: l.name, label: l.name }))
+  } catch { lineOptions.value = [] }
+}
+function onWorkshopChange() {
+  form.production_line = ''
+  void loadLines(form.workshop)
+}
+/* 当前值不在选项（历史数据或接口不可达）时注入，保证编辑回显 */
+function ensureOption(list: DictOption[], value: string) {
+  if (value && !list.some(o => o.value === value)) list.push({ value, label: value })
+}
 
 const blank = () => ({ code: '', name: '', gender: 'male', birth_date: '', phone: '', id_card_no: '', nation: '汉', native_place: '', address: '', hire_date: '', position: '', workshop: '', production_line: '', skill_grade: 'B', pay_mode: 'piecework', base_salary: '0', rate_level: 'mid', bank_card: '', bank_name: '', emergency_contact: '', emergency_phone: '', status: 'active', remark: '', skill_process_ids: [] as string[] })
 const form = reactive(blank())
@@ -54,8 +92,8 @@ const selfAge = computed(() => {
   if (now.getMonth() < birth.getMonth() || (now.getMonth() === birth.getMonth() && now.getDate() < birth.getDate())) a--
   return a + ' 岁'
 })
-const selfGrade = computed(() => gradeOptions.find(o => o.value === selfProfile.value?.skill_grade)?.label || selfProfile.value?.skill_grade || '—')
-const selfRate = computed(() => rateOptions.find(o => o.value === selfProfile.value?.rate_level)?.label || selfProfile.value?.rate_level || '—')
+const selfGrade = computed(() => gradeOptions.value.find(o => o.value === selfProfile.value?.skill_grade)?.label || selfProfile.value?.skill_grade || '—')
+const selfRate = computed(() => rateOptions.value.find(o => o.value === selfProfile.value?.rate_level)?.label || selfProfile.value?.rate_level || '—')
 
 const age = computed(() => {
   if (!form.birth_date) return '—'
@@ -80,6 +118,75 @@ const account = computed(() => detail.value?.account || null)
 
 const showPassword = ref(false)
 const passwordForm = reactive({ old_password: '', new_password: '', confirm: '' })
+
+/* 敏感字段解锁：点任一字段的眼睛图标 → 租户管理员输入本人登录密码 / 其他角色输入授权码，
+ * 验证通过后该员工全部加密信息显示明文；5 分钟后自动收回、恢复 ***。解锁值仅用于查看，
+ * 保存时不回写；解锁行为服务端已记审计日志。 */
+const revealableKeys = ['birth_date', 'phone', 'id_card_no', 'native_place', 'address', 'bank_card', 'bank_name', 'emergency_contact', 'emergency_phone'] as const
+const revealLabels: Record<string, string> = { birth_date: '出生日期', phone: '联系电话', id_card_no: '身份证号', native_place: '籍贯', address: '现住址', bank_card: '银行卡号', bank_name: '开户行', emergency_contact: '紧急联系人', emergency_phone: '紧急联系电话' }
+const revealed = reactive<Record<string, boolean>>({})
+const revealKey = ref('')
+const revealSecret = ref('')
+const revealError = ref('')
+const showReveal = ref(false)
+const revealToken = ref('')
+const revealExpiresAt = ref(0) // 毫秒时间戳
+const nowTick = ref(Date.now())
+let revealTimer: ReturnType<typeof setTimeout> | undefined
+const revealByPassword = computed(() => canAccountWrite.value)
+const revealUnlocked = computed(() => revealToken.value !== '' && revealExpiresAt.value > nowTick.value)
+const revealRemainText = computed(() => {
+  const s = Math.max(0, Math.ceil((revealExpiresAt.value - nowTick.value) / 1000))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+})
+
+function isMasked(key: string) { return !isSelf.value && !revealUnlocked.value && detail.value && String(detail.value[key] ?? '') === '***' }
+function openReveal(key: string) { revealKey.value = key; revealSecret.value = ''; revealError.value = ''; showReveal.value = true }
+function revealQuery() { return revealUnlocked.value ? `?reveal_token=${encodeURIComponent(revealToken.value)}` : '' }
+
+async function confirmReveal() {
+  if (!revealSecret.value.trim()) { revealError.value = revealByPassword.value ? '请输入登录密码' : '请输入授权码'; return }
+  if (!editing.value) return
+  revealError.value = ''
+  try {
+    const body = revealByPassword.value ? { password: revealSecret.value.trim() } : { grant_code: revealSecret.value.trim() }
+    const res = await api<{ reveal_token: string; expires_at: number }>(`/employees/${editing.value.id}/reveal`, { method: 'POST', body: JSON.stringify(body) })
+    revealToken.value = res.reveal_token
+    revealExpiresAt.value = Math.min(Math.floor(res.expires_at / 1000), Date.now() + 5 * 60 * 1000)
+    showReveal.value = false
+    await reloadDetailRevealed()
+    notice.value = '敏感信息已解锁，5 分钟后自动收回'
+    if (revealTimer) clearTimeout(revealTimer)
+    revealTimer = setTimeout(revokeReveal, Math.max(0, revealExpiresAt.value - Date.now()))
+  } catch (e) { revealError.value = (e as Error).message }
+}
+
+/* 解锁窗口内重新拉详情：全部敏感字段明文回填（保存仍不回写） */
+async function reloadDetailRevealed() {
+  if (!editing.value) return
+  const data = await api<any>(`/employees/${editing.value.id}${revealQuery()}`)
+  detail.value = data
+  for (const k of Object.keys(revealed)) delete revealed[k]
+  for (const key of revealableKeys) {
+    const v = data[key]
+    if (v !== null && v !== undefined && v !== '***') { (form as any)[key] = String(v); revealed[key] = true }
+  }
+}
+
+/* 到期收回：清空解锁状态并重新拉详情，敏感字段恢复 *** 显示 */
+async function revokeReveal() {
+  revealToken.value = ''
+  revealExpiresAt.value = 0
+  if (revealTimer) { clearTimeout(revealTimer); revealTimer = undefined }
+  for (const k of Object.keys(revealed)) delete revealed[k]
+  if (editing.value && showForm.value) {
+    try {
+      const data = await api<any>(`/employees/${editing.value.id}`)
+      detail.value = data
+      for (const key of revealableKeys) (form as any)[key] = ''
+    } catch { /* 保持现状 */ }
+  }
+}
 
 async function load() {
   loading.value = true; error.value = ''
@@ -145,13 +252,15 @@ async function openEdit(item: any) {
   error.value = ''
   const self = item.id === myEmployeeId.value
   try {
-    const data = await api<any>(`/employees/${item.id}`)
+    const data = await api<any>(`/employees/${item.id}${revealQuery()}`)
     detail.value = data
     const next: Record<string, any> = blank()
+    for (const k of Object.keys(revealed)) delete revealed[k]
     const map: Record<string, string> = { code: 'employee_no', name: 'name', gender: 'gender', birth_date: 'birth_date', nation: 'nation', native_place: 'native_place', address: 'address', hire_date: 'hire_date', position: 'position', workshop: 'workshop', production_line: 'production_line', skill_grade: 'skill_grade', pay_mode: 'pay_mode', base_salary: 'base_salary', rate_level: 'rate_level', emergency_contact: 'emergency_contact', emergency_phone: 'emergency_phone', remark: 'remark' }
     for (const [key, col] of Object.entries(map)) {
       const v = data[col]
-      if (v !== null && v !== undefined) next[key] = String(v)
+      /* 服务端对非本人敏感列返回 *** 占位：留空（不保存），授权查看走眼睛图标 */
+      if (v !== null && v !== undefined && v !== '***') next[key] = String(v)
     }
     if (self) {
       for (const key of ['phone', 'id_card_no', 'bank_card', 'bank_name']) {
@@ -161,6 +270,17 @@ async function openEdit(item: any) {
     }
     next.skill_process_ids = data.skill_process_ids || []
     Object.assign(form, next)
+    /* 下拉选项来自数据库实际数据：当前值缺失时注入兜底并联动产线选项 */
+    ensureOption(positionOptions.value, form.position)
+    ensureOption(nationOptions.value, form.nation)
+    ensureOption(gradeOptions.value, form.skill_grade)
+    ensureOption(rateOptions.value, form.rate_level)
+    ensureOption(workshopOptions.value, form.workshop)
+    if (form.workshop) {
+      void loadLines(form.workshop).then(() => ensureOption(lineOptions.value, form.production_line))
+    } else {
+      ensureOption(lineOptions.value, form.production_line)
+    }
     if (data.account) {
       accountStatus.value = data.account.status
       const codes: string[] = data.account.roles || []
@@ -178,6 +298,8 @@ function buildPayload() {
   payload.skill_process_ids = form.skill_process_ids
   if (!isSelf.value) {
     for (const key of ['phone', 'id_card_no', 'bank_card', 'bank_name']) if (!payload[key]) delete payload[key]
+    /* 授权查看解锁的明文字段仅用于本次显示，保存时不回写 */
+    for (const key of Object.keys(revealed)) if (revealed[key]) delete payload[key]
   }
   return payload
 }
@@ -257,7 +379,7 @@ const customerForm = reactive({ code: '', name: '', contact_name: '', phone: '',
 const showCustomer = ref(false)
 function openCustomer() { Object.assign(customerForm, { code: '', name: '', contact_name: '', phone: '', address: '', remark: '' }); error.value = ''; showCustomer.value = true }
 async function saveCustomer() {
-  if (!customerForm.code.trim() || !customerForm.name.trim()) { error.value = '客户编码和名称必填'; return }
+  if (!customerForm.name.trim()) { error.value = '客户名称必填'; return }
   saving.value = true; error.value = ''
   try {
     await api('/customers', { method: 'POST', body: JSON.stringify(customerForm) })
@@ -272,10 +394,13 @@ onMounted(async () => {
     const me = await api<{ user: { employee_id?: string } }>('/me')
     myEmployeeId.value = me.user.employee_id || ''
   } catch { /* ignore */ }
+  setInterval(() => { nowTick.value = Date.now() }, 1000)
 })
 watch(ready, loaded => {
   if (!loaded) return
   loadRoles()
+  void loadDictSelects()
+  void loadWorkshops()
   if (isSelfView.value) loadSelfProfile()
   else load()
 }, { immediate: true })
@@ -333,31 +458,35 @@ watch(ready, loaded => {
   <ModalDialog v-if="showForm" wide :title="editing ? `员工 · ${form.name || form.code}` : '新增员工'" @close="showForm = false">
     <div v-if="error" class="notice error">{{ error }}</div>
     <div v-if="accountNotice" class="notice success" style="display:flex;align-items:center;justify-content:space-between;gap:10px"><span>{{ accountNotice }}（关闭后不再显示）</span><button class="button secondary small" @click="copyPassword">复制</button></div>
+    <div v-if="revealUnlocked && !isSelf" class="notice" style="display:flex;align-items:center;justify-content:space-between;gap:10px;background:#e3ecfb;border:1px solid #2563eb33">
+      <span>敏感信息已解锁，{{ revealRemainText }} 后自动收回（解锁仅用于查看，保存不会修改加密字段）</span>
+      <button class="button secondary small" @click="revokeReveal">立即收回</button>
+    </div>
     <div class="form-grid">
       <template v-if="canEditEmployee">
         <div class="field"><label class="required">工号</label><input v-model.trim="form.code" placeholder="如 C001" :disabled="!!editing && !canAccountWrite"></div>
         <div class="field"><label class="required">姓名</label><input v-model.trim="form.name" :disabled="!!editing && !canAccountWrite"></div>
         <div class="field"><label>性别</label><div style="display:flex;gap:18px;align-items:center;height:38px"><label v-for="o in genderOptions" :key="o.value"><input v-model="form.gender" type="radio" :value="o.value"> {{ o.label }}</label></div></div>
-        <div class="field"><label>出生日期</label><DatePicker v-model="form.birth_date"/></div>
+        <div class="field"><label>出生日期 <button v-if="isMasked('birth_date')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('birth_date')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><DatePicker v-model="form.birth_date"/></div>
         <div class="field"><label>年龄（自动计算）</label><input :value="age" disabled></div>
-        <div class="field"><label>联系电话</label><input v-model.trim="form.phone" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '11 位手机号'"></div>
-        <div class="field"><label>身份证号</label><input v-model.trim="form.id_card_no" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '18 位'"></div>
+        <div class="field"><label>联系电话 <button v-if="isMasked('phone')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('phone')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.phone" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '11 位手机号'"></div>
+        <div class="field"><label>身份证号 <button v-if="isMasked('id_card_no')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('id_card_no')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.id_card_no" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '18 位'"></div>
         <div class="field"><label>民族</label><FilterSelect v-model="form.nation" :options="nationOptions"/></div>
-        <div class="field"><label>籍贯</label><input v-model.trim="form.native_place" placeholder="如 广西贵港"></div>
+        <div class="field"><label>籍贯 <button v-if="isMasked('native_place')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('native_place')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.native_place" placeholder="如 广西贵港"></div>
         <div class="field"><label>入职日期</label><DatePicker v-model="form.hire_date"/></div>
         <div class="field"><label>岗位</label><FilterSelect v-model="form.position" :options="positionOptions" placeholder="请选择"/></div>
-        <div class="field"><label>责任车间</label><FilterSelect v-model="form.workshop" :options="workshopOptions" placeholder="请选择"/></div>
+        <div class="field"><label>责任车间</label><FilterSelect v-model="form.workshop" :options="workshopOptions" placeholder="请选择" @change="onWorkshopChange"/></div>
         <div class="field"><label>生产线</label><FilterSelect v-model="form.production_line" :options="lineOptions" placeholder="请选择"/></div>
         <div class="field"><label>技能评级</label><FilterSelect v-model="form.skill_grade" :options="gradeOptions"/></div>
         <div class="field"><label>工资模式</label><div style="display:flex;gap:18px;align-items:center;height:38px"><label v-for="o in modeOptions" :key="o.value"><input v-model="form.pay_mode" type="radio" :value="o.value"> {{ o.label }}</label></div></div>
         <div class="field"><label>基础底薪(元)</label><input v-model="form.base_salary" inputmode="decimal" placeholder="计件员工填 0"></div>
         <div class="field"><label>单价档位</label><FilterSelect v-model="form.rate_level" :options="rateOptions"/></div>
-        <div class="field"><label>银行卡号</label><input v-model.trim="form.bank_card" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '发薪使用'"></div>
-        <div class="field"><label>开户行</label><input v-model.trim="form.bank_name" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '如 工行'"></div>
-        <div class="field"><label>紧急联系人</label><input v-model.trim="form.emergency_contact" placeholder="姓名及关系"></div>
-        <div class="field"><label>紧急联系电话</label><input v-model.trim="form.emergency_phone"></div>
+        <div class="field"><label>银行卡号 <button v-if="isMasked('bank_card')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('bank_card')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.bank_card" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '发薪使用'"></div>
+        <div class="field"><label>开户行 <button v-if="isMasked('bank_name')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('bank_name')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.bank_name" :placeholder="editing && !isSelf ? '已设置，留空则不修改' : '如 工行'"></div>
+        <div class="field"><label>紧急联系人 <button v-if="isMasked('emergency_contact')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('emergency_contact')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.emergency_contact" placeholder="姓名及关系"></div>
+        <div class="field"><label>紧急联系电话 <button v-if="isMasked('emergency_phone')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('emergency_phone')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><input v-model.trim="form.emergency_phone"></div>
         <div class="field"><label>在职状态</label><FilterSelect v-model="form.status" :options="statusOptions"/></div>
-        <div class="field full"><label>现住址</label><textarea v-model="form.address" rows="2"></textarea></div>
+        <div class="field full"><label>现住址 <button v-if="isMasked('address')" class="eye-btn" type="button" title="授权查看明文" @click="openReveal('address')"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg></button></label><textarea v-model="form.address" rows="2"></textarea></div>
         <div class="field full"><label>工序专长（多选）</label><div v-if="processes.length" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;max-height:160px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px"><label v-for="p in processes" :key="p.id" style="font-size:13px"><input type="checkbox" :value="p.id" :checked="form.skill_process_ids.includes(p.id)" @change="form.skill_process_ids = form.skill_process_ids.includes(p.id) ? form.skill_process_ids.filter((x: string) => x !== p.id) : [...form.skill_process_ids, p.id]"> {{ p.name }}</label></div><small v-else class="text-muted">工序库为空或无读取权限，可后补</small></div>
         <div class="field full"><label>备注</label><textarea v-model="form.remark" rows="2" placeholder="如 熟练工，6年夹克经验"></textarea></div>
       </template>
@@ -398,17 +527,32 @@ watch(ready, loaded => {
     <template #footer><button class="button secondary" @click="showForm = false">取消</button><button v-if="canEditEmployee" class="button" :disabled="saving || (!!editing && !form.code) || !form.name" @click="save">{{ editing ? '保存' : (canAccountWrite ? '创建员工并开通账号' : '创建员工') }}</button></template>
   </ModalDialog>
 
+  <ModalDialog v-if="showReveal" :title="`解锁敏感信息 · ${revealLabels[revealKey] || ''}`" @close="showReveal = false">
+    <p class="text-muted" style="margin:0 0 10px;font-size:13px">
+      {{ revealByPassword
+        ? '请输入您（租户管理员）的登录密码。验证通过后该员工全部加密信息将显示明文，5 分钟后自动收回。'
+        : '请输入租户管理员签发的敏感信息查看授权码。验证通过后该员工全部加密信息将显示明文，5 分钟后自动收回。' }}
+    </p>
+    <div v-if="revealError" class="notice error">{{ revealError }}</div>
+    <input v-model="revealSecret" :type="revealByPassword ? 'password' : 'text'"
+      :placeholder="revealByPassword ? '输入登录密码' : '输入 12 位授权码'" autocomplete="off" style="width:100%" @keyup.enter="confirmReveal">
+    <template #footer>
+      <button class="button secondary" @click="showReveal = false">取消</button>
+      <button class="button" :disabled="!revealSecret.trim()" @click="confirmReveal">解锁查看</button>
+    </template>
+  </ModalDialog>
+
   <ModalDialog v-if="showCustomer" :title="'新增客户'" @close="showCustomer = false">
     <div v-if="error" class="notice error">{{ error }}</div>
     <div class="form-grid">
-      <div class="field"><label class="required">客户编码</label><input v-model.trim="customerForm.code"></div>
+      <div class="field"><label>客户编码</label><input v-model.trim="customerForm.code" placeholder="留空自动生成（如 KH-00001）"></div>
       <div class="field"><label class="required">客户名称</label><input v-model.trim="customerForm.name"></div>
       <div class="field"><label>联系人</label><input v-model.trim="customerForm.contact_name"></div>
       <div class="field"><label>联系电话</label><input v-model.trim="customerForm.phone"></div>
       <div class="field full"><label>地址</label><input v-model.trim="customerForm.address"></div>
       <div class="field full"><label>备注</label><textarea v-model="customerForm.remark" rows="2"></textarea></div>
     </div>
-    <template #footer><button class="button secondary" @click="showCustomer = false">取消</button><button class="button" :disabled="saving || !customerForm.code || !customerForm.name" @click="saveCustomer">保存</button></template>
+    <template #footer><button class="button secondary" @click="showCustomer = false">取消</button><button class="button" :disabled="saving || !customerForm.name" @click="saveCustomer">保存</button></template>
   </ModalDialog>
 
   <ModalDialog v-if="showPassword" :title="'修改密码'" @close="showPassword = false">
@@ -421,3 +565,21 @@ watch(ready, loaded => {
     <template #footer><button class="button secondary" @click="showPassword = false">取消</button><button class="button" :disabled="saving || passwordForm.new_password.length < 12" @click="changePassword">保存</button></template>
   </ModalDialog>
 </template>
+
+<style scoped>
+/* 敏感字段授权查看：label 右侧蓝色眼睛图标 */
+.eye-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 2px;
+  border: none;
+  background: none;
+  color: #2563eb;
+  cursor: pointer;
+  vertical-align: middle;
+  border-radius: 4px;
+}
+.eye-btn:hover { background: #e3ecfb; }
+</style>

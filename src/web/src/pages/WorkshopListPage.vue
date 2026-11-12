@@ -178,8 +178,8 @@ onMounted(() => { void load(); void loadManagers() })
   <ModalDialog v-if="modalOpen" :title="modalTitle" @close="modalOpen = false">
     <div class="form-grid">
       <div v-if="!editing" class="field">
-        <label class="required">车间编码</label>
-        <input v-model.trim="form.code" maxlength="32" placeholder="如 WS01">
+        <label>车间编码</label>
+        <input v-model.trim="form.code" maxlength="32" placeholder="留空自动生成（如 CJ-00001）">
         <small v-if="codeError" class="field-error">{{ codeError }}</small>
       </div>
       <div class="field"><label class="required">车间名称</label><input v-model.trim="form.name" maxlength="60"></div>
@@ -204,7 +204,7 @@ onMounted(() => { void load(); void loadManagers() })
     </div>
     <div class="form-actions">
       <button class="button secondary" @click="modalOpen = false">取消</button>
-      <button class="button" :disabled="saving || !form.name || (!editing && !form.code)" @click="save">
+      <button class="button" :disabled="saving || !form.name" @click="save">
         {{ saving ? '保存中…' : '保存' }}
       </button>
     </div>

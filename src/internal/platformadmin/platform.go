@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"clothp/internal/auth"
+	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
@@ -286,15 +287,6 @@ func Register(api *httpapi.API) {
 		if in.ShortCode != "" && !tenantShortCodePattern.MatchString(in.ShortCode) {
 			return httpapi.Error(400, "INVALID_SHORT_CODE", "租户标识须为 5 位英文字母或数字")
 		}
-		tx, err := api.DB.Begin(r.Context())
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback(r.Context())
-		ids, err := api.Auth.SeedTenant(r.Context(), tx, auth.TenantSeed{Code: in.Code, Name: in.Name, ShortCode: in.ShortCode, Timezone: in.Timezone, AdminName: in.AdminName, AdminPassword: in.AdminPassword})
-		if err != nil {
-			return httpapi.Error(409, "TENANT_CODE_EXISTS", "租户编码已存在或初始化数据无效")
-		}
 		templateMode := in.RoleTemplateMode
 		if templateMode == "" {
 			if in.RoleTemplateIDs != nil {
@@ -309,25 +301,75 @@ func Register(api *httpapi.API) {
 		if templateMode == "custom" && len(in.RoleTemplateIDs) == 0 {
 			return httpapi.Error(400, "VALIDATION_ERROR", "部分复制时必须选择至少一个角色模板")
 		}
+		ctx := r.Context()
+		/* 种子计划：短码/登录名解析与全部 ID 在事务外预生成（两库写入一致） */
+		plan, err := api.Auth.PrepareTenantSeed(ctx, api.DB, auth.TenantSeed{Code: in.Code, Name: in.Name, ShortCode: in.ShortCode, Timezone: in.Timezone, AdminName: in.AdminName, AdminPassword: in.AdminPassword})
+		if err != nil {
+			return httpapi.Error(409, "TENANT_CODE_EXISTS", "租户编码已存在或初始化数据无效")
+		}
+		var tplPlan *roleApplyPlan
 		templates := map[string]any{"applied_templates": 0, "created_roles": []string{}, "updated_roles": []string{}, "skipped": templateMode == "none"}
 		if templateMode != "none" {
 			templateIDs := in.RoleTemplateIDs
 			if templateMode == "all" {
 				templateIDs = nil
 			}
-			templates, err = applyRoleTemplates(r.Context(), tx, ids["tenant_id"], templateIDs, p.AdminID, api.Config.NodeID)
+			tplPlan, err = planRoleTemplates(ctx, api.DB, plan.TenantID, templateIDs, p.AdminID, api.Config.NodeID)
 			if err != nil {
 				return err
 			}
+			templates = tplPlan.Summary()
+		}
+		stageBoth := func(stage func(context.Context, pgx.Tx) error) func(context.Context, *dualwrite.Tx) error {
+			return func(ctx context.Context, tx *dualwrite.Tx) error {
+				if tx.Plain() != nil {
+					if err := stage(ctx, tx.Plain()); err != nil {
+						return err
+					}
+				}
+				if tx.Secure() != nil {
+					if err := stage(ctx, tx.Secure()); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+		}
+		payload := tenantCreatePayload{TenantID: plan.TenantID}
+		steps := tenantCreateSteps(payload, map[string]func(context.Context, *dualwrite.Tx) error{
+			"seed_root":     stageBoth(plan.ExecRoot),
+			"seed_admin":    stageBoth(plan.ExecAdmin),
+			"seed_role":     stageBoth(plan.ExecRole),
+			"seed_settings": stageBoth(plan.ExecSettings),
+			"role_templates": func(ctx context.Context, tx *dualwrite.Tx) error {
+				if tplPlan == nil {
+					return nil
+				}
+				if tx.Plain() != nil {
+					if err := tplPlan.apply(ctx, tx.Plain()); err != nil {
+						return err
+					}
+				}
+				if tx.Secure() != nil {
+					if err := tplPlan.apply(ctx, tx.Secure()); err != nil {
+						return err
+					}
+				}
+				return nil
+			},
+			"audit": func(ctx context.Context, tx *dualwrite.Tx) error {
+				if tx.Plain() == nil {
+					return nil
+				}
+				return platformAudit(ctx, tx.Plain(), p.AdminID, "tenant_register", "tenant", plan.TenantID, nil,
+					map[string]any{"code": in.Code, "name": in.Name, "timezone": in.Timezone}, "")
+			},
+		})
+		if err := api.Writer.RunSaga(ctx, plan.TenantID, "tenant.create", payload, steps); err != nil {
+			return err
 		}
 		templates["mode"] = templateMode
-		response := map[string]any{"id": ids["tenant_id"], "code": in.Code, "name": in.Name, "status": "active", "admin_user_id": ids["tenant_admin_user_id"], "role_templates": templates}
-		if err := platformAudit(r.Context(), tx, p.AdminID, "tenant_register", "tenant", ids["tenant_id"], nil, map[string]any{"code": in.Code, "name": in.Name, "timezone": in.Timezone}, ""); err != nil {
-			return err
-		}
-		if err := tx.Commit(r.Context()); err != nil {
-			return err
-		}
+		response := map[string]any{"id": plan.TenantID, "code": in.Code, "name": in.Name, "status": "active", "admin_user_id": plan.UserID, "role_templates": templates}
 		return httpapi.JSON(w, 201, response)
 	})
 	for action, status := range map[string]string{"disable": "disabled", "enable": "active"} {
@@ -343,34 +385,48 @@ func Register(api *httpapi.API) {
 			if in.Reason == "" {
 				return httpapi.Error(400, "REASON_REQUIRED", "租户启停必须填写原因")
 			}
-			tx, err := api.DB.Begin(r.Context())
-			if err != nil {
-				return err
-			}
-			defer tx.Rollback(r.Context())
+			ctx := r.Context()
+			tenantID := r.PathValue("id")
 			var previous string
-			if err := tx.QueryRow(r.Context(), "SELECT status FROM tenant WHERE id=$1 FOR UPDATE", r.PathValue("id")).Scan(&previous); err != nil {
+			if err := api.DB.QueryRow(ctx, "SELECT status FROM tenant WHERE id=$1", tenantID).Scan(&previous); err != nil {
 				return httpapi.Error(404, "NOT_FOUND", "租户不存在")
 			}
-			result, err := tx.Exec(r.Context(), "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3", status, r.PathValue("id"), in.Version)
-			if err != nil {
+			payload := tenantSetStatusPayload{TenantID: tenantID, Previous: previous}
+			steps := tenantSetStatusSteps(payload, map[string]func(context.Context, *dualwrite.Tx) error{
+				"set_status": func(ctx context.Context, tx *dualwrite.Tx) error {
+					if tx.Plain() != nil {
+						result, err := tx.Plain().Exec(ctx, "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3", status, tenantID, in.Version)
+						if err != nil {
+							return err
+						}
+						if result.RowsAffected() == 0 {
+							return httpapi.Error(409, "VERSION_CONFLICT", "租户状态或版本已变化")
+						}
+					}
+					if tx.Secure() != nil {
+						if _, err := tx.Secure().Exec(ctx, "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3", status, tenantID, in.Version); err != nil {
+							return err
+						}
+					}
+					if status == "disabled" && tx.Plain() != nil {
+						/* 会话表只在明文库（catchup 排除项），保持原语义 */
+						if _, err := tx.Plain().Exec(ctx, "UPDATE auth_session SET revoked_at=$1,reason='tenant_disabled' WHERE tenant_id=$2 AND revoked_at IS NULL", platform.Now(), tenantID); err != nil {
+							return err
+						}
+					}
+					return nil
+				},
+				"audit": func(ctx context.Context, tx *dualwrite.Tx) error {
+					if tx.Plain() == nil {
+						return nil
+					}
+					return platformAudit(ctx, tx.Plain(), p.AdminID, "tenant_"+action, "tenant", tenantID, map[string]any{"status": previous}, map[string]any{"status": status}, in.Reason)
+				},
+			})
+			if err := api.Writer.RunSaga(ctx, tenantID, "tenant.set_status", payload, steps); err != nil {
 				return err
 			}
-			if result.RowsAffected() == 0 {
-				return httpapi.Error(409, "VERSION_CONFLICT", "租户状态或版本已变化")
-			}
-			if status == "disabled" {
-				if _, err := tx.Exec(r.Context(), "UPDATE auth_session SET revoked_at=$1,reason='tenant_disabled' WHERE tenant_id=$2 AND revoked_at IS NULL", platform.Now(), r.PathValue("id")); err != nil {
-					return err
-				}
-			}
-			if err := platformAudit(r.Context(), tx, p.AdminID, "tenant_"+action, "tenant", r.PathValue("id"), map[string]any{"status": previous}, map[string]any{"status": status}, in.Reason); err != nil {
-				return err
-			}
-			if err := tx.Commit(r.Context()); err != nil {
-				return err
-			}
-			return httpapi.JSON(w, 200, map[string]any{"id": r.PathValue("id"), "status": status, "version": in.Version + 1})
+			return httpapi.JSON(w, 200, map[string]any{"id": tenantID, "status": status, "version": in.Version + 1})
 		})
 	}
 	api.PlatformHandle("GET /api/v1/platform/settings", func(w http.ResponseWriter, r *http.Request, p auth.PlatformPrincipal) error {
@@ -457,16 +513,14 @@ func Register(api *httpapi.API) {
 
 func listTenants(api *httpapi.API, w http.ResponseWriter, r *http.Request, id string) error {
 	where, args := "", []any{}
+	q := ""
 	if id != "" {
 		where = "WHERE t.id=$1"
 		args = append(args, id)
-	} else if q := strings.TrimSpace(r.URL.Query().Get("q")); q != "" {
-		/* 关键字查询：厂编码/名称/标识/联系人/联系电话 */
-		where = `WHERE (t.code ILIKE $1 OR t.name ILIKE $1 OR COALESCE(t.short_code,'') ILIKE $1
-			OR COALESCE(t.contact_name,'') ILIKE $1 OR COALESCE(t.contact_phone,'') ILIKE $1
-			OR COALESCE(t.contact_wechat,'') ILIKE $1 OR COALESCE(t.contact_qq,'') ILIKE $1
-			OR COALESCE(t.contact_alipay,'') ILIKE $1)`
-		args = append(args, "%"+q+"%")
+	} else {
+		q = strings.TrimSpace(r.URL.Query().Get("q"))
+		/* 关键字查询：联系人/电话/微信/QQ/支付宝在密文库是 enc:v1 信封，SQL ILIKE 无意义；
+		 * q 非空时不在 SQL 过滤，全部读出解密后在内存中匹配（含厂编码/名称/标识明文列）。 */
 	}
 	rows, err := api.DB.Query(r.Context(), `SELECT t.id,t.code,t.name,t.short_code,t.timezone,t.status,t.registration_status,t.customer_type,
 		COALESCE(t.contact_name,''),COALESCE(t.contact_phone,''),COALESCE(t.contact_wechat,''),COALESCE(t.contact_qq,''),
@@ -480,6 +534,8 @@ func listTenants(api *httpapi.API, w http.ResponseWriter, r *http.Request, id st
 		return err
 	}
 	defer rows.Close()
+	rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
+	qLower := strings.ToLower(q)
 	items := []map[string]any{}
 	for rows.Next() {
 		var tenantID, code, name, shortCode, timezone, status, regStatus, customerType string
@@ -490,6 +546,26 @@ func listTenants(api *httpapi.API, w http.ResponseWriter, r *http.Request, id st
 			&contactName, &contactPhone, &contactWechat, &contactQQ, &contactAlipay, &address, &region, &scale, &remark,
 			&adminLogin, &registeredAt, &approvedAt, &version, &created, &users, &orders, &reports); err != nil {
 			return err
+		}
+		/* 密文库敏感列解密回明文（迁移过渡期的明文值原样透传；tenant 表 AAD 的
+		 * tenantID 与主键均为 t.id） */
+		dec, err := rowCrypto.FromSecure(r.Context(), tenantID, "tenant", tenantID, map[string]any{
+			"contact_name": contactName, "contact_phone": contactPhone,
+			"contact_wechat": contactWechat, "contact_qq": contactQQ,
+			"contact_alipay": contactAlipay, "address": address,
+		})
+		if err != nil {
+			return fmt.Errorf("解密租户 %s 联系信息失败: %w", tenantID, err)
+		}
+		contactName, _ = dec["contact_name"].(string)
+		contactPhone, _ = dec["contact_phone"].(string)
+		contactWechat, _ = dec["contact_wechat"].(string)
+		contactQQ, _ = dec["contact_qq"].(string)
+		contactAlipay, _ = dec["contact_alipay"].(string)
+		address, _ = dec["address"].(string)
+		if q != "" && !tenantRowMatches(qLower, code, name, shortCode,
+			contactName, contactPhone, contactWechat, contactQQ, contactAlipay) {
+			continue
 		}
 		items = append(items, map[string]any{"id": tenantID, "code": code, "name": name, "short_code": shortCode, "timezone": timezone, "status": status, "registration_status": regStatus, "customer_type": customerType,
 			"contact_name": contactName, "contact_phone": contactPhone, "contact_wechat": contactWechat, "contact_qq": contactQQ, "contact_alipay": contactAlipay,
@@ -504,6 +580,16 @@ func listTenants(api *httpapi.API, w http.ResponseWriter, r *http.Request, id st
 		return httpapi.JSON(w, 200, items[0])
 	}
 	return httpapi.JSON(w, 200, map[string]any{"items": items})
+}
+
+/* tenantRowMatches 关键字大小写不敏感匹配（替代密文列上失效的 SQL ILIKE）。 */
+func tenantRowMatches(qLower string, fields ...string) bool {
+	for _, f := range fields {
+		if strings.Contains(strings.ToLower(f), qLower) {
+			return true
+		}
+	}
+	return false
 }
 
 func platformAudit(ctx context.Context, tx pgx.Tx, adminID, action, ownerType, ownerID string, before, after any, reason string) error {

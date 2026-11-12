@@ -36,6 +36,7 @@ const nav = [
   { path: '/settings/lines', label: '产线管理', icon: '▤', group: '基础资料', permission: 'line:read' },
   { path: '/settings/users', label: '人员与组织', icon: '♟', group: '基础资料', permission: 'identity:read' },
   { path: '/masterdata/B06', label: '员工与账号', icon: '♙', group: '基础资料', permission: '' },
+  { path: '/settings/dictionaries', label: '字典维护', icon: '☰', group: '基础资料', permission: 'masterdata:read' },
   { path: '/tenant/profile', label: '本厂信息', icon: '⌂', group: '系统管理', permission: '' },
   { path: '/portal/settings', label: '门户内容', icon: '▤', group: '系统管理', permission: '' },
   { path: '/identity/G05', label: '用户角色权限', icon: '⚷', group: '系统管理', permission: 'identity:read' },

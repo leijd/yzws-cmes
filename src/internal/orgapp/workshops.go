@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"clothp/internal/auth"
+	"clothp/internal/codegen"
 	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
@@ -94,16 +95,30 @@ func registerWorkshops(api *httpapi.API) {
 	/* 新增车间：编码在车间类型内唯一；负责人必须是本厂 active 管理人员 */
 	api.Handle("POST /api/v1/workshops", "workshop:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			Code, Name, ManagerEmployeeID, Status, WorkshopNature, OutsourcedPartner, Remark string
-			EstablishedAt                                                                      *int64
-			CapacityNote                                                                       string
+			Code              string `json:"code"`
+			Name              string `json:"name"`
+			ManagerEmployeeID string `json:"manager_employee_id"`
+			Status            string `json:"status"`
+			WorkshopNature    string `json:"workshop_nature"`
+			OutsourcedPartner string `json:"outsourced_partner"`
+			Remark            string `json:"remark"`
+			EstablishedAt     *int64 `json:"established_at"`
+			CapacityNote      string `json:"capacity_note"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
 		code, name := strings.TrimSpace(in.Code), strings.TrimSpace(in.Name)
-		if code == "" || name == "" {
-			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "车间编码与名称必填")
+		if name == "" {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "车间名称必填")
+		}
+		if code == "" {
+			/* 编码留空自动生成：{类型名拼音首字母}-{5位流水}（车间→CJ-00001） */
+			generated, err := codegen.Generate(r.Context(), api.DB, api.Writer, "org_unit", "code", p.TenantID, "org.workshop")
+			if err != nil {
+				return err
+			}
+			code = generated
 		}
 		nature := in.WorkshopNature
 		if nature == "" {
@@ -137,8 +152,8 @@ func registerWorkshops(api *httpapi.API) {
 		path := "/" + id + "/"
 		err := withDualTx(r.Context(), api, p.TenantID, "workshop", id, func(tx *dualwrite.Tx) error {
 			return execBoth(r.Context(), tx, `INSERT INTO org_unit(tenant_id,id,parent_id,org_type,code,name,manager_employee_id,path,status,
-				workshop_nature,outsourced_partner,established_at,capacity_note,remark,created_at,updated_at,created_by,created_node,version)
-				VALUES($1,$2,NULL,'workshop',$3,$4,NULLIF($5,''),$6,$7,$8,NULLIF($9,''),$10,NULLIF($11,''),NULLIF($12,''),$13,$13,$14,$15,1)`,
+				workshop_nature,outsourced_partner,established_at,capacity_note,remark,created_at,updated_at,created_by,created_node,updated_by,updated_node,version)
+				VALUES($1,$2,NULL,'workshop',$3,$4,NULLIF($5,''),$6,$7,$8,NULLIF($9,''),$10,NULLIF($11,''),NULLIF($12,''),$13,$13,$14,$15,$14,$15,1)`,
 				p.TenantID, id, code, name, in.ManagerEmployeeID, path, status, nature, in.OutsourcedPartner,
 				in.EstablishedAt, in.CapacityNote, in.Remark, now, p.UserID, api.Config.NodeID)
 		})
@@ -151,9 +166,13 @@ func registerWorkshops(api *httpapi.API) {
 	/* 编辑车间：名称/负责人/性质/备注，乐观锁 version */
 	api.Handle("PATCH /api/v1/workshops/{id}", "workshop:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			Name, ManagerEmployeeID, WorkshopNature, OutsourcedPartner, Remark string
-			CapacityNote                                                       string
-			Version                                                            int64
+			Name              string `json:"name"`
+			ManagerEmployeeID string `json:"manager_employee_id"`
+			WorkshopNature    string `json:"workshop_nature"`
+			OutsourcedPartner string `json:"outsourced_partner"`
+			Remark            string `json:"remark"`
+			CapacityNote      string `json:"capacity_note"`
+			Version           int64  `json:"version"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
@@ -294,14 +313,29 @@ func registerLines(api *httpapi.API) {
 	/* 新增产线：车间必须 active；同车间编码唯一；active 产线必须有线长（设计 4.3 暂存例外） */
 	api.Handle("POST /api/v1/lines", "line:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			WorkshopID, Code, Name, ManagerEmployeeID, Status, LineNature, DefaultProcessSegment, Remark string
+			WorkshopID            string `json:"workshop_id"`
+			Code                  string `json:"code"`
+			Name                  string `json:"name"`
+			ManagerEmployeeID     string `json:"manager_employee_id"`
+			Status                string `json:"status"`
+			LineNature            string `json:"line_nature"`
+			DefaultProcessSegment string `json:"default_process_segment"`
+			Remark                string `json:"remark"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
 		workshopID, code, name := strings.TrimSpace(in.WorkshopID), strings.TrimSpace(in.Code), strings.TrimSpace(in.Name)
-		if workshopID == "" || code == "" || name == "" {
-			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "所属车间、产线编码与名称必填")
+		if workshopID == "" || name == "" {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "所属车间与产线名称必填")
+		}
+		if code == "" {
+			/* 编码留空自动生成：{类型名拼音首字母}-{5位流水}（产线→CX-00001） */
+			generated, err := codegen.Generate(r.Context(), api.DB, api.Writer, "org_unit", "code", p.TenantID, "org.line")
+			if err != nil {
+				return err
+			}
+			code = generated
 		}
 		var workshopStatus string
 		if err := api.DB.QueryRow(r.Context(), `SELECT status FROM org_unit WHERE tenant_id=$1 AND id=$2 AND org_type='workshop'`, p.TenantID, workshopID).Scan(&workshopStatus); err != nil {
@@ -343,8 +377,8 @@ func registerLines(api *httpapi.API) {
 		path := workshopPath + id + "/"
 		err := withDualTx(r.Context(), api, p.TenantID, "line", id, func(tx *dualwrite.Tx) error {
 			return execBoth(r.Context(), tx, `INSERT INTO org_unit(tenant_id,id,parent_id,org_type,code,name,manager_employee_id,path,status,
-				line_nature,default_process_segment,remark,created_at,updated_at,created_by,created_node,version)
-				VALUES($1,$2,$3,'line',$4,$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,$12,$13,$14,1)`,
+				line_nature,default_process_segment,remark,created_at,updated_at,created_by,created_node,updated_by,updated_node,version)
+				VALUES($1,$2,$3,'line',$4,$5,NULLIF($6,''),$7,$8,$9,NULLIF($10,''),NULLIF($11,''),$12,$12,$13,$14,$13,$14,1)`,
 				p.TenantID, id, workshopID, code, name, in.ManagerEmployeeID, path, status,
 				orDefault(in.LineNature, "fixed"), in.DefaultProcessSegment, in.Remark, now, p.UserID, api.Config.NodeID)
 		})
@@ -357,9 +391,13 @@ func registerLines(api *httpapi.API) {
 	/* 编辑产线：不允许直接改 parent_id（组织移动走换线/事务，附录 A.7） */
 	api.Handle("PATCH /api/v1/lines/{id}", "line:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			Name, ManagerEmployeeID, DefaultProcessSegment, Remark string
-			Status, LineNature                                     string
-			Version                                                int64
+			Name                  string `json:"name"`
+			ManagerEmployeeID     string `json:"manager_employee_id"`
+			DefaultProcessSegment string `json:"default_process_segment"`
+			Remark                string `json:"remark"`
+			Status                string `json:"status"`
+			LineNature            string `json:"line_nature"`
+			Version               int64  `json:"version"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err

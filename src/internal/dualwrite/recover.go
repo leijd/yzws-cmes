@@ -58,7 +58,8 @@ func (w *Writer) recoverOne(ctx context.Context, dbs map[string]*pgxpool.Pool, g
 	prepared := map[string]bool{}
 	for name, pool := range dbs {
 		var exists bool
-		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_prepared_xacts WHERE transaction=$1)`, gid).Scan(&exists); err != nil {
+		/* prepared gid 带库名后缀（见 writer.preparedGID）：同一实例双库时全局 gid 会撞 42710 */
+		if err := pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_prepared_xacts WHERE transaction=$1)`, preparedGID(gid, name)).Scan(&exists); err != nil {
 			return fmt.Errorf("check prepared on %s: %w", name, err)
 		}
 		prepared[name] = exists
@@ -79,7 +80,7 @@ func (w *Writer) recoverOne(ctx context.Context, dbs map[string]*pgxpool.Pool, g
 			if !prepared[name] {
 				continue
 			}
-			if _, err := pool.Exec(ctx, fmt.Sprintf("COMMIT PREPARED '%s'", gid)); err != nil {
+			if _, err := pool.Exec(ctx, fmt.Sprintf("COMMIT PREPARED '%s'", preparedGID(gid, name))); err != nil {
 				return fmt.Errorf("commit prepared on %s: %w", name, err)
 			}
 		}
@@ -121,6 +122,9 @@ func (w *Writer) StartRecoverLoop(ctx context.Context, interval time.Duration, r
 				recCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 				if err := w.Recover(recCtx); err != nil {
 					log.Printf("dualwrite: recovery pass: %v", err)
+				}
+				if err := w.recoverSagas(recCtx); err != nil {
+					log.Printf("dualwrite: saga recovery pass: %v", err)
 				}
 				if n, err := w.CatchUp(recCtx, rowCrypto); err != nil {
 					log.Printf("dualwrite: catch-up pass: %v", err)

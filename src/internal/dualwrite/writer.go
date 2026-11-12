@@ -21,6 +21,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+/* txLockTimeout 双写事务的锁等待上限：撞上悬挂事务/并发写持有的锁时快速失败
+ * （SQLSTATE 55P03，上层映射 409），避免请求无限等待、前端一直转圈。 */
+const txLockTimeout = "5s"
+
 type Writer struct {
 	store  *datastore.Store
 	nodeID string
@@ -66,6 +70,11 @@ func (w *Writer) Begin(ctx context.Context, tenantID string) (*Tx, error) {
 			conn.Release()
 			return nil, err
 		}
+		if err := setTxLockTimeout(ctx, t); err != nil {
+			_ = t.Rollback(ctx)
+			conn.Release()
+			return nil, err
+		}
 		tx.plainConn, tx.plainTx = conn, t
 	}
 	if mode == "both" || mode == "secure_only" {
@@ -93,10 +102,27 @@ func (w *Writer) Begin(ctx context.Context, tenantID string) (*Tx, error) {
 			}
 			return nil, err
 		}
+		if err := setTxLockTimeout(ctx, t); err != nil {
+			_ = t.Rollback(ctx)
+			conn.Release()
+			if tx.plainTx != nil {
+				_ = tx.plainTx.Rollback(ctx)
+				tx.plainConn.Release()
+			}
+			return nil, err
+		}
 		tx.secureConn, tx.secureTx = conn, t
 	}
 	_ = now
 	return tx, nil
+}
+
+/* setTxLockTimeout 在事务内设置锁等待上限（SET LOCAL 随事务结束失效）。 */
+func setTxLockTimeout(ctx context.Context, t pgx.Tx) error {
+	if _, err := t.Exec(ctx, "SET LOCAL lock_timeout = '"+txLockTimeout+"'"); err != nil {
+		return fmt.Errorf("set lock_timeout: %w", err)
+	}
+	return nil
 }
 
 /* GID 全局事务 ID。 */
@@ -142,15 +168,20 @@ func (tx *Tx) prepareJournal(ctx context.Context) error {
 	return nil
 }
 
+/* preparedGID 每库 PREPARED 事务使用的 gid。两库可能位于同一 PostgreSQL 实例，而
+ * PREPARE TRANSACTION 的 gid 唯一性是实例级的——同一 gid 会在第二库报 42710；
+ * 因此每库使用带库名后缀的 gid，dual_write_journal 与恢复逻辑仍按全局 gid 关联。 */
+func preparedGID(gid, dbName string) string { return gid + "-" + dbName }
+
 /* prepare 两库 PREPARE TRANSACTION；任一失败返回错误（调用方须回滚双方）。 */
 func (tx *Tx) prepare(ctx context.Context) error {
 	if tx.plainTx != nil {
-		if _, err := tx.plainTx.Exec(ctx, fmt.Sprintf("PREPARE TRANSACTION '%s'", tx.gid)); err != nil {
+		if _, err := tx.plainTx.Exec(ctx, fmt.Sprintf("PREPARE TRANSACTION '%s'", preparedGID(tx.gid, "plain"))); err != nil {
 			return fmt.Errorf("prepare plain transaction: %w", err)
 		}
 	}
 	if tx.secureTx != nil {
-		if _, err := tx.secureTx.Exec(ctx, fmt.Sprintf("PREPARE TRANSACTION '%s'", tx.gid)); err != nil {
+		if _, err := tx.secureTx.Exec(ctx, fmt.Sprintf("PREPARE TRANSACTION '%s'", preparedGID(tx.gid, "secure"))); err != nil {
 			return fmt.Errorf("prepare secure transaction: %w", err)
 		}
 	}
@@ -213,7 +244,7 @@ func (tx *Tx) Commit(ctx context.Context) error {
 		} else {
 			pool = tx.store.Secure
 		}
-		if _, err := pool.Exec(ctx, fmt.Sprintf("COMMIT PREPARED '%s'", tx.gid)); err != nil {
+		if _, err := pool.Exec(ctx, fmt.Sprintf("COMMIT PREPARED '%s'", preparedGID(tx.gid, name))); err != nil {
 			tx.markJournal(ctx, "prepared", now, err)
 			log.Printf("dualwrite: commit prepared on %s failed gid=%s: %v (recovery will continue)", name, tx.gid, err)
 			_ = committed

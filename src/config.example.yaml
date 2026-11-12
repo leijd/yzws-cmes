@@ -55,17 +55,36 @@ database:
 #   allow_degraded_read: false # 单写+对端读取的降级组合必须显式允许
 #   reconcile_interval_seconds: 60
 #
-# crypto:
-#   envelope_version: v1
-#   data_algorithm: AES-256-GCM
-#   wrap_algorithm: RSA-3072-OAEP-SHA256
-#   kms_provider: softhsm2     # 测试环境 SoftHSM2；cloud_kms 预留；local 仅用于迁移旧数据
-#   softhsm2:
-#     pkcs11_module_env: CLOTHP_SOFTHSM2_MODULE
-#     token_label: yzws-mes-test
-#     pin_env: CLOTHP_SOFTHSM2_PIN
-#     key_label_prefix: yzws-tenant-
-#   cloud_kms:                 # 预留，不在测试环境启用
+# ===== 字段级加密（设计文档第 3 章）=====
+# 密钥服务器封装了 SoftHSM2（多租户 hsm-sign-service），只暴露 /sign /pubkey /wrap /unwrap /tenants 等少数接口，
+# 按 X-Tenant-ID 路由租户密钥（注册表 tenants.json 热加载，密钥生成只许运维在 HSM 容器内执行）。
+# 主服务经 HTTP/HTTPS 访问该服务器完成信息项加解密的密钥解包（包装在本地用租户公钥完成）。
+# 所有接口要求 X-API-Key；租户密钥须先用 add-tenant.sh <tenantID> 在服务端开通，否则报 KEY_UNAVAILABLE。
+crypto:
+  envelope_version: v1
+  data_algorithm: AES-256-GCM
+  wrap_algorithm: RSA-PKCS1v15   # 测试环境 SoftHSM 2.6.1（Botan2 后端）OAEP 解密不可用；生产（OpenSSL 后端/云 KMS）切回 RSA-OAEP-SHA256
+  kms_provider: softhsm2     # 测试环境 SoftHSM2；cloud_kms 预留；local 仅用于迁移旧数据
+  softhsm2:
+    # 远程模式：server_url 非空即生效，无需本机 PKCS#11 库。
+    # Windows 开发机：先挂 SSH 隧道 ssh -N -L 8443:127.0.0.1:8443 root@服务器IP（见 softhsm-2.6-go/ssh-tunel.bat）；
+    # 后端与 HSM 同机 compose：http://hsm-sign:8443；跨机公网必须 HTTPS 并按需配 ca_cert_file。
+    # 也可用环境变量 CLOTHP_HSM_SERVER_URL 覆盖。
+    server_url: "http://127.0.0.1:8443"
+    api_key_env: CLOTHP_HSM_API_KEY      # 环境变量名，X-API-Key 只从环境注入
+    ca_cert_file: ""                     # HTTPS 自签证书时指向服务端 CA 证书（可选）
+    timeout_ms: 10000
+    # 租户密钥自动开通（可选）：新租户首次用加密时若服务端未开通（404），自动经 SSH
+    # 执行 add-tenant.sh 开通（密钥生成只允许运维脚本，HTTP 无此接口；需免密 SSH）。
+    # 留空则不自动开通，未开通租户报 KEY_UNAVAILABLE。生产后端与 HSM 同机可用 root@127.0.0.1。
+    ssh_target: ""                       # 如 root@服务器IP；也可 CLOTHP_HSM_SSH_TARGET 覆盖
+    # provision_script: /app/HSM/softhsm2/scripts/add-tenant.sh   # 默认值，一般无需配置
+    token_label: yzws-mes-test           # 落库 KeyWrapRef 的 token 标识
+    # 本地 PKCS#11 模式备用字段（server_url 留空时生效，需 -tags softhsm2 构建的 Linux 环境）
+    # pkcs11_module_env: CLOTHP_SOFTHSM2_MODULE
+    # pin_env: CLOTHP_SOFTHSM2_PIN
+    # key_label_prefix: yzws-tenant-
+#   cloud_kms:               # 预留，不在测试环境启用
 #     provider: ""
 #     region: ""
 #     key_id_prefix: ""

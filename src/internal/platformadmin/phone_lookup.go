@@ -46,7 +46,9 @@ func (l *phoneLookupLimiter) allow(actorID string) bool {
 
 var phoneLookupRate = newPhoneLookupLimiter()
 
-/* registerPhoneLookup 平台侧手机号归属受控查询（明文库精确匹配；不返回完整手机号；全量平台审计）。 */
+/* registerPhoneLookup 平台侧手机号归属受控查询（明文库精确匹配；不返回完整手机号；全量平台审计）。
+ * 明文库是对账库，业务运行中禁止读取明文库做对比（设计 2.2 第 7 条）；
+ * 本接口是平台管理员对数据的受控对照，属于该条的显式例外：限流、平台审计、仅返回归属。 */
 func registerPhoneLookup(api *httpapi.API) {
 	api.PlatformHandle("POST /api/v1/platform/phone-lookup", func(w http.ResponseWriter, r *http.Request, p auth.PlatformPrincipal) error {
 		if !phoneLookupRate.allow(p.AdminID) {

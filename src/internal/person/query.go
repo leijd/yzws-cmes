@@ -69,7 +69,12 @@ func registerQuery(api *httpapi.API) {
 				args = append(args, access.LineIDs)
 			}
 			if len(scopeConds) == 0 {
-				conds += " AND FALSE"
+				/* 持 identity:read 但无业务角色（如 tenant_admin/体验厂管理员）：人员列表属于
+				 * 身份管理域而非业务数据，不按业务范围拦死（否则建完档列表恒空）；无 identity:read
+				 * 的纯业务账号才落入空范围。 */
+				if !p.Permissions["identity:read"] {
+					conds += " AND FALSE"
+				}
 			} else {
 				conds += " AND (" + strings.Join(scopeConds, " OR ") + ")"
 			}
@@ -90,7 +95,8 @@ func registerQuery(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, no, name, ptype, phone, status, position, remark string
+			var id, no, name, ptype, status string
+			var phone, position, remark *string
 			var workshopID, lineID, teamID, workshopName, lineName, teamName, roleNames, accountStatus *string
 			var version int64
 			if err := rows.Scan(&id, &no, &name, &ptype, &phone, &status, &position, &remark, &version,
@@ -99,7 +105,7 @@ func registerQuery(api *httpapi.API) {
 			}
 			items = append(items, map[string]any{
 				"id": id, "employee_no": no, "name": name, "person_type": ptype,
-				"phone_masked": maskPhone(phone), "status": status, "position": position, "remark": remark, "version": version,
+				"phone_masked": maskPhone(strVal(phone)), "status": status, "position": position, "remark": remark, "version": version,
 				"workshop_id": workshopID, "line_id": lineID, "team_id": teamID,
 				"workshop_name": workshopName, "line_name": lineName, "team_name": teamName,
 				"role_names": roleNames, "account_status": accountStatus,
@@ -134,6 +140,13 @@ func registerQuery(api *httpapi.API) {
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"temporary_password": temporary})
 	})
+}
+
+func strVal(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
 
 /* maskPhone 手机号脱敏（列表默认，设计 6.4）。 */

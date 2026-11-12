@@ -64,10 +64,20 @@ type CryptoConfig struct {
 }
 
 type SoftHSM2Config struct {
-	PKCS11ModuleEnv string // 环境变量名，模块路径只从环境注入
-	TokenLabel      string
-	PINEnv          string // 环境变量名，PIN 只从环境注入
+	PKCS11ModuleEnv string // 环境变量名，模块路径只从环境注入（本地 PKCS#11 模式）
+	TokenLabel      string // 落库 KeyWrapRef 的 token 标识（两种模式都用）
+	PINEnv          string // 环境变量名，PIN 只从环境注入（本地 PKCS#11 模式）
 	KeyLabelPrefix  string
+	/* 远程模式（server_url 非空时生效）：经 HTTP 调用 hsm-sign-service 做密钥包装/解包
+	 * （实现参考 softhsm-2.6-go/client-example），无需本机 PKCS#11 库。 */
+	ServerURL  string
+	APIKeyEnv  string // 环境变量名，X-API-Key 只从环境注入
+	CACertFile string // 自签 TLS 的服务端 CA 证书（可选）
+	TimeoutMS  int    // 远程调用超时毫秒（默认 10000）
+	/* 租户密钥自动开通（可选）：未开通租户（服务端 404）自动经 SSH 执行 add-tenant.sh。
+	 * 留空则不自动开通（未开通租户报 KEY_UNAVAILABLE，需运维手工开通）。 */
+	SSHTarget       string // 如 root@服务器IP（需免密）；生产后端与 HSM 同机可用 root@127.0.0.1
+	ProvisionScript string // 服务端开通脚本路径（默认 /app/HSM/softhsm2/scripts/add-tenant.sh）
 }
 
 type CloudKMSConfig struct {
@@ -122,6 +132,12 @@ type fileConfig struct {
 			TokenLabel      string `yaml:"token_label"`
 			PINEnv          string `yaml:"pin_env"`
 			KeyLabelPrefix  string `yaml:"key_label_prefix"`
+			ServerURL       string `yaml:"server_url"`
+			APIKeyEnv       string `yaml:"api_key_env"`
+			CACertFile      string `yaml:"ca_cert_file"`
+			TimeoutMS       int    `yaml:"timeout_ms"`
+			SSHTarget       string `yaml:"ssh_target"`
+			ProvisionScript string `yaml:"provision_script"`
 		} `yaml:"softhsm2"`
 		CloudKMS struct {
 			Provider    string `yaml:"provider"`
@@ -154,8 +170,10 @@ func defaults() Config {
 		Crypto: CryptoConfig{
 			EnvelopeVersion: "v1", DataAlgorithm: "AES-256-GCM", WrapAlgorithm: "RSA-3072-OAEP-SHA256",
 			KMSProvider: "local", // 未配置 SoftHSM2/云 KMS 时仅用于迁移旧数据，不得用于新密钥
-			SoftHSM2:  SoftHSM2Config{TokenLabel: "yzws-mes-test", KeyLabelPrefix: "yzws-tenant-"},
-			CloudKMS:  CloudKMSConfig{},
+			SoftHSM2: SoftHSM2Config{
+				TokenLabel: "yzws-mes-test", KeyLabelPrefix: "yzws-tenant-", TimeoutMS: 10000,
+			},
+			CloudKMS: CloudKMSConfig{},
 		},
 		SMS: sms.Settings{CooldownSeconds: 60, FailureThreshold: 3, UsageFile: "data/sms_usage.json"},
 	}
@@ -319,6 +337,24 @@ func applyFile(cfg *Config, file fileConfig) {
 	if file.Crypto.SoftHSM2.KeyLabelPrefix != "" {
 		cfg.Crypto.SoftHSM2.KeyLabelPrefix = file.Crypto.SoftHSM2.KeyLabelPrefix
 	}
+	if file.Crypto.SoftHSM2.ServerURL != "" {
+		cfg.Crypto.SoftHSM2.ServerURL = file.Crypto.SoftHSM2.ServerURL
+	}
+	if file.Crypto.SoftHSM2.APIKeyEnv != "" {
+		cfg.Crypto.SoftHSM2.APIKeyEnv = file.Crypto.SoftHSM2.APIKeyEnv
+	}
+	if file.Crypto.SoftHSM2.CACertFile != "" {
+		cfg.Crypto.SoftHSM2.CACertFile = file.Crypto.SoftHSM2.CACertFile
+	}
+	if file.Crypto.SoftHSM2.TimeoutMS > 0 {
+		cfg.Crypto.SoftHSM2.TimeoutMS = file.Crypto.SoftHSM2.TimeoutMS
+	}
+	if file.Crypto.SoftHSM2.SSHTarget != "" {
+		cfg.Crypto.SoftHSM2.SSHTarget = file.Crypto.SoftHSM2.SSHTarget
+	}
+	if file.Crypto.SoftHSM2.ProvisionScript != "" {
+		cfg.Crypto.SoftHSM2.ProvisionScript = file.Crypto.SoftHSM2.ProvisionScript
+	}
 	if file.Crypto.CloudKMS.Provider != "" {
 		cfg.Crypto.CloudKMS.Provider = file.Crypto.CloudKMS.Provider
 	}
@@ -391,6 +427,8 @@ func applyEnv(cfg *Config) {
 	cfg.Database.MaxConns = envInt("DB_MAX_CONNS", cfg.Database.MaxConns)
 	cfg.DataStore.ReadSource = env("CLOTHP_READ_SOURCE", cfg.DataStore.ReadSource)
 	cfg.DataStore.WriteMode = env("CLOTHP_WRITE_MODE", cfg.DataStore.WriteMode)
+	cfg.Crypto.SoftHSM2.ServerURL = env("CLOTHP_HSM_SERVER_URL", cfg.Crypto.SoftHSM2.ServerURL)
+	cfg.Crypto.SoftHSM2.SSHTarget = env("CLOTHP_HSM_SSH_TARGET", cfg.Crypto.SoftHSM2.SSHTarget)
 }
 
 func validate(cfg Config) error {
@@ -437,8 +475,16 @@ func validate(cfg Config) error {
 		return fmt.Errorf("config crypto.kms_provider must be softhsm2, cloud_kms or local")
 	}
 	if cfg.Crypto.KMSProvider == "softhsm2" {
-		if cfg.Crypto.SoftHSM2.PKCS11ModuleEnv == "" || cfg.Crypto.SoftHSM2.PINEnv == "" || cfg.Crypto.SoftHSM2.TokenLabel == "" {
-			return fmt.Errorf("config crypto.softhsm2 pkcs11_module_env, pin_env and token_label are required when kms_provider=softhsm2")
+		if cfg.Crypto.SoftHSM2.TokenLabel == "" {
+			return fmt.Errorf("config crypto.softhsm2 token_label is required when kms_provider=softhsm2")
+		}
+		if cfg.Crypto.SoftHSM2.ServerURL != "" {
+			/* 远程模式：密钥材料经网络传输，X-API-Key 必须配置（值从 api_key_env 注入） */
+			if cfg.Crypto.SoftHSM2.APIKeyEnv == "" {
+				return fmt.Errorf("config crypto.softhsm2 api_key_env is required when server_url is set")
+			}
+		} else if cfg.Crypto.SoftHSM2.PKCS11ModuleEnv == "" || cfg.Crypto.SoftHSM2.PINEnv == "" {
+			return fmt.Errorf("config crypto.softhsm2 pkcs11_module_env and pin_env are required in local PKCS#11 mode (server_url empty)")
 		}
 	}
 	return nil

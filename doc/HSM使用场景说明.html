@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YZWS-MES HSM 使用场景说明</title>
+<style>
+  :root { --ink:#1f2d3d; --muted:#5a6a7a; --line:#dde3ea; --accent:#2f6fbd; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:0 16px 60px; font-family:"Microsoft YaHei","PingFang SC",sans-serif; color:var(--ink); background:#f6f8fb; line-height:1.65; }
+  .page { max-width:1080px; margin:0 auto; }
+  header.doc { background:linear-gradient(135deg,#173a5e,#2f6fbd); color:#fff; padding:28px 32px; border-radius:0 0 12px 12px; margin:0 -16px 24px; }
+  header.doc h1 { margin:0 0 8px; font-size:24px; }
+  header.doc .meta { font-size:13px; opacity:.92; }
+  header.doc code { background:rgba(255,255,255,.18); color:#fff; }
+  h2 { font-size:20px; border-left:4px solid var(--accent); padding-left:10px; margin:36px 0 12px; }
+  h3 { font-size:17px; margin:26px 0 8px; color:#173a5e; }
+  h4 { font-size:15px; margin:18px 0 6px; color:#2f4a68; }
+  p { margin:8px 0; }
+  table { border-collapse:collapse; width:100%; margin:12px 0; background:#fff; font-size:13.5px; }
+  th,td { border:1px solid var(--line); padding:7px 10px; vertical-align:top; text-align:left; }
+  th { background:#eef3fa; font-weight:600; }
+  tr:nth-child(even) td { background:#fbfcfe; }
+  code { background:#eef1f5; padding:1px 5px; border-radius:4px; font-family:Consolas,Menlo,monospace; font-size:12.5px; }
+  pre { background:#0f1c2b; color:#d7e4f2; padding:14px 16px; border-radius:8px; overflow-x:auto; font-size:12.5px; line-height:1.55; }
+  pre code { background:none; color:inherit; padding:0; }
+  .note { background:#fffbe6; border:1px solid #e3d28a; border-radius:8px; padding:10px 14px; margin:10px 0; font-size:13.5px; }
+  .warn { background:#fdeeee; border:1px solid #e0a3a3; }
+  .ok { background:#ecf8ef; border:1px solid #93c7a3; }
+  .badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; font-weight:600; white-space:nowrap; }
+  .b-ok { background:#e2f4e8; color:#1c6b35; border:1px solid #93c7a3; }
+  .b-part { background:#fff3d6; color:#8a5a00; border:1px solid #e0b95e; }
+  .b-plan { background:#e8eef7; color:#34547c; border:1px solid #9db4d4; }
+  .figcap { text-align:center; color:var(--muted); font-size:12.5px; margin:6px 0 18px; }
+  svg { display:block; width:100%; height:auto; background:#fbfcfe; border:1px solid var(--line); border-radius:8px; margin-top:10px; }
+  /* SVG 元素样式 */
+  .part { fill:#eaf1fb; stroke:#7a9cc6; }
+  .partHsm { fill:#fff3e0; stroke:#e0a75e; }
+  .partDb { fill:#e8f6ee; stroke:#6fb384; }
+  .partCall { fill:#f3ecfa; stroke:#a98cc9; }
+  .life { stroke:#9aa7b4; stroke-width:1; stroke-dasharray:4 4; }
+  .msg { stroke:#3b4a5a; stroke-width:1.2; fill:none; }
+  .ret { stroke:#7a8a99; stroke-width:1.1; fill:none; stroke-dasharray:5 3; }
+  .lbl { font-size:11.5px; fill:#26313d; }
+  .lblS { font-size:10.5px; fill:#5a6a7a; }
+  .noteBox { fill:#fffbe6; stroke:#d8c76a; }
+  .act { fill:#d7e6f7; stroke:#9ab6d8; }
+  .self { stroke:#3b4a5a; stroke-width:1.1; fill:none; }
+  .cap2 { font-size:12px; fill:#1f2d3d; font-weight:600; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<header class="doc">
+  <h1>YZWS-MES HSM 使用场景说明</h1>
+  <div class="meta">
+    版本 v1.0（2026-11-11） · 代码基线：<code>src/</code>（迁移 001–061） ·
+    密钥提供方：<code>crypto.kms_provider=softhsm2</code>（远程 hsm-sign-service / 本地 PKCS#11 双模式）
+  </div>
+</header>
+
+<div class="note">
+  <b>阅读说明：</b>本文以当前代码为准描述 HSM 的真实使用方式，并用时序图逐场景展开。
+  状态标记：<span class="badge b-ok">✅ 已实现</span> 代码可查可用；
+  <span class="badge b-part">🔶 部分实现</span> 能力已实现但主流程尚未全部切换，文中注明差距；
+  <span class="badge b-plan">📋 规划/运维流程</span> 代码未实现，仅存在设计口径或运维脚本约定。
+  文中“远程模式”指 <code>crypto.softhsm2.server_url</code> 非空时经 HTTP 调用 hsm-sign-service；
+  “本地模式”指后端进程直接经 PKCS#11 加载 SoftHSM2 模块（需 Linux + <code>-tags softhsm2</code> 构建）。
+</div>
+
+<h2>1. HSM 在项目中的位置</h2>
+<p>项目采用信封加密：每个制衣厂（租户）在 HSM 中持有独立的 RSA-3072 密钥对，私钥不可导出；
+业务数据不直接用 RSA 加密，而是由 HSM 密钥对保护每厂随机的 DEK（数据加密密钥）与盲索引密钥，
+敏感字段由 DEK 做 AES-256-GCM 字段级加密，密文以 <code>enc:v1:…</code> 信封存入密文库 <code>yzws-v1-sec</code>。
+数据库只保存包装后的密钥密文与 <code>key_wrap_ref</code> 引用，永不保存私钥、PIN、API Key 或明文密钥。</p>
+
+<svg viewBox="0 0 1000 540" role="img" aria-label="HSM 总体架构图">
+  <defs><marker id="am1" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <!-- 调用方 -->
+  <rect x="40" y="16" width="920" height="42" rx="7" class="partCall"/>
+  <text x="500" y="33" text-anchor="middle" class="cap2">业务调用方（HTTP API / 运维工具）</text>
+  <text x="500" y="50" text-anchor="middle" class="lblS">tenantreg 注册审批 · person 人员建档/检索 · auth 登录盲索引 · plainbackup 明文备份 · datatool 数据互转</text>
+  <!-- Service -->
+  <rect x="290" y="96" width="420" height="66" rx="7" class="part"/>
+  <text x="500" y="116" text-anchor="middle" class="cap2">seccrypto.Service（业务加密服务）</text>
+  <text x="500" y="133" text-anchor="middle" class="lblS">密钥材料缓存 5min · IssueKeys / EnsureKeys 发行</text>
+  <text x="500" y="149" text-anchor="middle" class="lblS">EncryptField / DecryptField（enc:v1 信封 + AAD） · PhoneHash 盲索引</text>
+  <line x1="500" y1="58" x2="500" y2="96" class="msg" marker-end="url(#am1)"/>
+  <!-- 工厂 -->
+  <rect x="390" y="192" width="220" height="34" rx="7" class="part"/>
+  <text x="500" y="214" text-anchor="middle" class="cap2">KeyProvider 工厂（NewProvider）</text>
+  <line x1="500" y1="162" x2="500" y2="192" class="msg" marker-end="url(#am1)"/>
+  <!-- 提供方 -->
+  <rect x="20" y="256" width="225" height="66" rx="7" class="partHsm"/>
+  <text x="132" y="276" text-anchor="middle" class="cap2">远程 hsm-sign-service</text>
+  <text x="132" y="293" text-anchor="middle" class="lblS">HTTP · X-API-Key · X-Tenant-ID</text>
+  <text x="132" y="309" text-anchor="middle" class="lblS">GET /pubkey · POST /unwrap · /healthz</text>
+  <rect x="265" y="256" width="225" height="66" rx="7" class="partHsm"/>
+  <text x="377" y="276" text-anchor="middle" class="cap2">本地 SoftHSM2（PKCS#11）</text>
+  <text x="377" y="293" text-anchor="middle" class="lblS">-tags softhsm2 构建 · CKA_EXTRACTABLE=false</text>
+  <text x="377" y="309" text-anchor="middle" class="lblS">RSA-3072 · CKM_RSA_PKCS 包装/解包</text>
+  <rect x="510" y="256" width="225" height="66" rx="7" class="part"/>
+  <text x="622" y="276" text-anchor="middle" class="cap2">cloud_kms（生产预留）</text>
+  <text x="622" y="293" text-anchor="middle" class="lblS">同一 KeyProvider 契约</text>
+  <text x="622" y="309" text-anchor="middle" class="lblS">本版为占位 stub，调用返回未接入</text>
+  <rect x="755" y="256" width="225" height="66" rx="7" class="part"/>
+  <text x="867" y="276" text-anchor="middle" class="cap2">local（仅旧数据迁移）</text>
+  <text x="867" y="293" text-anchor="middle" class="lblS">local-master:v1 · KEK=SHA256(JWTSecret 派生)</text>
+  <text x="867" y="309" text-anchor="middle" class="lblS">只读兼容：禁止生成/轮换新密钥</text>
+  <line x1="500" y1="226" x2="132" y2="256" class="msg" marker-end="url(#am1)"/>
+  <line x1="500" y1="226" x2="377" y2="256" class="msg" marker-end="url(#am1)"/>
+  <line x1="500" y1="226" x2="622" y2="256" class="msg" marker-end="url(#am1)"/>
+  <line x1="500" y1="226" x2="867" y2="256" class="msg" marker-end="url(#am1)"/>
+  <!-- HSM token -->
+  <rect x="250" y="356" width="500" height="62" rx="7" class="partHsm"/>
+  <text x="500" y="376" text-anchor="middle" class="cap2">SoftHSM2 Token（yzws-mes-test） / hsm-sign-service 服务端</text>
+  <text x="500" y="393" text-anchor="middle" class="lblS">每厂 RSA-3072 密钥对（私钥不可导出）；租户注册表热加载</text>
+  <text x="500" y="409" text-anchor="middle" class="lblS">密钥生成 / 删除只允许运维脚本在 HSM 内执行（add-tenant.sh 等）</text>
+  <line x1="132" y1="322" x2="380" y2="356" class="msg" marker-end="url(#am1)"/>
+  <line x1="377" y1="322" x2="440" y2="356" class="msg" marker-end="url(#am1)"/>
+  <!-- 数据库 -->
+  <rect x="60" y="456" width="420" height="60" rx="7" class="partDb"/>
+  <text x="270" y="476" text-anchor="middle" class="cap2">明文库 yzws-v1</text>
+  <text x="270" y="493" text-anchor="middle" class="lblS">tenant_crypto_key：wrapped_key + key_wrap_ref（包装密文）</text>
+  <text x="270" y="509" text-anchor="middle" class="lblS">业务表为明文 + phone_hash 盲索引；仅作对账副本（运行期不读）</text>
+  <rect x="520" y="456" width="420" height="60" rx="7" class="partDb"/>
+  <text x="730" y="476" text-anchor="middle" class="cap2">密文库 yzws-v1-sec（默认读取来源）</text>
+  <text x="730" y="493" text-anchor="middle" class="lblS">敏感业务列为 enc:v1 信封（AES-256-GCM + AAD）</text>
+  <text x="730" y="509" text-anchor="middle" class="lblS">服务端解密后按权限返回：非本人 *** 占位 / 授权查看明文，密文不出服务端</text>
+  <line x1="360" y1="162" x2="270" y2="456" class="ret" marker-end="url(#am1)"/>
+  <text x="248" y="330" class="lblS">读密钥记录</text>
+  <line x1="640" y1="162" x2="730" y2="456" class="ret" marker-end="url(#am1)"/>
+  <text x="700" y="330" class="lblS">密文读写（RowCrypto）</text>
+</svg>
+<div class="figcap">图 1　HSM 总体架构：统一 KeyProvider 契约 + 每厂独立密钥 + 双库信封加密</div>
+<div class="note">
+  <b>两库读取口径（重要）：</b>默认 <code>read_source=secure</code>，业务读取一律走主库 <code>yzws-v1-sec</code>（唯一性校验、登录查询、列表检索等均是）；
+  <code>yzws-v1</code> 仅作为双写明文副本，测试期主要用于对账与核查加密库数据正确性（比对两库数据、排查异常），日常不作为业务读取来源。
+  密钥记录 <code>tenant_crypto_key</code> 与备份任务元数据 <code>backup_job</code> 均双写两库，运行期一律从主库读取（明文库仅对账）；存量历史记录主库缺失时按明文库兜底一次。
+</div>
+
+<h3>1.1 密钥体系</h3>
+<table>
+  <tr><th>密钥</th><th>生成位置</th><th>存储位置</th><th>用途</th></tr>
+  <tr><td>租户 RSA-3072 密钥对</td><td>HSM token 内生成（远程由运维脚本生成，本地由 PKCS#11 GenerateKeyPair）</td><td>私钥不出 HSM；公钥可公开（远程模式经 /pubkey 获取）</td><td>包装/解包 DEK 与盲索引密钥</td></tr>
+  <tr><td>DEK（数据加密密钥）</td><td>应用内 <code>crypto/rand</code> 生成 32 字节随机值</td><td>经租户公钥包装后以 <code>wrapped_key</code> 落库（<code>wrap_key_type=dek</code>）</td><td>敏感字段 AES-256-GCM 加密（<code>enc:v1</code> 信封）</td></tr>
+  <tr><td>盲索引密钥</td><td>同上，独立 32 字节随机值</td><td>同版本独立行落库（<code>wrap_key_type=index</code>）</td><td>手机号等 HMAC-SHA256 盲索引，支持等值查询</td></tr>
+  <tr><td>local-master:v1 KEK</td><td>SHA256("yzws-tenant-crypto:v1:" + JWTSecret) 派生</td><td>不单独落库；仅兼容适配器内存持有</td><td>仅解包旧 <code>local-master:v1</code> 记录并迁移，禁止用于新密钥</td></tr>
+</table>
+
+<h3>1.2 提供方模式与选择</h3>
+<table>
+  <tr><th>模式</th><th>判定</th><th>包装（Wrap）</th><th>解包（Unwrap）</th><th>健康检查</th></tr>
+  <tr><td>远程 hsm-sign-service</td><td><code>softhsm2.server_url</code> 非空（当前 config.yaml 生效模式）</td><td>应用本地用租户公钥做 RSA PKCS#1 v1.5（公钥公开，无需服务端参与）</td><td><code>POST /unwrap</code> + <code>X-Tenant-ID</code>，服务端在 HSM 内用租户私钥解密</td><td><code>GET /healthz</code> 期望返回 ok</td></tr>
+  <tr><td>本地 SoftHSM2（PKCS#11）</td><td>server_url 为空且配置了 pkcs11_module_env / pin_env</td><td>token 内公钥加密（CKM_RSA_PKCS）</td><td>token 内私钥解密（私钥 CKA_EXTRACTABLE=false）</td><td>枚举机制列表确认 CKM_RSA_PKCS 可用</td></tr>
+  <tr><td>cloud_kms</td><td><code>kms_provider=cloud_kms</code>（预留）</td><td colspan="2">本版为占位实现，任何调用返回“未接入”错误，业务代码无需修改即可扩展</td><td>返回未配置</td></tr>
+  <tr><td>local</td><td><code>kms_provider=local</code> 或提供方不可用时的过渡发行</td><td colspan="2">仅允许 <code>local-master:v1</code> 引用的包装/解包（AES-256-GCM），生成/轮换一律拒绝</td><td>包装+解包自检</td></tr>
+</table>
+<div class="note">
+  测试环境 SoftHSM 2.6.1（Botan2 后端）OAEP 解密不可用，故包装算法为 RSA PKCS#1 v1.5（与 hsm-sign-service 服务端一致）；
+  生产（OpenSSL 后端 / 云 KMS）应切回 <code>RSA-OAEP-SHA256</code>（config.yaml <code>wrap_algorithm</code> 已注明）。
+</div>
+
+<h2>2. 场景总览</h2>
+<table>
+  <tr><th>#</th><th>场景</th><th>触发入口</th><th>HSM 操作</th><th>使用密钥</th><th>状态</th></tr>
+  <tr><td>0</td><td><a href="#s0">服务启动与 HSM 接入</a></td><td>进程启动</td><td>健康检查 / token 登录 / 机制探测</td><td>—</td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>1</td><td><a href="#s1">创建租户（发行密钥）</a></td><td>注册审批 / datatool 补发</td><td>生成租户密钥对、包装 DEK 与盲索引密钥</td><td>租户 RSA 密钥对</td><td><span class="badge b-part">🔶 部分实现</span></td></tr>
+  <tr><td>2</td><td><a href="#s2">员工建档（加密写入）</a></td><td>POST /api/v1/people</td><td>解包 DEK / 盲索引密钥</td><td>DEK + 盲索引密钥</td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>3</td><td><a href="#s3">员工检索（加密项解密）</a></td><td>GET /api/v1/people 等读路径</td><td>解包 DEK（缓存未命中时）</td><td>DEK</td><td><span class="badge b-part">🔶 部分实现</span></td></tr>
+  <tr><td>4</td><td><a href="#s4">手机号登录（盲索引）</a></td><td>POST /api/v1/auth/account-login</td><td>解包盲索引密钥</td><td>盲索引密钥</td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>5</td><td><a href="#s5">明文离线备份导出</a></td><td>POST /api/v1/tenant/plain-backups</td><td>逐行解包 DEK 解密</td><td>DEK</td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>6</td><td><a href="#s6">密钥轮换</a></td><td>运维发起</td><td>生成新版本密钥对</td><td>租户 RSA 密钥对</td><td><span class="badge b-part">🔶 部分实现</span></td></tr>
+  <tr><td>7</td><td><a href="#s7">删除租户</a></td><td>平台删除申请（规划）</td><td>删除租户密钥对象（运维脚本）</td><td>租户 RSA 密钥对</td><td><span class="badge b-plan">📋 规划/运维</span></td></tr>
+  <tr><td>8</td><td><a href="#s8">数据互转与存量补发</a></td><td>server -datatool convert</td><td>补发密钥 + 批量加/解密</td><td>DEK + 盲索引密钥</td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+</table>
+
+<h2>3. 场景详述</h2>
+
+<h3 id="s0">3.0 服务启动与 HSM 接入 <span class="badge b-ok">✅ 已实现</span></h3>
+<p>启动时 <code>main.go</code> 按配置创建 KeyProvider：远程模式校验 hsm-sign-service 可用性；本地模式加载 PKCS#11 模块、定位 token、用 PIN 登录并确认机制可用。
+提供方创建失败只告警不回退：涉及密文的读写将返回 <code>KEY_UNAVAILABLE</code>，防止在 HSM 缺席时静默降级。</p>
+<svg viewBox="0 0 1000 372" role="img" aria-label="启动时序图">
+  <defs><marker id="am2" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="30" y="10" width="140" height="34" rx="6" class="part"/><text x="100" y="32" text-anchor="middle" class="cap2">运维 / 部署</text>
+  <rect x="210" y="10" width="140" height="34" rx="6" class="part"/><text x="280" y="32" text-anchor="middle" class="cap2">main.go</text>
+  <rect x="390" y="10" width="140" height="34" rx="6" class="part"/><text x="460" y="32" text-anchor="middle" class="cap2">KeyProvider 工厂</text>
+  <rect x="580" y="10" width="160" height="34" rx="6" class="partHsm"/><text x="660" y="32" text-anchor="middle" class="cap2">HSM（服务 / token）</text>
+  <rect x="770" y="10" width="150" height="34" rx="6" class="part"/><text x="845" y="32" text-anchor="middle" class="cap2">seccrypto.Service</text>
+  <line x1="100" y1="44" x2="100" y2="352" class="life"/><line x1="280" y1="44" x2="280" y2="352" class="life"/>
+  <line x1="460" y1="44" x2="460" y2="352" class="life"/><line x1="660" y1="44" x2="660" y2="352" class="life"/>
+  <line x1="845" y1="44" x2="845" y2="352" class="life"/>
+  <line x1="100" y1="75" x2="280" y2="75" class="msg" marker-end="url(#am2)"/><text x="190" y="69" text-anchor="middle" class="lbl">启动服务（读取 crypto.softhsm2 配置）</text>
+  <line x1="280" y1="105" x2="460" y2="105" class="msg" marker-end="url(#am2)"/><text x="370" y="99" text-anchor="middle" class="lbl">NewProvider(kms_provider=softhsm2)</text>
+  <line x1="460" y1="135" x2="660" y2="135" class="msg" marker-end="url(#am2)"/>
+  <text x="560" y="121" text-anchor="middle" class="lbl">远程：GET /healthz（X-API-Key）</text>
+  <text x="560" y="150" text-anchor="middle" class="lblS">本地：加载模块 → 定位 token → PIN 登录</text>
+  <line x1="660" y1="180" x2="460" y2="180" class="ret" marker-end="url(#am2)"/><text x="560" y="174" text-anchor="middle" class="lbl">ok / CKM_RSA_PKCS 可用</text>
+  <line x1="460" y1="210" x2="280" y2="210" class="ret" marker-end="url(#am2)"/><text x="370" y="204" text-anchor="middle" class="lbl">provider（远程 或 本地 PKCS#11）</text>
+  <line x1="280" y1="240" x2="845" y2="240" class="msg" marker-end="url(#am2)"/>
+  <text x="560" y="234" text-anchor="middle" class="lbl">NewService(provider, local, DBKeyStore, 缓存 5min)</text>
+  <rect x="60" y="268" width="880" height="76" rx="7" class="noteBox"/>
+  <text x="80" y="290" class="lbl">失败口径：提供方创建失败时 main.go 仅告警并置 provider=nil；涉及密文的读写返回 KEY_UNAVAILABLE，不向 local 回退（新数据）。</text>
+  <text x="80" y="310" class="lbl">local 兼容适配器始终创建，仅用于解包 local-master:v1 旧记录与过渡发行。本地 PKCS#11 需 Linux + -tags softhsm2 构建；</text>
+  <text x="80" y="330" class="lbl">Windows 默认构建为 stub，调用返回不可用。密钥记录由 DBKeyStore 从主库 yzws-v1-sec 读取（单库模式回退明文库）。</text>
+</svg>
+<div class="figcap">图 2　服务启动与 HSM 接入时序</div>
+
+<h3 id="s1">3.1 场景一：创建租户（发行密钥） <span class="badge b-part">🔶 部分实现</span></h3>
+<p>注册审批通过时需要为该厂建立首版密钥体系：随机 DEK 与盲索引密钥各一把，用该厂 RSA 公钥包装后写入 <code>tenant_crypto_key</code>（同一版本两行：<code>wrap_key_type=dek</code> 与 <code>index</code>）。
+远程模式下若该厂尚未在 HSM 开通（/pubkey 返回 404），配置了 <code>ssh_target</code> 时自动经 SSH 执行 <code>add-tenant.sh</code> 开通并轮询生效；未配置则返回 <code>KEY_UNAVAILABLE</code>。</p>
+<svg viewBox="0 0 1000 492" role="img" aria-label="创建租户时序图">
+  <defs><marker id="am3" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="20" y="10" width="130" height="34" rx="6" class="part"/><text x="85" y="32" text-anchor="middle" class="cap2">平台管理员</text>
+  <rect x="160" y="10" width="130" height="34" rx="6" class="part"/><text x="225" y="32" text-anchor="middle" class="cap2">tenantreg 审批</text>
+  <rect x="300" y="10" width="130" height="34" rx="6" class="part"/><text x="365" y="32" text-anchor="middle" class="cap2">Service.IssueKeys</text>
+  <rect x="440" y="10" width="130" height="34" rx="6" class="partHsm"/><text x="505" y="32" text-anchor="middle" class="cap2">KeyProvider</text>
+  <rect x="580" y="10" width="130" height="34" rx="6" class="partHsm"/><text x="645" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="740" y="10" width="130" height="34" rx="6" class="partDb"/><text x="805" y="32" text-anchor="middle" class="cap2">yzws-v1</text>
+  <line x1="85" y1="44" x2="85" y2="472" class="life"/><line x1="225" y1="44" x2="225" y2="472" class="life"/>
+  <line x1="365" y1="44" x2="365" y2="472" class="life"/><line x1="505" y1="44" x2="505" y2="472" class="life"/>
+  <line x1="645" y1="44" x2="645" y2="472" class="life"/><line x1="805" y1="44" x2="805" y2="472" class="life"/>
+  <line x1="85" y1="75" x2="225" y2="75" class="msg" marker-end="url(#am3)"/><text x="155" y="69" text-anchor="middle" class="lbl">POST …/tenant-registrations/{id}/approve</text>
+  <line x1="225" y1="105" x2="365" y2="105" class="msg" marker-end="url(#am3)"/><text x="295" y="99" text-anchor="middle" class="lbl">审批事务内发行密钥</text>
+  <path d="M365,135 h40 v14 h-40" class="self" marker-end="url(#am3)"/><text x="415" y="141" class="lbl">生成随机 DEK（32B）+ 盲索引密钥（32B）</text>
+  <line x1="365" y1="172" x2="505" y2="172" class="msg" marker-end="url(#am3)"/><text x="435" y="166" text-anchor="middle" class="lbl">GenerateTenantKeyPair(tenantID, 1)</text>
+  <line x1="505" y1="202" x2="645" y2="202" class="msg" marker-end="url(#am3)"/>
+  <text x="575" y="188" text-anchor="middle" class="lbl">远程：GET /pubkey?tenant=（404→SSH add-tenant.sh，轮询≤25s）</text>
+  <text x="575" y="217" text-anchor="middle" class="lblS">本地：PKCS#11 GenerateKeyPair RSA-3072（私钥不可导出）</text>
+  <line x1="645" y1="232" x2="505" y2="232" class="ret" marker-end="url(#am3)"/><text x="575" y="226" text-anchor="middle" class="lbl">KeyRef（key_wrap_ref=softhsm2:token:tenant:v1）</text>
+  <line x1="365" y1="262" x2="505" y2="262" class="msg" marker-end="url(#am3)"/><text x="435" y="256" text-anchor="middle" class="lbl">Wrap(DEK)、Wrap(indexKey)</text>
+  <rect x="520" y="276" width="440" height="34" rx="6" class="noteBox"/>
+  <text x="532" y="297" class="lblS">远程：应用本地用租户公钥 RSA PKCS#1 v1.5；本地：token 内公钥加密</text>
+  <line x1="365" y1="330" x2="805" y2="330" class="msg" marker-end="url(#am3)"/>
+  <text x="585" y="324" text-anchor="middle" class="lbl">INSERT tenant_crypto_key ×2（wrap_key_type=dek / index，status=active）</text>
+  <path d="M365,360 h40 v14 h-40" class="self" marker-end="url(#am3)"/><text x="415" y="366" class="lbl">Invalidate：清空该厂密钥缓存（下次使用重新解包）</text>
+  <line x1="225" y1="396" x2="85" y2="396" class="ret" marker-end="url(#am3)"/><text x="155" y="390" text-anchor="middle" class="lbl">审批通过（初始密码仅返回一次）</text>
+  <rect x="40" y="418" width="920" height="60" rx="7" class="noteBox"/>
+  <text x="60" y="440" class="lbl">现状（🔶）：审批仍调用 ensureTenantCryptoKey 生成 local-master:v1（JWTSecret 派生 KEK 包装，仅 DEK 一行）。</text>
+  <text x="60" y="462" class="lbl">HSM 发行路径（Service.IssueKeys：DEK+盲索引密钥、HSM 包装）已实现，datatool 对存量租户 EnsureKeys 使用。待整改：审批切换至 IssueKeys，禁止新租户再落 local。</text>
+</svg>
+<div class="figcap">图 3　创建租户（发行密钥）时序</div>
+<div class="note">
+  <b>关于 Invalidate：</b>图中“生成随机 DEK + 盲索引密钥”是新发行密钥材料，随后用租户公钥包装落库；
+  最后一步 <code>Invalidate</code> 只是把该厂<b>内存中已缓存的密钥材料清空</b>（不是替换为 DEK/indexKey，也不改动数据库记录），
+  使后续首次加解密时按刚落库的新密钥记录重新从 HSM 解包，避免读到发行前残留的旧缓存。
+</div>
+<h4>异常与边界</h4>
+<table>
+  <tr><th>情况</th><th>行为</th></tr>
+  <tr><td>HSM 未开通该租户且未配置 ssh_target</td><td>返回 KEY_UNAVAILABLE，提示先开通租户密钥；不回退 local 生成新密钥</td></tr>
+  <tr><td>SSH 自动开通后 25s 内公钥仍不可见</td><td>报错并提示重启 sign-svc 刷新对象缓存（SoftHSM 新对象对服务端有秒级可见延迟）</td></tr>
+  <tr><td>提供方为 nil / local 的过渡环境</td><td>IssueKeys 回退 local-master:v1 包装（与 ensureTenantCryptoKey 同格式），保证未接入 HSM 环境可用；接入 HSM 后按 3.6 轮换迁移</td></tr>
+  <tr><td>重复审批/重复发行</td><td>tenant_crypto_key 以 (tenant_id, wrap_key_type, key_version) 唯一约束幂等，EnsureKeys 对已存在 active 密钥直接跳过</td></tr>
+</table>
+
+<h3 id="s2">3.2 场景二：员工建档（敏感字段加密写入） <span class="badge b-ok">✅ 已实现</span></h3>
+<p>管理人员/工人建档在 2PC 双写事务内完成：明文库写明文 + <code>phone_hash</code>；密文库同一主键写 <code>enc:v1</code> 密文。
+HSM 在事务前用于解包盲索引密钥（手机号查重）与 DEK（字段加密），密钥材料仅存在于内存。</p>
+<svg viewBox="0 0 1000 462" role="img" aria-label="员工建档时序图">
+  <defs><marker id="am4" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="20" y="10" width="130" height="34" rx="6" class="part"/><text x="85" y="32" text-anchor="middle" class="cap2">厂管理员</text>
+  <rect x="160" y="10" width="130" height="34" rx="6" class="part"/><text x="225" y="32" text-anchor="middle" class="cap2">person API</text>
+  <rect x="300" y="10" width="150" height="34" rx="6" class="part"/><text x="375" y="32" text-anchor="middle" class="cap2">RowCrypto · Service</text>
+  <rect x="470" y="10" width="130" height="34" rx="6" class="partHsm"/><text x="535" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="620" y="10" width="130" height="34" rx="6" class="partDb"/><text x="685" y="32" text-anchor="middle" class="cap2">yzws-v1</text>
+  <rect x="770" y="10" width="130" height="34" rx="6" class="partDb"/><text x="835" y="32" text-anchor="middle" class="cap2">yzws-v1-sec</text>
+  <line x1="85" y1="44" x2="85" y2="442" class="life"/><line x1="225" y1="44" x2="225" y2="442" class="life"/>
+  <line x1="375" y1="44" x2="375" y2="442" class="life"/><line x1="535" y1="44" x2="535" y2="442" class="life"/>
+  <line x1="685" y1="44" x2="685" y2="442" class="life"/><line x1="835" y1="44" x2="835" y2="442" class="life"/>
+  <line x1="85" y1="75" x2="225" y2="75" class="msg" marker-end="url(#am4)"/><text x="155" y="69" text-anchor="middle" class="lbl">POST /api/v1/people（工号/手机号/身份证/银行卡…）</text>
+  <line x1="225" y1="105" x2="375" y2="105" class="msg" marker-end="url(#am4)"/><text x="300" y="99" text-anchor="middle" class="lbl">PhoneHash(employee.phone) 查重</text>
+  <line x1="375" y1="135" x2="535" y2="135" class="msg" marker-end="url(#am4)"/><text x="455" y="129" text-anchor="middle" class="lbl">解包盲索引密钥</text>
+  <line x1="535" y1="165" x2="375" y2="165" class="ret" marker-end="url(#am4)"/><text x="455" y="159" text-anchor="middle" class="lbl">index key（仅内存，缓存 5min）</text>
+  <line x1="225" y1="195" x2="835" y2="195" class="msg" marker-end="url(#am4)"/><text x="530" y="189" text-anchor="middle" class="lbl">校验 employee_no / phone_hash 唯一、组织层级、角色（读主库）</text>
+  <line x1="225" y1="225" x2="375" y2="225" class="msg" marker-end="url(#am4)"/><text x="300" y="219" text-anchor="middle" class="lbl">ForSecure 加密敏感列（phone/id_card_no/bank_card/…）</text>
+  <line x1="375" y1="255" x2="535" y2="255" class="msg" marker-end="url(#am4)"/><text x="455" y="249" text-anchor="middle" class="lbl">解包 DEK（缓存未命中时）</text>
+  <line x1="535" y1="285" x2="375" y2="285" class="ret" marker-end="url(#am4)"/><text x="455" y="279" text-anchor="middle" class="lbl">DEK</text>
+  <line x1="225" y1="315" x2="685" y2="315" class="msg" marker-end="url(#am4)"/><text x="455" y="309" text-anchor="middle" class="lbl">INSERT 明文行（phone 明文 + phone_hash）</text>
+  <line x1="225" y1="345" x2="835" y2="345" class="msg" marker-end="url(#am4)"/><text x="530" y="339" text-anchor="middle" class="lbl">INSERT 密文行（enc:v1，AAD=租户/表/行/字段/版本）</text>
+  <line x1="225" y1="375" x2="835" y2="375" class="msg" marker-end="url(#am4)"/><text x="530" y="369" text-anchor="middle" class="lbl">2PC：journal(prepared) → PREPARE → COMMIT PREPARED（两库）</text>
+  <line x1="225" y1="405" x2="85" y2="405" class="ret" marker-end="url(#am4)"/><text x="155" y="399" text-anchor="middle" class="lbl">employee_id / account_id / 初始密码（仅一次）</text>
+</svg>
+<div class="figcap">图 4　员工建档（加密写入）时序</div>
+<div class="note">
+  <b>读取口径：</b>唯一性、组织层级等校验一律读主库 <code>yzws-v1-sec</code>（<code>api.DB</code>=读池，默认 <code>read_source=secure</code>）；
+  <code>yzws-v1</code> 仅作为双写明文副本，测试期用于对账与核查加密库数据正确性（如比对两库数据、排查异常），日常不作为业务读取来源。
+</div>
+<div class="note">
+  加密列范围（<code>dualwrite.SensitiveColumns</code>）：employee 的 phone、id_card_no、address、birth_date、nation、native_place、bank_card、bank_name、emergency_contact、emergency_phone；
+  tenant / visitor_lead / customer / supplier 的联系方式与地址同理。工号、姓名、组织 ID、状态、phone_hash 等检索/关联字段不加密。
+</div>
+
+<h3 id="s3">3.3 场景三：员工检索（信息中含加密项的解密） <span class="badge b-part">🔶 部分实现</span></h3>
+<p>默认 <code>read_source=secure</code>：人员检索从密文库读出 <code>enc:v1</code> 密文，服务端按信封内密钥版本找到对应 DEK 记录，
+经 HSM 解包后做 AES-256-GCM 解密并校验 AAD（租户/表/行/字段/版本绑定，防止密文被复制到他厂或他行），最后按权限脱敏返回。
+密钥材料在内存缓存 5 分钟，缓存期内不重复访问 HSM。</p>
+<svg viewBox="0 0 1000 530" role="img" aria-label="员工检索解密时序图">
+  <defs><marker id="am5" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="20" y="10" width="130" height="34" rx="6" class="part"/><text x="85" y="32" text-anchor="middle" class="cap2">前端 / 调用方</text>
+  <rect x="160" y="10" width="130" height="34" rx="6" class="part"/><text x="225" y="32" text-anchor="middle" class="cap2">people API</text>
+  <rect x="300" y="10" width="130" height="34" rx="6" class="partDb"/><text x="365" y="32" text-anchor="middle" class="cap2">yzws-v1-sec</text>
+  <rect x="440" y="10" width="140" height="34" rx="6" class="part"/><text x="510" y="32" text-anchor="middle" class="cap2">Service.DecryptField</text>
+  <rect x="600" y="10" width="130" height="34" rx="6" class="partHsm"/><text x="665" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="760" y="10" width="130" height="34" rx="6" class="partDb"/><text x="825" y="32" text-anchor="middle" class="cap2">yzws-v1-sec（密钥表）</text>
+  <line x1="85" y1="44" x2="85" y2="510" class="life"/><line x1="225" y1="44" x2="225" y2="510" class="life"/>
+  <line x1="365" y1="44" x2="365" y2="510" class="life"/><line x1="510" y1="44" x2="510" y2="510" class="life"/>
+  <line x1="665" y1="44" x2="665" y2="510" class="life"/><line x1="825" y1="44" x2="825" y2="510" class="life"/>
+  <line x1="85" y1="75" x2="225" y2="75" class="msg" marker-end="url(#am5)"/><text x="155" y="69" text-anchor="middle" class="lbl">GET /api/v1/people（JWT）</text>
+  <path d="M225,105 h40 v14 h-40" class="self" marker-end="url(#am5)"/><text x="275" y="111" class="lbl">鉴权 + 数据范围过滤（orgapp.ComputeAccess）</text>
+  <line x1="225" y1="140" x2="365" y2="140" class="msg" marker-end="url(#am5)"/><text x="295" y="134" text-anchor="middle" class="lbl">SELECT employee（read_source=secure）</text>
+  <line x1="365" y1="170" x2="225" y2="170" class="ret" marker-end="url(#am5)"/><text x="295" y="164" text-anchor="middle" class="lbl">行（phone=enc:v1:1:…）</text>
+  <line x1="225" y1="200" x2="510" y2="200" class="msg" marker-end="url(#am5)"/><text x="367" y="194" text-anchor="middle" class="lbl">FromSecure → DecryptField(employee, id, phone)</text>
+  <path d="M510,230 h40 v14 h-40" class="self" marker-end="url(#am5)"/><text x="560" y="236" class="lbl">内存缓存命中？（tenant:dek:version，TTL 5min）</text>
+  <line x1="510" y1="265" x2="825" y2="265" class="msg" marker-end="url(#am5)"/><text x="667" y="259" text-anchor="middle" class="lbl">未命中：LoadTenantKey(dek, 信封版本 v1)</text>
+  <line x1="825" y1="295" x2="510" y2="295" class="ret" marker-end="url(#am5)"/><text x="667" y="289" text-anchor="middle" class="lbl">wrapped_key + key_wrap_ref</text>
+  <line x1="510" y1="325" x2="665" y2="325" class="msg" marker-end="url(#am5)"/>
+  <text x="587" y="311" text-anchor="middle" class="lbl">Unwrap：远程 POST /unwrap（X-Tenant-ID）</text>
+  <text x="587" y="340" text-anchor="middle" class="lblS">本地：token 内私钥解密</text>
+  <line x1="665" y1="355" x2="510" y2="355" class="ret" marker-end="url(#am5)"/><text x="587" y="349" text-anchor="middle" class="lbl">DEK（仅内存，不落库/不写日志）</text>
+  <line x1="510" y1="385" x2="225" y2="385" class="ret" marker-end="url(#am5)"/><text x="367" y="379" text-anchor="middle" class="lbl">AES-256-GCM 解密 + AAD 校验 → 明文</text>
+  <line x1="225" y1="415" x2="85" y2="415" class="ret" marker-end="url(#am5)"/><text x="155" y="409" text-anchor="middle" class="lbl">按权限脱敏（138****5678）返回</text>
+  <rect x="40" y="440" width="920" height="62" rx="7" class="noteBox"/>
+  <text x="60" y="462" class="lbl">现状（✅）：解密能力（Service.DecryptField / RowCrypto.FromSecure）已实现；员工详情/列表、本人资料、平台租户</text>
+  <text x="60" y="484" class="lbl">详情/注册列表/本厂资料读接口均已接入解密：非本人敏感列一律 *** 占位，授权查看走 5 分钟票据（管理员密码或授权码，记审计）。</text>
+</svg>
+<div class="figcap">图 5　员工检索（加密项解密）时序</div>
+<h4>异常与边界</h4>
+<table>
+  <tr><th>情况</th><th>行为</th></tr>
+  <tr><td>信封 AAD 校验失败</td><td>返回 invalid ciphertext envelope：密文被复制到其他租户/行/字段或已损坏，拒绝解密</td></tr>
+  <tr><td>信封版本无对应密钥记录</td><td>LoadTenantKey 失败，按 KEY_UNAVAILABLE/内部错误上抛，不做跨版本静默解包</td></tr>
+  <tr><td>HSM 不可用</td><td>Unwrap 返回 KEY_UNAVAILABLE；不回退 local 解包新数据（仅 key_wrap_ref=local-master:v1 的旧记录允许 local 解包）</td></tr>
+  <tr><td>迁移过渡期明文混存</td><td>非 enc:v1 前缀的值原样透传（兼容历史明文），列表仍执行脱敏</td></tr>
+  <tr><td>read_source=plain</td><td>直接读明文库，不调用 HSM；脱敏与权限规则不变</td></tr>
+</table>
+
+<h3 id="s4">3.4 场景四：手机号登录（盲索引密钥解包） <span class="badge b-ok">✅ 已实现</span></h3>
+<p>手机号 + 密码登录时，密文手机号无法等值查询：服务端先从 HSM 解包该厂盲索引密钥，计算 <code>HMAC-SHA256</code> 后按 <code>phone_hash</code> 定位账号。
+HSM 只参与盲索引密钥解包；口令校验为 Argon2id，不经过 HSM。</p>
+<svg viewBox="0 0 1000 432" role="img" aria-label="手机号登录时序图">
+  <defs><marker id="am6" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="40" y="10" width="120" height="34" rx="6" class="part"/><text x="100" y="32" text-anchor="middle" class="cap2">用户</text>
+  <rect x="200" y="10" width="130" height="34" rx="6" class="part"/><text x="265" y="32" text-anchor="middle" class="cap2">auth API</text>
+  <rect x="350" y="10" width="140" height="34" rx="6" class="part"/><text x="420" y="32" text-anchor="middle" class="cap2">Service.PhoneHash</text>
+  <rect x="540" y="10" width="120" height="34" rx="6" class="partHsm"/><text x="600" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="730" y="10" width="140" height="34" rx="6" class="partDb"/><text x="800" y="32" text-anchor="middle" class="cap2">yzws-v1-sec</text>
+  <line x1="100" y1="44" x2="100" y2="412" class="life"/><line x1="265" y1="44" x2="265" y2="412" class="life"/>
+  <line x1="420" y1="44" x2="420" y2="412" class="life"/><line x1="600" y1="44" x2="600" y2="412" class="life"/>
+  <line x1="800" y1="44" x2="800" y2="412" class="life"/>
+  <line x1="100" y1="75" x2="265" y2="75" class="msg" marker-end="url(#am6)"/><text x="182" y="69" text-anchor="middle" class="lbl">POST /auth/account-login（tenant_code+手机号+密码）</text>
+  <line x1="265" y1="105" x2="420" y2="105" class="msg" marker-end="url(#am6)"/><text x="342" y="99" text-anchor="middle" class="lbl">PhoneHash(employee.phone)</text>
+  <line x1="420" y1="135" x2="600" y2="135" class="msg" marker-end="url(#am6)"/><text x="510" y="129" text-anchor="middle" class="lbl">解包盲索引密钥（缓存未命中时）</text>
+  <line x1="600" y1="165" x2="420" y2="165" class="ret" marker-end="url(#am6)"/><text x="510" y="159" text-anchor="middle" class="lbl">index key</text>
+  <line x1="265" y1="195" x2="800" y2="195" class="msg" marker-end="url(#am6)"/><text x="532" y="189" text-anchor="middle" class="lbl">按 phone_hash 查 employee ⋈ user_account</text>
+  <line x1="800" y1="225" x2="265" y2="225" class="ret" marker-end="url(#am6)"/><text x="532" y="219" text-anchor="middle" class="lbl">账号行 / 未命中</text>
+  <line x1="265" y1="255" x2="800" y2="255" class="msg" marker-end="url(#am6)"/><text x="532" y="249" text-anchor="middle" class="lbl">未命中再查 tenant.contact_phone_hash（厂管理员）</text>
+  <path d="M265,285 h40 v14 h-40" class="self" marker-end="url(#am6)"/><text x="315" y="291" class="lbl">固定顺序校验：存在 → 租户 → 密码 → 启用 → 终端</text>
+  <line x1="265" y1="325" x2="100" y2="325" class="ret" marker-end="url(#am6)"/><text x="182" y="319" text-anchor="middle" class="lbl">JWT + 权限 / 明确错误码</text>
+  <rect x="40" y="350" width="920" height="52" rx="7" class="noteBox"/>
+  <text x="60" y="372" class="lbl">HSM 仅参与盲索引密钥解包；口令为 Argon2id 本地验证，不经 HSM。</text>
+  <text x="60" y="392" class="lbl">登录成功/失败均写 auth_login_log（仅追加表）：登录标识保存掩码 + HMAC，不存手机号明文、密码或 token。</text>
+</svg>
+<div class="figcap">图 6　手机号登录（盲索引）时序</div>
+
+<h3 id="s5">3.5 场景五：明文离线备份导出 <span class="badge b-ok">✅ 已实现</span></h3>
+<p>从密文库读取本厂数据，经 HSM 解包 DEK 逐行解密后写出 JSONL（每行一条完整记录）+ manifest（表名/行数/SHA-256）。
+备份包为受控明文例外：不含密钥、会话、票据与各类日志；下载凭证一次性、10 分钟有效，取包即作废；zip 在响应流内打包，不在公开目录落临时文件。</p>
+<svg viewBox="0 0 1000 500" role="img" aria-label="明文备份导出时序图">
+  <defs><marker id="am7" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="15" y="10" width="120" height="34" rx="6" class="part"/><text x="75" y="32" text-anchor="middle" class="cap2">厂管理员</text>
+  <rect x="140" y="10" width="120" height="34" rx="6" class="part"/><text x="200" y="32" text-anchor="middle" class="cap2">backup API</text>
+  <rect x="270" y="10" width="120" height="34" rx="6" class="part"/><text x="330" y="32" text-anchor="middle" class="cap2">plainbackup</text>
+  <rect x="400" y="10" width="120" height="34" rx="6" class="partDb"/><text x="460" y="32" text-anchor="middle" class="cap2">yzws-v1-sec</text>
+  <rect x="530" y="10" width="120" height="34" rx="6" class="partHsm"/><text x="590" y="32" text-anchor="middle" class="cap2">Service · HSM</text>
+  <rect x="660" y="10" width="120" height="34" rx="6" class="partDb"/><text x="720" y="32" text-anchor="middle" class="cap2">yzws-v1（对账副本）</text>
+  <rect x="790" y="10" width="130" height="34" rx="6" class="partDb"/><text x="855" y="32" text-anchor="middle" class="cap2">备份目录（0600）</text>
+  <line x1="75" y1="44" x2="75" y2="480" class="life"/><line x1="200" y1="44" x2="200" y2="480" class="life"/>
+  <line x1="330" y1="44" x2="330" y2="480" class="life"/><line x1="460" y1="44" x2="460" y2="480" class="life"/>
+  <line x1="590" y1="44" x2="590" y2="480" class="life"/><line x1="720" y1="44" x2="720" y2="480" class="life"/>
+  <line x1="855" y1="44" x2="855" y2="480" class="life"/>
+  <line x1="75" y1="75" x2="200" y2="75" class="msg" marker-end="url(#am7)"/><text x="137" y="69" text-anchor="middle" class="lbl">POST /tenant/plain-backups（backup:export）</text>
+  <line x1="200" y1="105" x2="330" y2="105" class="msg" marker-end="url(#am7)"/><text x="265" y="99" text-anchor="middle" class="lbl">Export(tenantID)</text>
+  <line x1="330" y1="135" x2="460" y2="135" class="msg" marker-end="url(#am7)"/><text x="395" y="129" text-anchor="middle" class="lbl">枚举含 tenant_id 的表并逐表 SELECT</text>
+  <line x1="460" y1="165" x2="330" y2="165" class="ret" marker-end="url(#am7)"/><text x="395" y="159" text-anchor="middle" class="lbl">行（敏感列为 enc:v1）</text>
+  <line x1="330" y1="195" x2="590" y2="195" class="msg" marker-end="url(#am7)"/><text x="460" y="189" text-anchor="middle" class="lbl">FromSecure 解密（按信封版本 Unwrap DEK）</text>
+  <line x1="590" y1="225" x2="330" y2="225" class="ret" marker-end="url(#am7)"/><text x="460" y="219" text-anchor="middle" class="lbl">明文（仅内存）</text>
+  <line x1="330" y1="255" x2="855" y2="255" class="msg" marker-end="url(#am7)"/><text x="592" y="249" text-anchor="middle" class="lbl">写 JSONL（0600）+ manifest.json + SHA-256</text>
+  <line x1="330" y1="285" x2="460" y2="285" class="msg" marker-end="url(#am7)"/><text x="395" y="279" text-anchor="middle" class="lbl">INSERT backup_job（双写两库，status=succeeded）</text>
+  <line x1="75" y1="315" x2="200" y2="315" class="msg" marker-end="url(#am7)"/><text x="137" y="309" text-anchor="middle" class="lbl">POST …/download-ticket</text>
+  <line x1="200" y1="345" x2="75" y2="345" class="ret" marker-end="url(#am7)"/><text x="137" y="339" text-anchor="middle" class="lbl">一次性 token（10 分钟）</text>
+  <line x1="75" y1="375" x2="200" y2="375" class="msg" marker-end="url(#am7)"/><text x="137" y="369" text-anchor="middle" class="lbl">GET …/download?token=</text>
+  <line x1="200" y1="405" x2="460" y2="405" class="msg" marker-end="url(#am7)"/><text x="330" y="399" text-anchor="middle" class="lbl">校验并消费 token（两库同写，取包即作废）</text>
+  <line x1="200" y1="435" x2="75" y2="435" class="ret" marker-end="url(#am7)"/><text x="137" y="429" text-anchor="middle" class="lbl">zip 流式下载</text>
+</svg>
+<div class="figcap">图 7　明文离线备份导出时序</div>
+<div class="note warn">
+  明文备份是受控安全例外：备份包不再受字段级加密保护，等同于明文数据库。权限 <code>backup:export</code> 不随 tenant_admin 身份自动获得；
+  导出/校验/下载全部写审计，日志不含业务明文；用户应使用受控离线介质保管并自行制定保留与销毁周期。
+</div>
+
+<h3 id="s6">3.6 场景六：密钥轮换 <span class="badge b-part">🔶 部分实现</span></h3>
+<p>轮换创建新版本密钥对与新版本 DEK/盲索引密钥，旧版本置 <code>rotated</code> 并保留于 HSM，继续承担历史密文解密；
+新写入使用新版本，历史密文可按信封内版本选择旧密钥解密。全部历史数据重加密完成前不得销毁旧私钥。</p>
+<svg viewBox="0 0 1000 356" role="img" aria-label="密钥轮换时序图">
+  <defs><marker id="am8" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="40" y="10" width="130" height="34" rx="6" class="part"/><text x="105" y="32" text-anchor="middle" class="cap2">运维</text>
+  <rect x="230" y="10" width="150" height="34" rx="6" class="part"/><text x="305" y="32" text-anchor="middle" class="cap2">Service / KeyProvider</text>
+  <rect x="470" y="10" width="140" height="34" rx="6" class="partHsm"/><text x="540" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="700" y="10" width="140" height="34" rx="6" class="partDb"/><text x="770" y="32" text-anchor="middle" class="cap2">yzws-v1</text>
+  <line x1="105" y1="44" x2="105" y2="336" class="life"/><line x1="305" y1="44" x2="305" y2="336" class="life"/>
+  <line x1="540" y1="44" x2="540" y2="336" class="life"/><line x1="770" y1="44" x2="770" y2="336" class="life"/>
+  <line x1="105" y1="75" x2="305" y2="75" class="msg" marker-end="url(#am8)"/><text x="205" y="69" text-anchor="middle" class="lbl">发起轮换（本地模式 Rotate）</text>
+  <line x1="305" y1="105" x2="540" y2="105" class="msg" marker-end="url(#am8)"/><text x="422" y="99" text-anchor="middle" class="lbl">GenerateKeyPair(vN+1)（旧密钥保留于 token）</text>
+  <line x1="540" y1="135" x2="305" y2="135" class="ret" marker-end="url(#am8)"/><text x="422" y="129" text-anchor="middle" class="lbl">新 KeyRef</text>
+  <line x1="305" y1="165" x2="770" y2="165" class="msg" marker-end="url(#am8)"/><text x="537" y="159" text-anchor="middle" class="lbl">新版本密钥行 active；旧版本置 rotated</text>
+  <path d="M305,195 h40 v14 h-40" class="self" marker-end="url(#am8)"/><text x="355" y="201" class="lbl">Invalidate 缓存；新写用新版本，旧密文按信封版本解密</text>
+  <rect x="40" y="232" width="920" height="66" rx="7" class="noteBox"/>
+  <text x="60" y="254" class="lbl">远程模式 Rotate 为只读（ErrProviderReadOnly）：需运维在 HSM 服务端生成新密钥并更新租户注册表（热加载）后递增版本，应用不自动生成。</text>
+  <text x="60" y="276" class="lbl">盲索引密钥轮换须暂停该厂手机号登录/绑定写入或采用双索引过渡，避免登录中断；历史密文可后台分批重加密（AAD 不变，仅信封版本更新）。</text>
+</svg>
+<div class="figcap">图 8　密钥轮换时序</div>
+
+<h3 id="s7">3.7 场景七：删除租户 <span class="badge b-plan">📋 规划/运维流程</span></h3>
+<p>删除租户是不可逆操作，设计上按“停用 → 保留期 → 备份确认 → 清库 → 销毁密钥 → 审计”执行。
+HSM 侧密钥删除只允许运维脚本在 HSM 内完成（与生成同口径），应用不持有删除接口。</p>
+<svg viewBox="0 0 1000 452" role="img" aria-label="删除租户时序图">
+  <defs><marker id="am9" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="20" y="10" width="130" height="34" rx="6" class="part"/><text x="85" y="32" text-anchor="middle" class="cap2">平台管理员</text>
+  <rect x="160" y="10" width="130" height="34" rx="6" class="part"/><text x="225" y="32" text-anchor="middle" class="cap2">平台 API</text>
+  <rect x="300" y="10" width="130" height="34" rx="6" class="partDb"/><text x="365" y="32" text-anchor="middle" class="cap2">两库</text>
+  <rect x="440" y="10" width="130" height="34" rx="6" class="partHsm"/><text x="505" y="32" text-anchor="middle" class="cap2">运维</text>
+  <rect x="580" y="10" width="130" height="34" rx="6" class="partHsm"/><text x="645" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="740" y="10" width="150" height="34" rx="6" class="partDb"/><text x="815" y="32" text-anchor="middle" class="cap2">deletion_log（预留）</text>
+  <line x1="85" y1="44" x2="85" y2="432" class="life"/><line x1="225" y1="44" x2="225" y2="432" class="life"/>
+  <line x1="365" y1="44" x2="365" y2="432" class="life"/><line x1="505" y1="44" x2="505" y2="432" class="life"/>
+  <line x1="645" y1="44" x2="645" y2="432" class="life"/><line x1="815" y1="44" x2="815" y2="432" class="life"/>
+  <line x1="85" y1="75" x2="225" y2="75" class="msg" marker-end="url(#am9)"/><text x="155" y="69" text-anchor="middle" class="lbl">POST /platform/tenants/{id}/disable（已实现）</text>
+  <line x1="225" y1="105" x2="365" y2="105" class="msg" marker-end="url(#am9)"/><text x="295" y="99" text-anchor="middle" class="lbl">tenant.status=disabled + 吊销全部会话</text>
+  <rect x="240" y="122" width="260" height="26" rx="6" class="noteBox"/><text x="252" y="139" class="lblS">保留期（合同/审计/纠纷处理）</text>
+  <line x1="225" y1="170" x2="365" y2="170" class="msg" marker-end="url(#am9)"/><text x="295" y="164" text-anchor="middle" class="lbl">（可选）先导出明文离线备份（场景 5）</text>
+  <line x1="85" y1="200" x2="505" y2="200" class="msg" marker-end="url(#am9)"/><text x="295" y="194" text-anchor="middle" class="lbl">提交删除申请（审批通过）</text>
+  <line x1="505" y1="230" x2="365" y2="230" class="msg" marker-end="url(#am9)"/><text x="435" y="224" text-anchor="middle" class="lbl">分批/事务清除两库租户数据</text>
+  <line x1="505" y1="260" x2="645" y2="260" class="msg" marker-end="url(#am9)"/><text x="575" y="254" text-anchor="middle" class="lbl">remove-tenant.sh：删除租户密钥对象（私钥销毁）</text>
+  <line x1="645" y1="290" x2="505" y2="290" class="ret" marker-end="url(#am9)"/><text x="575" y="284" text-anchor="middle" class="lbl">完成</text>
+  <line x1="505" y1="320" x2="815" y2="320" class="msg" marker-end="url(#am9)"/><text x="660" y="314" text-anchor="middle" class="lbl">记录删除范围/时间/操作人/审批单</text>
+  <rect x="40" y="352" width="920" height="84" rx="7" class="noteBox"/>
+  <text x="60" y="374" class="lbl">现状（📋）：代码未实现删除租户——平台仅 enable/disable（platform.go）；KeyProvider 无删除接口（密钥生成/删除只允许运维脚本在 HSM 内执行）；</text>
+  <text x="60" y="396" class="lbl">deletion_log 已在备份/补偿排除清单中预留。恢复口径：删除前必须完成明文备份或客户书面确认放弃数据；</text>
+  <text x="60" y="418" class="lbl">HSM 密钥销毁后，任何残留的 enc:v1 密文将永久不可解密，因此清库与销毁密钥的先后顺序必须为“先清库、后销毁”。</text>
+</svg>
+<div class="figcap">图 9　删除租户（规划）时序</div>
+
+<h3 id="s8">3.8 场景八：数据互转与存量补发（datatool） <span class="badge b-ok">✅ 已实现</span></h3>
+<p>全量互转（plain→secure / secure→plain）执行前，为缺少密钥记录的存量主体（各租户 + platform）幂等补发密钥；
+随后逐表复制：向密文库写时加密、向明文库写时解密，并回填明文库 <code>phone_hash</code> 盲索引。</p>
+<svg viewBox="0 0 1000 396" role="img" aria-label="数据互转时序图">
+  <defs><marker id="am10" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#3b4a5a"/></marker></defs>
+  <rect x="40" y="10" width="130" height="34" rx="6" class="part"/><text x="105" y="32" text-anchor="middle" class="cap2">运维</text>
+  <rect x="230" y="10" width="140" height="34" rx="6" class="part"/><text x="300" y="32" text-anchor="middle" class="cap2">datatool convert</text>
+  <rect x="430" y="10" width="140" height="34" rx="6" class="part"/><text x="500" y="32" text-anchor="middle" class="cap2">Service.EnsureKeys</text>
+  <rect x="620" y="10" width="120" height="34" rx="6" class="partHsm"/><text x="680" y="32" text-anchor="middle" class="cap2">HSM</text>
+  <rect x="790" y="10" width="140" height="34" rx="6" class="partDb"/><text x="860" y="32" text-anchor="middle" class="cap2">yzws-v1 / sec</text>
+  <line x1="105" y1="44" x2="105" y2="376" class="life"/><line x1="300" y1="44" x2="300" y2="376" class="life"/>
+  <line x1="500" y1="44" x2="500" y2="376" class="life"/><line x1="680" y1="44" x2="680" y2="376" class="life"/>
+  <line x1="860" y1="44" x2="860" y2="376" class="life"/>
+  <line x1="105" y1="75" x2="300" y2="75" class="msg" marker-end="url(#am10)"/><text x="202" y="69" text-anchor="middle" class="lbl">-datatool convert -direction plain2secure -dry-run=false</text>
+  <line x1="300" y1="105" x2="860" y2="105" class="msg" marker-end="url(#am10)"/><text x="580" y="99" text-anchor="middle" class="lbl">收集涉及主体（tenant 表 id + platform）</text>
+  <line x1="300" y1="135" x2="500" y2="135" class="msg" marker-end="url(#am10)"/><text x="400" y="129" text-anchor="middle" class="lbl">EnsureKeys（无 active 密钥的主体）</text>
+  <line x1="500" y1="165" x2="680" y2="165" class="msg" marker-end="url(#am10)"/><text x="590" y="159" text-anchor="middle" class="lbl">GenerateTenantKeyPair + Wrap（dek / index）</text>
+  <line x1="680" y1="195" x2="500" y2="195" class="ret" marker-end="url(#am10)"/><text x="590" y="189" text-anchor="middle" class="lbl">KeyRef + 包装密文</text>
+  <line x1="500" y1="225" x2="860" y2="225" class="msg" marker-end="url(#am10)"/><text x="680" y="219" text-anchor="middle" class="lbl">INSERT tenant_crypto_key（仅明文库；密文库随表复制）</text>
+  <line x1="300" y1="255" x2="860" y2="255" class="msg" marker-end="url(#am10)"/>
+  <text x="580" y="249" text-anchor="middle" class="lbl">逐表复制：plain2secure 加密（ForSecure）/ secure2plain 解密（FromSecure）</text>
+  <line x1="300" y1="285" x2="105" y2="285" class="ret" marker-end="url(#am10)"/><text x="202" y="279" text-anchor="middle" class="lbl">结果统计写 data_transfer_job</text>
+  <rect x="40" y="312" width="920" height="66" rx="7" class="noteBox"/>
+  <text x="60" y="334" class="lbl">平台级敏感数据（visitor_lead 等 tenant_id 为 NULL 的运营表）使用 platform 密钥主体，不借用制衣厂密钥；</text>
+  <text x="60" y="356" class="lbl">迁移 057 已移除 tenant_crypto_key.tenant_id 外键以支持 platform 主体（主体合法性由应用层保证）。</text>
+</svg>
+<div class="figcap">图 10　数据互转与存量补发时序</div>
+
+<h2>4. 密钥与数据格式</h2>
+<h3>4.1 tenant_crypto_key 记录（每版本两行）</h3>
+<table>
+  <tr><th>列</th><th>说明</th></tr>
+  <tr><td>tenant_id</td><td>密钥主体：制衣厂 id 或 platform（平台级，迁移 057 起无外键，应用层保证合法性）</td></tr>
+  <tr><td>wrap_key_type</td><td><code>dek</code>（数据加密密钥）/ <code>index</code>（盲索引密钥）；与 key_version 联合唯一</td></tr>
+  <tr><td>key_version</td><td>每厂递增；当前 active 每类型仅一行（部分唯一索引/事务保证）</td></tr>
+  <tr><td>wrapped_key</td><td>经租户公钥包装后的密钥材料（Base64），禁止明文入库，禁止返回 API、禁止进入审计快照</td></tr>
+  <tr><td>key_provider</td><td><code>local</code>（仅迁移）/ <code>softhsm2</code> / <code>cloud_kms</code>（预留）</td></tr>
+  <tr><td>key_wrap_ref</td><td>解包引用，格式见 4.2</td></tr>
+  <tr><td>status</td><td>active / rotated / revoked；每类型同时最多一个 active</td></tr>
+</table>
+<h3>4.2 key_wrap_ref 格式</h3>
+<table>
+  <tr><th>提供方</th><th>格式</th><th>示例</th></tr>
+  <tr><td>远程 hsm-sign-service</td><td><code>softhsm2:&lt;token_label&gt;:&lt;tenantID&gt;:&lt;version&gt;</code></td><td><code>softhsm2:yzws-mes-test:t-abc123:1</code></td></tr>
+  <tr><td>本地 PKCS#11</td><td><code>softhsm2:&lt;token_label&gt;:&lt;key_label&gt;:&lt;version&gt;</code>（key_label = 前缀 + tenantID + "-v" + 版本）</td><td><code>softhsm2:yzws-mes-test:yzws-tenant-t-abc123-v1:1</code></td></tr>
+  <tr><td>local（旧数据）</td><td><code>local-master:v1</code></td><td><code>local-master:v1</code></td></tr>
+  <tr><td>cloud_kms（预留）</td><td><code>cloud_kms:&lt;provider&gt;:&lt;key_id&gt;:&lt;version&gt;</code></td><td>—</td></tr>
+</table>
+<h3>4.3 字段密文信封</h3>
+<pre><code>enc:v1:&lt;key_version&gt;:&lt;base64url(nonce || ciphertext || tag)&gt;
+
+AAD = tenant_id + 0x1F + table_name + 0x1F + primary_key + 0x1F + column_name + 0x1F + "v1"</code></pre>
+<p>NULL 不加密仍存 NULL；空字符串照常加密（与 NULL 区分）。密文不参与排序与模糊查询；
+手机号等值查询必须走 <code>phone_hash</code> 盲索引。AAD 绑定租户/表/行/字段/版本，密文复制到他厂、他行或他字段后无法通过认证。</p>
+
+<h2>5. 安全与故障处理</h2>
+<table>
+  <tr><th>主题</th><th>口径</th></tr>
+  <tr><td>私钥边界</td><td>私钥只在 HSM token / hsm-sign-service 内，CKA_EXTRACTABLE=false；数据库、配置、日志、审计均不出现私钥、PIN、API Key、明文 DEK</td></tr>
+  <tr><td>故障不回退</td><td>HSM 不可用一律返回 KEY_UNAVAILABLE；不回退 local 解包新数据（仅 local-master:v1 旧记录允许 local 解包）</td></tr>
+  <tr><td>远程重试</td><td>最多 3 次指数退避（200ms 起 + 随机抖动）；网络错误 / 5xx / 429 重试，4xx 不重试；多 IP 回退拨号（IPv4 优先）</td></tr>
+  <tr><td>密钥材料缓存</td><td>按 租户:类型:版本 缓存 5 分钟；发行/轮换后 Invalidate 该厂缓存；进程退出即失效</td></tr>
+  <tr><td>自动开通</td><td>仅远程模式且配置 ssh_target 时：404 → SSH 执行 add-tenant.sh → 轮询公钥（25×1s）；HTTP 服务本身不提供密钥生成/删除接口</td></tr>
+  <tr><td>过渡发行</td><td>provider 为 nil/local 时 IssueKeys 回退 local-master:v1，保证未接入 HSM 环境可用；接入后按 3.6 轮换迁移</td></tr>
+  <tr><td>日志</td><td>错误信息脱敏截断（≤300 字符）；HTTP 日志不含 SQL 参数；备份/审计不含业务明文与密钥</td></tr>
+  <tr><td>健康观测</td><td>远程 GET /healthz；本地机制探测；双库状态 GET /api/v1/system/health/datastore（单写/单库不可达显示 degraded）</td></tr>
+</table>
+
+<h2>6. 配置说明</h2>
+<pre><code>crypto:
+  envelope_version: v1
+  data_algorithm: AES-256-GCM
+  # 测试环境 SoftHSM 2.6.1（Botan2 后端）OAEP 解密不可用，故为 RSA-PKCS1v15；
+  # 生产（OpenSSL 后端 / 云 KMS）切回 RSA-OAEP-SHA256
+  wrap_algorithm: RSA-PKCS1v15
+  kms_provider: softhsm2          # 测试：softhsm2；预留：cloud_kms；local 仅迁移旧数据
+  softhsm2:
+    # 远程模式（当前生效）：server_url 非空，无需本机 PKCS#11 库
+    server_url: "http://127.0.0.1:8443"     # 也可用 CLOTHP_HSM_SERVER_URL 覆盖
+    api_key_env: CLOTHP_HSM_API_KEY          # X-API-Key 只从环境注入
+    ca_cert_file: ""                         # HTTPS 自签证书时指向服务端 CA（可选）
+    timeout_ms: 10000
+    ssh_target: ""                           # 如 root@服务器IP；也可 CLOTHP_HSM_SSH_TARGET
+    token_label: yzws-mes-test
+    # 本地 PKCS#11 模式备用（server_url 留空时生效，需 Linux + -tags softhsm2 构建）
+    # pkcs11_module_env: CLOTHP_SOFTHSM2_MODULE
+    # pin_env: CLOTHP_SOFTHSM2_PIN
+    # key_label_prefix: yzws-tenant-</code></pre>
+<table>
+  <tr><th>环境变量</th><th>用途</th></tr>
+  <tr><td><code>CLOTHP_HSM_SERVER_URL</code></td><td>覆盖 hsm-sign-service 地址</td></tr>
+  <tr><td><code>CLOTHP_HSM_API_KEY</code></td><td>远程调用 X-API-Key</td></tr>
+  <tr><td><code>CLOTHP_HSM_SSH_TARGET</code></td><td>租户密钥自动开通的 SSH 目标（需免密）</td></tr>
+  <tr><td><code>CLOTHP_SOFTHSM2_MODULE</code> / <code>CLOTHP_SOFTHSM2_PIN</code></td><td>本地 PKCS#11 模块路径 / token PIN</td></tr>
+</table>
+<div class="note">
+  Windows 开发机使用远程模式：先挂 SSH 隧道（<code>ssh -N -L 8443:127.0.0.1:8443 root@服务器IP</code>）即可，无需本机 SoftHSM2；
+  本地 PKCS#11 模式仅用于 Linux 测试环境（<code>go build -tags softhsm2</code>，依赖 cgo 与 PKCS#11 模块）。
+</div>
+
+<h2>7. 现状核对与待整改清单</h2>
+<table>
+  <tr><th>能力</th><th>代码位置</th><th>状态</th></tr>
+  <tr><td>KeyProvider 抽象与工厂（softhsm2 / cloud_kms / local）</td><td><code>internal/seccrypto/provider.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>远程 hsm-sign-service（/pubkey、/unwrap、/healthz、重试、SSH 自动开通）</td><td><code>internal/seccrypto/hsmservice.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>本地 SoftHSM2（PKCS#11，私钥不可导出，-tags softhsm2）</td><td><code>internal/seccrypto/softhsm2.go</code> / <code>softhsm2_stub.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>cloud_kms 预留占位</td><td><code>internal/seccrypto/kms.go</code></td><td><span class="badge b-plan">📋 预留</span></td></tr>
+  <tr><td>enc:v1 信封加解密 + AAD 绑定</td><td><code>internal/seccrypto/envelope.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>密钥材料缓存（5min）/ 发行 / 盲索引</td><td><code>internal/seccrypto/service.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>注册审批发行密钥（HSM）</td><td>审批仍走 <code>tenantreg.ensureTenantCryptoKey</code>（local-master:v1）；<code>Service.IssueKeys</code> 已实现</td><td><span class="badge b-part">🔶 待切换</span></td></tr>
+  <tr><td>员工建档加密（2PC 双写）</td><td><code>internal/person/person.go</code> + <code>internal/dualwrite</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>员工检索解密（API 读路径接入 FromSecure）</td><td>能力在 <code>dualwrite/sensitive.go</code>；人员列表 API 未接入</td><td><span class="badge b-part">🔶 待整改</span></td></tr>
+  <tr><td>手机号登录盲索引（HSM 解包 index key）</td><td><code>internal/auth/account_login.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>明文离线备份（解密导出 + 一次性下载）</td><td><code>internal/plainbackup/export.go</code> + <code>internal/httpapi/plainbackup_routes.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>数据互转 / 存量补发 / phone_hash 回填</td><td><code>internal/datatool/convert.go</code></td><td><span class="badge b-ok">✅ 已实现</span></td></tr>
+  <tr><td>密钥轮换（本地版本+1；远程运维脚本）</td><td><code>internal/seccrypto/softhsm2.go</code> / <code>hsmservice.go</code></td><td><span class="badge b-part">🔶 部分实现</span></td></tr>
+  <tr><td>删除租户（清库 + HSM 密钥销毁）</td><td>未实现；平台仅 enable/disable</td><td><span class="badge b-plan">📋 规划</span></td></tr>
+</table>
+<div class="note warn">
+  <b>待整改项（按优先级）：</b>
+  ① 注册审批切换至 <code>Service.IssueKeys</code>，新租户密钥直接进入 HSM，不再落 local-master:v1；
+  ② 人员检索等 API 读路径接入 <code>RowCrypto.FromSecure</code>，消除 read_source=secure 时密文原样返回的问题；
+  ③ 删除租户流程（清库 → 运维销毁密钥 → deletion_log）立项实现；
+  ④ 生产环境切换 OpenSSL 后端或云 KMS 后，将 wrap_algorithm 切回 RSA-OAEP-SHA256 并完成历史密文重加密。
+</div>
+
+<h2>8. 附录：代码索引</h2>
+<table>
+  <tr><th>文件</th><th>职责</th></tr>
+  <tr><td><code>src/internal/seccrypto/provider.go</code></td><td>KeyProvider 接口、提供方工厂、KeyRef / KeyMetadata、配置结构</td></tr>
+  <tr><td><code>src/internal/seccrypto/service.go</code></td><td>业务加密服务：密钥材料缓存、IssueKeys/EnsureKeys、EncryptField/DecryptField、PhoneHash</td></tr>
+  <tr><td><code>src/internal/seccrypto/envelope.go</code></td><td>enc:v1 信封编解码、AAD 构造与校验</td></tr>
+  <tr><td><code>src/internal/seccrypto/hsmservice.go</code></td><td>远程 hsm-sign-service 提供方（公钥获取、解包、重试、SSH 自动开通）</td></tr>
+  <tr><td><code>src/internal/seccrypto/softhsm2.go</code> / <code>softhsm2_stub.go</code></td><td>本地 PKCS#11 提供方（-tags softhsm2）/ 默认 stub</td></tr>
+  <tr><td><code>src/internal/seccrypto/local.go</code> / <code>kms.go</code></td><td>local-master:v1 迁移适配器 / cloud_kms 预留占位</td></tr>
+  <tr><td><code>src/internal/dualwrite/keystore.go</code> / <code>sensitive.go</code></td><td>DBKeyStore（密钥记录读取）/ RowCrypto（行级加解密助手）</td></tr>
+  <tr><td><code>src/internal/dualwrite/writer.go</code> / <code>recover.go</code> / <code>catchup.go</code></td><td>2PC 双写、悬挂事务恢复、增量补偿</td></tr>
+  <tr><td><code>src/internal/person/person.go</code> / <code>query.go</code></td><td>人员建档（加密双写）/ 人员列表与重置密码</td></tr>
+  <tr><td><code>src/internal/auth/account_login.go</code></td><td>工号/手机号登录（盲索引定位账号、固定顺序错误码、登录日志）</td></tr>
+  <tr><td><code>src/internal/plainbackup/export.go</code> / <code>src/internal/httpapi/plainbackup_routes.go</code></td><td>明文离线备份导出、校验、一次性下载</td></tr>
+  <tr><td><code>src/internal/datatool/convert.go</code></td><td>全量互转、存量补发密钥、phone_hash 回填</td></tr>
+  <tr><td><code>src/cmd/server/main.go</code></td><td>提供方装配、加密服务注入、恢复循环、路由注册</td></tr>
+  <tr><td><code>src/config.yaml</code>（crypto 段）</td><td>kms_provider、远程/本地 SoftHSM2 参数、cloud_kms 预留</td></tr>
+</table>
+
+</div>
+</body>
+</html>

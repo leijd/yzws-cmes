@@ -59,11 +59,16 @@ type KeyMetadata struct {
 }
 
 /* NewProvider 按配置创建密钥提供方。
- * kms_provider=softhsm2 时加载 PKCS#11 模块（模块路径与 PIN 只从指定环境变量注入）；
+ * kms_provider=softhsm2 时：server_url 非空走远程模式（HTTP 调用 hsm-sign-service，
+ * 参考 softhsm-2.6-go/client-example，无本机 PKCS#11 库也可用）；否则加载本地 PKCS#11 模块
+ * （模块路径与 PIN 只从指定环境变量注入）。
  * cloud_kms 为预留占位（返回未接入错误，不在测试环境伪装已接入）；local 仅迁移旧数据。 */
 func NewProvider(cfg KMSProviderConfig) (KeyProvider, error) {
 	switch cfg.Provider {
 	case "softhsm2":
+		if cfg.SoftHSM2.ServerURL != "" {
+			return NewHSMServiceProvider(cfg.SoftHSM2)
+		}
 		return NewSoftHSM2Provider(cfg.SoftHSM2)
 	case "cloud_kms":
 		return NewCloudKMSProvider(cfg.CloudKMS), nil
@@ -86,10 +91,21 @@ type KMSProviderConfig struct {
 }
 
 type SoftHSM2Settings struct {
-	PKCS11ModuleEnv string // 环境变量名（模块路径只从环境注入）
-	TokenLabel      string
-	PINEnv          string // 环境变量名
+	PKCS11ModuleEnv string // 环境变量名（模块路径只从环境注入；本地 PKCS#11 模式用）
+	TokenLabel      string // 落库 KeyWrapRef 的 token 标识（两种模式都用）
+	PINEnv          string // 环境变量名（本地 PKCS#11 模式用）
 	KeyLabelPrefix  string
+	/* 远程模式（server_url 非空时生效）：HTTP 调用 hsm-sign-service，
+	 * 客户端实现参考 softhsm-2.6-go/client-example，无需本机 PKCS#11 库。 */
+	ServerURL  string
+	APIKeyEnv  string // 环境变量名，X-API-Key 只从环境注入
+	CACertFile string // 自签 TLS 的服务端 CA 证书（可选）
+	TimeoutMS  int    // 远程调用超时（默认 10000）
+	/* 租户密钥自动开通（可选）：未开通的租户（服务端 404）经 SSH 执行开通脚本。
+	 * 密钥生成只允许运维脚本（HTTP 无此接口），故需免密 SSH 到 HSM 服务器；
+	 * 留空则未开通租户直接报 KEY_UNAVAILABLE。 */
+	SSHTarget       string // 如 root@服务器IP；生产后端与 HSM 同机可用 root@127.0.0.1
+	ProvisionScript string // 服务端开通脚本路径（默认 /app/HSM/softhsm2/scripts/add-tenant.sh）
 }
 
 type CloudKMSSettings struct {

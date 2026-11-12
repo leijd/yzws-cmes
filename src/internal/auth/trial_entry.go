@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"clothp/internal/platform"
+	"clothp/internal/seccrypto"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
 )
@@ -67,11 +68,13 @@ func (s *Service) VerifyTrialEntryToken(token string) (string, string, error) {
 	return claims.Phone, claims.TenantCode, nil
 }
 
-// LoginTrialAdmin 以体验厂管理员的手机号登录该体验厂。
-// 手机号与厂的对应关系优先按「手机号 → 本厂 tenant_admin 账号」反查（员工档案手机号或账号登录名命中），
-// 这样旧数据租户即使注册信息里没有登记联系电话也能进入；未命中时退回注册联系电话匹配。
-// 体验用户的手机号/微信号就是体验厂管理员账户，因此这里不再要求密码。
-func (s *Service) LoginTrialAdmin(ctx context.Context, phone, tenantCode, nodeID string) (map[string]any, error) {
+// LoginTrialUser 以手机号登录体验厂：命中哪个账号就以哪个账号的身份进入。
+// 优先按「手机号 → 本厂任意启用账号」反查（员工档案手机号盲索引或账号登录名命中），
+// 厂长等普通角色员工也由此进入自己的工作页面（菜单按本人权限显示）；
+// 未命中时退回注册联系电话匹配（旧数据租户注册信息里没有登记手机号）。
+// 普通员工首次进入须输入厂管理员提供的密码（与收费厂短信登录规则一致）；
+// 管理员或已登录过的员工凭短信验证/进入令牌即可。
+func (s *Service) LoginTrialUser(ctx context.Context, phone, tenantCode, password, nodeID string, crypto *seccrypto.Service) (map[string]any, error) {
 	phone = strings.TrimSpace(phone)
 	var tenantID, tenantStatus, regStatus, adminEmployeeID, subStatus string
 	var trialEnds *int64
@@ -97,19 +100,50 @@ func (s *Service) LoginTrialAdmin(ctx context.Context, phone, tenantCode, nodeID
 		return nil, ErrTrialExpired
 	}
 
-	// 管理员账号：按手机号反查本厂 tenant_admin 账号（员工档案手机号或账号登录名命中）。
-	var userID, employeeID string
-	err = s.db.QueryRow(ctx, `SELECT u.id,COALESCE(u.employee_id,'') FROM user_account u
-		JOIN user_role ur ON ur.tenant_id=u.tenant_id AND ur.user_id=u.id
-		JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id AND r.code='tenant_admin'
-		LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
-		WHERE u.tenant_id=$1 AND u.status='active' AND (e.phone=$2 OR u.login_name=$2)
-		ORDER BY u.created_at LIMIT 1`, tenantID, phone).Scan(&userID, &employeeID)
+	// 登录账号：按手机号反查本厂任意启用账号（员工档案手机号盲索引或账号登录名命中；
+	// crypto 非 nil 时员工手机号列在密文库为 enc:v1 密文，等值比较失效，必须用 phone_hash）。
+	// 优先员工档案手机号命中（其次登录名命中），同优先级取最早创建的账号。
+	var userID, employeeID, verifier string
+	var lastLogin *int64
+	isAdmin := false
+	if crypto != nil {
+		empHash, errH := crypto.PhoneHash(ctx, tenantID, "employee.phone", phone)
+		if errH != nil {
+			return nil, errH
+		}
+		err = s.db.QueryRow(ctx, `SELECT u.id,COALESCE(u.employee_id,''),u.password_verifier,u.last_login_at,
+			EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+				WHERE ur.tenant_id=u.tenant_id AND ur.user_id=u.id AND r.code='tenant_admin')
+			FROM user_account u
+			LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
+			WHERE u.tenant_id=$1 AND u.status='active' AND (e.phone_hash=$3 OR e.phone=$4 OR u.login_name=$2)
+			ORDER BY COALESCE(e.phone_hash=$3,FALSE) DESC, u.created_at LIMIT 1`, tenantID, phone, empHash, phone).
+			Scan(&userID, &employeeID, &verifier, &lastLogin, &isAdmin)
+	} else {
+		err = s.db.QueryRow(ctx, `SELECT u.id,COALESCE(u.employee_id,''),u.password_verifier,u.last_login_at,
+			EXISTS(SELECT 1 FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+				WHERE ur.tenant_id=u.tenant_id AND ur.user_id=u.id AND r.code='tenant_admin')
+			FROM user_account u
+			LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
+			WHERE u.tenant_id=$1 AND u.status='active' AND (e.phone=$2 OR u.login_name=$2)
+			ORDER BY COALESCE(e.phone=$2,FALSE) DESC, u.created_at LIMIT 1`, tenantID, phone).
+			Scan(&userID, &employeeID, &verifier, &lastLogin, &isAdmin)
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
-		/* 旧数据：管理员账号没登记手机号，但「制衣厂信息」的注册联系电话就是该手机号 → 按原规则定位管理员账号 */
-		var contactPhone string
-		_ = s.db.QueryRow(ctx, `SELECT COALESCE(contact_phone,'') FROM tenant WHERE id=$1`, tenantID).Scan(&contactPhone)
-		if strings.TrimSpace(contactPhone) != phone {
+		/* 旧数据：管理员账号没登记手机号，但「制衣厂信息」的注册联系电话就是该手机号 → 按盲索引/原规则定位管理员账号 */
+		contactHit := false
+		if crypto != nil {
+			contactHash, errH := crypto.PhoneHash(ctx, tenantID, "tenant.contact_phone", phone)
+			if errH != nil {
+				return nil, errH
+			}
+			_ = s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1 AND (contact_phone_hash=$2 OR contact_phone=$3))`, tenantID, contactHash, phone).Scan(&contactHit)
+		} else {
+			var contactPhone string
+			_ = s.db.QueryRow(ctx, `SELECT COALESCE(contact_phone,'') FROM tenant WHERE id=$1`, tenantID).Scan(&contactPhone)
+			contactHit = strings.TrimSpace(contactPhone) == phone
+		}
+		if !contactHit {
 			return nil, ErrNoTrialTenant
 		}
 		if adminEmployeeID != "" {
@@ -123,11 +157,25 @@ func (s *Service) LoginTrialAdmin(ctx context.Context, phone, tenantCode, nodeID
 				WHERE u.tenant_id=$1 AND u.status='active'
 				ORDER BY u.created_at LIMIT 1`, tenantID).Scan(&userID, &employeeID)
 		}
+		// 回退分支解析的一定是厂管理员账号：沿用旧数据免密进入规则。
+		if err == nil {
+			isAdmin = true
+		}
 	}
 	if err != nil {
 		return nil, ErrNoTrialTenant
 	}
-	// 体验管理员以手机号/微信为主要登录方式，不强制修改密码。
+	// 普通员工首次进入须提供厂管理员设置的密码（与收费厂短信登录同一规则）；
+	// 管理员或此前已登录过的员工，凭短信验证/进入令牌即可进入。
+	if !isAdmin && lastLogin == nil {
+		if strings.TrimSpace(password) == "" {
+			return nil, ErrPasswordRequired
+		}
+		if !verifyPassword(verifier, password) {
+			return nil, ErrInvalidCredentials
+		}
+	}
+	// 体验用户以手机号/微信为主要登录方式，不强制修改密码。
 	if _, err := s.db.Exec(ctx, `UPDATE user_account SET password_change_required=FALSE
 		WHERE tenant_id=$1 AND id=$2`, tenantID, userID); err != nil {
 		return nil, err

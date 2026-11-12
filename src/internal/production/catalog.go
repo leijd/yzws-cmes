@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"clothp/internal/auth"
+	"clothp/internal/codegen"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
@@ -63,8 +64,16 @@ func registerCatalog(api *httpapi.API) {
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
-		if in.ProductCode == "" || in.Name == "" || in.Unit == "" {
-			return httpapi.Error(400, "VALIDATION_ERROR", "产品编号、名称和单位必填")
+		if in.Name == "" || in.Unit == "" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "产品名称和单位必填")
+		}
+		if in.ProductCode == "" {
+			/* 编码留空自动生成：{类型名拼音首字母}-{5位流水}（产品→CP-00001） */
+			code, err := codegen.Generate(r.Context(), api.DB, api.Writer, "product", "product_code", p.TenantID, "production.product")
+			if err != nil {
+				return err
+			}
+			in.ProductCode = code
 		}
 		if in.SalePrice != nil {
 			if _, err := decimal.NewFromString(*in.SalePrice); err != nil {
@@ -458,8 +467,16 @@ func registerProcessDefinitions(api *httpapi.API) {
 		}
 		price, e1 := decimal.NewFromString(in.DefaultUnitPrice)
 		ratio, e2 := decimal.NewFromString(in.DefaultReportRatio)
-		if in.ProcessCode == "" || in.Name == "" || e1 != nil || e2 != nil || price.IsNegative() || !ratio.IsPositive() {
-			return httpapi.Error(400, "VALIDATION_ERROR", "工序编码、名称、工价或配比不合法")
+		if in.Name == "" || e1 != nil || e2 != nil || price.IsNegative() || !ratio.IsPositive() {
+			return httpapi.Error(400, "VALIDATION_ERROR", "工序名称、工价或配比不合法")
+		}
+		if in.ProcessCode == "" {
+			/* 编码留空自动生成：{类型名拼音首字母}-{5位流水}（工序→GX-00001） */
+			code, err := codegen.Generate(r.Context(), api.DB, api.Writer, "process_definition", "process_code", p.TenantID, "production.process")
+			if err != nil {
+				return err
+			}
+			in.ProcessCode = code
 		}
 		id, now := platform.ID(), platform.Now()
 		_, err := api.DB.Exec(r.Context(), `INSERT INTO process_definition(tenant_id,id,process_code,name,default_unit_price,default_report_ratio,default_department_id,standard_work_seconds,remark,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$10,$11,$12)`, p.TenantID, id, in.ProcessCode, in.Name, in.DefaultUnitPrice, in.DefaultReportRatio, in.DefaultDepartmentID, in.StandardWorkSeconds, in.Remark, now, p.UserID, api.Config.NodeID)

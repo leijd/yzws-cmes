@@ -27,6 +27,7 @@ export const router = createRouter({
     { path: '/platform/role-templates', component: () => import('./pages/PlatformRoleTemplatesPage.vue'), meta: { platform: true, standalone: true } },
     { path: '/', redirect: '/portal' },
     { path: '/workbench/A03', component: () => import('./pages/DashboardPage.vue') },
+    { path: '/settings/dictionaries', component: () => import('./pages/DictionaryPage.vue') },
     { path: '/masterdata/B06', component: () => import('./pages/MasterdataPage.vue') },
     { path: '/products/B01', component: () => import('./pages/ProductsPage.vue') },
     { path: '/markers/C11', component: () => import('./pages/MarkerPage.vue') },

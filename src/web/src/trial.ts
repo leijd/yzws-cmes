@@ -259,11 +259,13 @@ export async function switchTenant(tenantCode: string): Promise<{
   }, { silent: true })
 }
 
-/** 体验主页“开始体验”：凭进入令牌换取体验厂管理员的真实 MES 会话 */
+/** 体验主页“开始体验”：凭进入令牌换取体验厂账号的真实 MES 会话（命中管理员则以管理员身份，命中员工则以该员工身份与权限进入） */
 export async function trialEnter(input: {
   entry_token?: string
   ticket?: string
   phone?: string
+  /** 普通员工首次进入：厂管理员提供的初始密码 */
+  password?: string
   tenant_code: string
 }): Promise<{
   access_token: string
