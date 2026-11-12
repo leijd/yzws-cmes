@@ -71,5 +71,7 @@
         "enable" : false
     },
     "vueVersion" : "3",
+    /* 应用语言锁定简体中文：避免英文系统/浏览器下 uni-app 内置选择器出现 Done / Cancel 按钮 */
+    "locale" : "zh-Hans",
     "fallbackLocale" : "zh-Hans"
 }

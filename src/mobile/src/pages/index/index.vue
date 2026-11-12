@@ -6,14 +6,10 @@
 
 <script setup lang="ts">
 import { onShow } from "@dcloudio/uni-app";
-import { getToken } from "../../utils/request";
 
 onShow(() => {
-  if (getToken()) {
-    uni.switchTab({ url: "/pages/workbench/workbench" });
-  } else {
-    uni.reLaunch({ url: "/pages/login/login" });
-  }
+  // 打开 App 一律进入平台门户，登录/体验/注册均从门户进入
+  uni.reLaunch({ url: "/pages/portal/platform" });
 });
 </script>
 

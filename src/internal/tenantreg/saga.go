@@ -62,8 +62,12 @@ func tenantApproveSteps(p tenantApprovePayload, do map[string]func(context.Conte
 		{Name: "claim", Do: doFn("claim"), Compensate: func(ctx context.Context, tx *dualwrite.Tx) error {
 			return execBothTx(ctx, tx, `UPDATE tenant SET registration_status='pending',version=version+1 WHERE id=$1 AND registration_status='approving'`, p.TenantID)
 		}},
+		/* 密钥紧随 claim：ensure_root 加密补根行、approve_core 体验手机号盲索引
+		 * 都依赖 tenant_crypto_key 已落库（待审批租户此前无 DEK，catchup 跳过）。
+		 * 密钥幂等（ON CONFLICT DO NOTHING），补偿无害保留 */
+		{Name: "crypto_key", Do: doFn("crypto_key"), Compensate: nil},
 		/* 根行补偿：待审批租户可能从未同步到密文库（无 DEK 时 catchup 跳过），
-		 * 审批时密钥已就绪，幂等补行；保留不补偿（claim 回退后仍为 pending 原状） */
+		 * 上一步密钥已就绪，此处幂等补行；保留不补偿（claim 回退后仍为 pending 原状） */
 		{Name: "ensure_root", Do: doFn("ensure_root"), Compensate: nil},
 		{Name: "seed_root", Do: doFn("seed_root"), Compensate: func(ctx context.Context, tx *dualwrite.Tx) error {
 			if err := execBothTx(ctx, tx, `DELETE FROM org_unit WHERE tenant_id=$1`, p.TenantID); err != nil {
@@ -97,9 +101,6 @@ func tenantApproveSteps(p tenantApprovePayload, do map[string]func(context.Conte
 			}
 			return execBothTx(ctx, tx, `DELETE FROM feature_setting WHERE tenant_id=$1`, p.TenantID)
 		}},
-		/* 密钥先于 approve_core：体验厂管理员手机号回填需要 enc:v1 + 盲索引。
-		 * 密钥幂等（ON CONFLICT DO NOTHING），补偿无害保留 */
-		{Name: "crypto_key", Do: doFn("crypto_key"), Compensate: nil},
 		/* 审批落库的补偿：回退审批字段 + 恢复订阅快照（无旧订阅则删除新行）。
 		 * 体验扩展（管理员手机号/改密标记）随 seed_admin 补偿整体删除，无需单独恢复。 */
 		{Name: "approve_core", Do: doFn("approve_core"), Compensate: func(ctx context.Context, tx *dualwrite.Tx) error {

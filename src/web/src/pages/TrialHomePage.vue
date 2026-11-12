@@ -7,6 +7,7 @@ import { QR_APP_NAMES, type QrApp } from '../qrLogin'
 import { api } from '../api'
 import { toastError, toastSuccess } from '../toast'
 import { syncNeedPhone } from '../phoneGate'
+import { confirmLogout, logoutToLogin } from '../session'
 import { clearTrialSession, isValidPhone, maskPhone, myFactories, readTrialSession, saveTrialSession, switchTenant, trialEnter, trialExtend, trialExtendStatus, workspaceHome, type PortalFactory, type TrialExtensionRequest } from '../trial'
 
 const router = useRouter()
@@ -98,6 +99,7 @@ async function switchFactory(code: string) {
     /* 会话切到目标厂：门户内容与右侧“进入工作”都跟随该厂 */
     localStorage.removeItem('clothp_platform_access_token')
     localStorage.setItem('clothp_access_token', result.access_token)
+    loggedIn.value = true
     if (result.refresh_token) localStorage.setItem('clothp_refresh_token', result.refresh_token)
     else localStorage.removeItem('clothp_refresh_token')
     await router.replace({ path: route.path, query: { ...route.query, tenant: code } })
@@ -171,10 +173,11 @@ const welcomeDesc = computed(() => {
 })
 
 onMounted(async () => {
-  /* 未通过验证码验证 / 扫码确认的访问直接回首页 */
-  /* 登录后的制衣厂门户（?tenant=厂编码）无需体验会话；纯体验访问必须有验证过的会话 */
-  const portalCode = String(route.query.tenant || '')
-  if (!session && !portalCode) { void router.replace('/portal'); return }
+  /* 门户页必须持凭证：登录令牌（账号登录）或本机体验会话（短信/扫码验证过）。
+   * 退出登录后本机凭证已被清空，此时直接输 /trial/home?tenant=厂编码 不再能进门户，
+   * 更不能用残留的进入令牌换上该厂工作台会话。 */
+  const loggedIn = !!localStorage.getItem('clothp_access_token')
+  if (!session && !loggedIn) { void router.replace('/portal'); return }
   try {
     const r = await api<{ content: TrialContent }>('/public/trial-content', {}, { silent: true })
     if (r?.content) content.value = { ...content.value, ...r.content, pain_points: r.content.pain_points || [] }
@@ -246,6 +249,7 @@ async function startExperience() {
     trialPassword.value = ''
     localStorage.removeItem('clothp_platform_access_token')
     localStorage.setItem('clothp_access_token', result.access_token)
+    loggedIn.value = true
     if (result.refresh_token) localStorage.setItem('clothp_refresh_token', result.refresh_token)
     if (result.entry_token && session) {
       saveTrialSession({ ...session, entryToken: result.entry_token, status: 'approved' })
@@ -349,18 +353,25 @@ function pauseTrial() {
   notice.value = '体验进度已保存，下次打开同一浏览器即可继续。'
   setTimeout(() => { void router.push('/portal') }, 800)
 }
-/* 退出体验：清除本机体验会话 */
-function exitTrial() {
+/* 是否已持有工作会话（登录或曾从本页进入过工作台） */
+const loggedIn = ref(!!localStorage.getItem('clothp_access_token'))
+/* 退出体验：已进入过工作台则按平台注销处理（否则令牌残留，退出后仍能进工作页）；
+ * 仅浏览过体验门户时清本机体验会话即可 */
+async function exitTrial() {
+  if (localStorage.getItem('clothp_access_token')) {
+    await logoutToLogin()
+    return
+  }
   clearTrialSession()
   void router.push('/portal')
 }
 function logout() {
-  /* 注册用户“退出登录”同时清除 MES 登录态；体验用户仅清体验会话 */
-  if (isPaid.value) {
-    localStorage.removeItem('clothp_access_token')
-    localStorage.removeItem('clothp_refresh_token')
+  /* 有工作会话（注册用户/体验厂管理员）→ 平台注销；纯浏览体验 → 清体验会话 */
+  if (isPaid.value || loggedIn.value) {
+    void confirmLogout('退出后将注销当前账号，需要重新登录，确认退出？')
+    return
   }
-  exitTrial()
+  void exitTrial()
 }
 
 const loginSource = computed(() => {
@@ -410,7 +421,7 @@ function openModule(name: string) {
         <div class="th-user">
           <span class="th-phone">{{ displayName }}</span>
           <span v-if="tenantCode" class="th-tenant-badge">{{ tenantCode }}</span>
-          <button type="button" @click="logout">{{ isPaid ? '退出登录' : '退出体验' }}</button>
+          <button type="button" @click="logout">{{ isPaid || loggedIn ? '退出登录' : '退出体验' }}</button>
         </div>
       </div>
     </header>

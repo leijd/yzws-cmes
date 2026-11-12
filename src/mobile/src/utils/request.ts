@@ -67,7 +67,7 @@ export function request<T>(path: string, options: RequestOptions = {}): Promise<
         }
         if (res.statusCode === 401 && !options.skipAuthRedirect) {
           clearToken();
-          uni.reLaunch({ url: "/pages/login/login" });
+          uni.reLaunch({ url: "/pages/portal/platform?tab=login&method=sms" });
         }
         const error = new Error(
           body.message || `请求失败 (${res.statusCode})`

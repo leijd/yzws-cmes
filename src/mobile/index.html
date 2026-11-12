@@ -1,7 +1,13 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      /* 锁定简体中文：uni-app 内置的选择器（字典/日期/时间）与弹窗按钮文案默认跟随浏览器语言，
+       * 英文环境下会显示 Done / Cancel、OK / Cancel。这里先写入 uni-app 的语言缓存键，
+       * 保证首次渲染就是中文（页面内再配合 uni.setLocale 兜底）。 */
+      try { window.localStorage.setItem('UNI_LOCALE', 'zh-Hans') } catch (e) {}
+    </script>
     <script>
       var coverSupport = 'CSS' in window && typeof CSS.supports === 'function' && (CSS.supports('top: env(a)') ||
         CSS.supports('top: constant(a)'))

@@ -24,6 +24,7 @@ import (
 	"clothp/internal/platform"
 	"clothp/internal/seccrypto"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var (
@@ -52,7 +53,13 @@ type regCode struct {
 var (
 	regMu    sync.Mutex
 	regCodes = map[string]*regCode{}
+	// 未验证手机号的体验注册冷却：同一手机号两次“免验证新建体验厂”之间的最小间隔，
+	// 用于替代强制短信验证的防滥用手段（恶意批量注册）。
+	trialRegUnverified = map[string]int64{} // phone -> 最近一次免验证新建的 unix 秒
 )
+
+// 免验证体验注册的冷却窗口
+const trialRegCooldown = time.Hour
 
 func regRandomCode() (string, error) {
 	buf := make([]byte, 6)
@@ -354,10 +361,36 @@ func registerFactoryAndTrial(api *httpapi.API) {
 		if scale != "" && !scaleSet[scale] {
 			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "厂规模不合法")
 		}
-		if err := verifyRegCode(contactPhone, strings.TrimSpace(in.SmsCode)); err != nil {
-			return err
+		/* 短信验证码改为可选：
+		 * - 提供 → 校验，手机号视为已验证（可签发 entry_token 直接进入工作台）
+		 * - 未提供 → 允许一键开通，但受同手机号冷却限制，且不签发 entry_token */
+		smsCode := strings.TrimSpace(in.SmsCode)
+		verified := false
+		if smsCode != "" {
+			if err := verifyRegCode(contactPhone, smsCode); err != nil {
+				return err
+			}
+			verified = true
 		}
-
+		/* 统一入口路由信息：手机号已绑定收费制衣厂员工/管理员账号时，不再误开体验厂，
+		 * 而是签发一次性手机登录票据（/auth/phone-login 可消费），由前端直接引导进入所属工厂；
+		 * 仅在手机号已验证（短信校验通过）时检测与出票，避免向未验证请求泄露账号归属。 */
+		hasFactoryAccount := false
+		factoryNames := []string{}
+		factoryList := []map[string]any{}
+		loginTicket := ""
+		if verified {
+			if fns, ferr := api.Auth.PhoneTenants(r.Context(), []string{contactPhone}, api.Crypto); ferr == nil && len(fns) > 0 {
+				hasFactoryAccount = true
+				for _, f := range fns {
+					factoryNames = append(factoryNames, f.Name)
+					factoryList = append(factoryList, map[string]any{"code": f.Code, "name": f.Name, "login_name": f.LoginName, "user_name": f.UserName})
+				}
+				if t, terr := api.IssuePhoneLoginTicket(contactPhone); terr == nil {
+					loginTicket = t
+				}
+			}
+		}
 		/* 记录手机号码：该手机号已提交过体验厂时不再重复建厂，直接返回既有体验厂（待审/已通过均返回）。 */
 		var existID, existCode, existName, existShortCode, existAdminLogin, existRegStatus string
 		var existTrialEnds int64
@@ -372,20 +405,124 @@ func registerFactoryAndTrial(api *httpapi.API) {
 				"returning": true, "id": existID, "code": existCode, "name": existName, "short_code": existShortCode,
 				"admin_login_name": existAdminLogin, "trial_ends_at": existTrialEnds,
 				"trial_days": 30, "status": existRegStatus, "registration_status": existRegStatus,
+				"need_sms_verify": !verified, "has_factory_account": hasFactoryAccount, "factory_names": factoryNames,
+				"factories": factoryList, "login_ticket": loginTicket,
 			}
 			if existRegStatus == "approved" {
-				result["message"] = "该手机号已开通过体验厂，已为你直接进入体验主页"
+				if verified {
+					result["message"] = "该手机号已开通过体验厂，已为你直接进入体验主页"
+				} else {
+					result["message"] = "该手机号已开通过体验厂，请获取短信验证码验证后进入工作台"
+				}
 			} else {
 				result["message"] = "该手机号提交的体验厂正在等待平台管理员审核，通过后即可进入工作台"
 			}
-			/* 待审阶段也签发进入令牌：审批通过后无需再次验证手机号即可进入。 */
-			if entryToken, tokenErr := api.Auth.IssueTrialEntryToken(contactPhone, existCode); tokenErr == nil {
-				result["entry_token"] = entryToken
+			/* entry_token 可直接进入该厂工作台，仅在手机号已验证时签发，防止冒用他人手机号。 */
+			if verified {
+				/* 待审阶段也签发进入令牌：审批通过后无需再次验证手机号即可进入。 */
+				if entryToken, tokenErr := api.Auth.IssueTrialEntryToken(contactPhone, existCode); tokenErr == nil {
+					result["entry_token"] = entryToken
+				}
 			}
 			return httpapi.JSON(w, http.StatusOK, result)
 		}
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
+		}
+
+		/* 统一入口路由（体验厂员工/管理员）：手机号不是体验厂联系电话，但已是某【已审批体验厂】
+		 * 内账号的员工手机号或登录名时，不再新建体验厂，直接按既有厂返回并签发进入令牌。
+		 * 识别口径与 /auth/trial/verify 一致（密文模式下逐厂计算员工手机号盲索引比对）。 */
+		if verified {
+			type trialCandidate struct {
+				id, code, name, shortCode, adminLogin string
+				trialEnds                             int64
+			}
+			var candidates []trialCandidate
+			candRows, qerr := api.DB.Query(r.Context(), `SELECT t.id,t.code,t.name,t.short_code,COALESCE(t.admin_login_name,''),
+				COALESCE(s.trial_ends_at,0)
+				FROM tenant t LEFT JOIN tenant_subscription s ON s.tenant_id=t.id
+				WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status='approved'
+				ORDER BY t.registered_at DESC`)
+			if qerr != nil {
+				return qerr
+			}
+			for candRows.Next() {
+				var c trialCandidate
+				if serr := candRows.Scan(&c.id, &c.code, &c.name, &c.shortCode, &c.adminLogin, &c.trialEnds); serr != nil {
+					candRows.Close()
+					return serr
+				}
+				candidates = append(candidates, c)
+			}
+			candRows.Close()
+			if rerr := candRows.Err(); rerr != nil {
+				return rerr
+			}
+			for _, c := range candidates {
+				var hit bool
+				if api.Crypto != nil {
+					empHash, herr := api.Crypto.PhoneHash(r.Context(), c.id, "employee.phone", contactPhone)
+					if herr != nil {
+						return herr
+					}
+					if serr := api.DB.QueryRow(r.Context(), `SELECT EXISTS(
+						SELECT 1 FROM user_account u
+						LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
+						WHERE u.tenant_id=$1 AND u.status='active'
+						  AND (e.phone_hash=$2 OR e.phone=$3 OR u.login_name=$3))`,
+						c.id, empHash, contactPhone).Scan(&hit); serr != nil {
+						return serr
+					}
+				} else {
+					if serr := api.DB.QueryRow(r.Context(), `SELECT EXISTS(
+						SELECT 1 FROM user_account u
+						LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
+						WHERE u.tenant_id=$1 AND u.status='active'
+						  AND (e.phone=$2 OR u.login_name=$2))`,
+						c.id, contactPhone).Scan(&hit); serr != nil {
+						return serr
+					}
+				}
+				if !hit {
+					continue
+				}
+				result := map[string]any{
+					"returning": true, "routed": "trial_employee",
+					"id": c.id, "code": c.code, "name": c.name, "short_code": c.shortCode,
+					"admin_login_name": c.adminLogin, "trial_ends_at": c.trialEnds,
+					"trial_days": 30, "status": "approved", "registration_status": "approved",
+					"message":             "该手机号已是本体验制衣厂的员工，已为你直接进入工作台",
+					"has_factory_account": hasFactoryAccount, "factory_names": factoryNames,
+					"factories": factoryList, "login_ticket": loginTicket,
+				}
+				if entryToken, tokenErr := api.Auth.IssueTrialEntryToken(contactPhone, c.code); tokenErr == nil {
+					result["entry_token"] = entryToken
+				}
+				return httpapi.JSON(w, http.StatusOK, result)
+			}
+		}
+
+		/* 统一入口路由（收费厂员工/管理员）：不再误开体验厂，直接返回所属工厂与登录票据，
+		 * 由前端调用 /auth/phone-login 进入其真正的工作台。 */
+		if verified && hasFactoryAccount {
+			return httpapi.JSON(w, http.StatusOK, map[string]any{
+				"routed": "factory", "has_factory_account": true,
+				"factory_names": factoryNames, "factories": factoryList, "login_ticket": loginTicket,
+				"message": "该手机号已绑定制衣厂员工账号，已为你直接进入所属制衣厂",
+			})
+		}
+
+		/* 免验证新建体验厂：同一手机号在冷却窗口内仅允许提交一次，防止恶意批量注册。 */
+		if !verified {
+			regMu.Lock()
+			if last := trialRegUnverified[contactPhone]; last > 0 && time.Since(time.Unix(last, 0)) < trialRegCooldown {
+				regMu.Unlock()
+				return httpapi.Error(http.StatusTooManyRequests, "TOO_FREQUENT",
+					"该手机号刚提交过体验注册，请稍后再试（1 小时内仅可免验证提交一次）")
+			}
+			trialRegUnverified[contactPhone] = time.Now().Unix()
+			regMu.Unlock()
 		}
 
 		tx, err := api.DB.Begin(r.Context())
@@ -448,9 +585,13 @@ func registerFactoryAndTrial(api *httpapi.API) {
 			"id": tenantID, "code": code, "name": name, "short_code": shortCode,
 			"trial_days": 30, "trial_ends_at": trialEnds, "status": "pending", "registration_status": "pending",
 			"message": "体验注册申请已提交：平台管理员审核通过后，将以该手机号作为体验厂管理员账户开通，并开始 30 天体验期",
+			"has_factory_account": hasFactoryAccount, "factory_names": factoryNames,
 		}
-		if entryToken, tokenErr := api.Auth.IssueTrialEntryToken(contactPhone, code); tokenErr == nil {
-			result["entry_token"] = entryToken
+		/* entry_token 仅在手机号已验证时签发（未验证时审核通过后需验证手机号进入） */
+		if verified {
+			if entryToken, tokenErr := api.Auth.IssueTrialEntryToken(contactPhone, code); tokenErr == nil {
+				result["entry_token"] = entryToken
+			}
 		}
 		return httpapi.JSON(w, http.StatusCreated, result)
 	})
@@ -731,10 +872,12 @@ func registerPlatform(api *httpapi.API) {
 		if err != nil {
 			return httpapi.Error(http.StatusConflict, "SEED_TENANT_FAILED", "启用失败：短码或管理员账号不可用（"+err.Error()+"）")
 		}
-		/* 补偿现场：旧订阅快照（体验厂一键体验可能已建行，点亮进度须可恢复） */
+		/* 补偿现场：旧订阅快照（体验厂一键体验可能已建行，点亮进度须可恢复）。
+		 * 标量子查询保证恒返回一行：普通注册无订阅行时 COALESCE 落 ''——
+		 * 直接 SELECT ... FROM (子查询) 在无行时返回 0 行，QueryRow 会抛 ErrNoRows。 */
 		var oldSubscription string
-		if err := api.DB.QueryRow(ctx, `SELECT COALESCE(row_to_json(s)::text,'') FROM
-			(SELECT * FROM tenant_subscription WHERE tenant_id=$1) s`, tenantID).Scan(&oldSubscription); err != nil {
+		if err := api.DB.QueryRow(ctx, `SELECT COALESCE((SELECT row_to_json(s)::text FROM
+			(SELECT * FROM tenant_subscription WHERE tenant_id=$1) s),'')`, tenantID).Scan(&oldSubscription); err != nil {
 			return err
 		}
 		now := platform.Now()
@@ -744,7 +887,7 @@ func registerPlatform(api *httpapi.API) {
 		}
 		/* 体验厂管理员手机号（回填步骤在 crypto_key 之后执行，步骤内再加密/取盲索引） */
 		trialPhone := seccrypto.NormalizePhone(contactPhone)
-		keyID, keyWrapped, err := prepareTenantCryptoKey(ctx, api, tenantID)
+		keyMat, err := prepareTenantCryptoKey(ctx, api, tenantID)
 		if err != nil {
 			return err
 		}
@@ -771,18 +914,41 @@ func registerPlatform(api *httpapi.API) {
 		}
 		steps := tenantApproveSteps(payload, map[string]func(context.Context, *dualwrite.Tx) error{
 			"claim": func(ctx context.Context, tx *dualwrite.Tx) error {
+				casSQL := `UPDATE tenant SET registration_status='approving',version=version+1 WHERE id=$1 AND registration_status='pending'`
 				if tx.Plain() != nil {
-					result, err := tx.Plain().Exec(ctx, `UPDATE tenant SET registration_status='approving',version=version+1 WHERE id=$1 AND registration_status='pending'`, tenantID)
+					result, err := tx.Plain().Exec(ctx, casSQL, tenantID)
 					if err != nil {
 						return err
 					}
 					if result.RowsAffected() == 0 {
+						/* 单写期（read_source=secure 直接写读库）注册的租户可能尚未同步到
+						 * 明文库：降级为存在性检查，缺行时改由 secure 侧做权威 CAS；
+						 * 行存在但非 pending 才是真正的重复审批。 */
+						var exists bool
+						if err := tx.Plain().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1)`, tenantID).Scan(&exists); err != nil {
+							return err
+						}
+						if exists {
+							return httpapi.Error(http.StatusConflict, "NOT_PENDING", "该注册申请已处理，不能重复审批")
+						}
+						if tx.Secure() != nil {
+							res, err := tx.Secure().Exec(ctx, casSQL, tenantID)
+							if err != nil {
+								return err
+							}
+							if res.RowsAffected() == 0 {
+								return httpapi.Error(http.StatusConflict, "NOT_PENDING", "该注册申请已处理，不能重复审批")
+							}
+						}
+					}
+				} else if tx.Secure() != nil {
+					res, err := tx.Secure().Exec(ctx, casSQL, tenantID)
+					if err != nil {
+						return err
+					}
+					if res.RowsAffected() == 0 {
 						return httpapi.Error(http.StatusConflict, "NOT_PENDING", "该注册申请已处理，不能重复审批")
 					}
-				}
-				if tx.Secure() != nil {
-					/* 历史分叉库可能尚无该行：尽力而为，以明文库为准 */
-					_, _ = tx.Secure().Exec(ctx, `UPDATE tenant SET registration_status='approving',version=version+1 WHERE id=$1 AND registration_status='pending'`, tenantID)
 				}
 				return nil
 			},
@@ -854,9 +1020,17 @@ func registerPlatform(api *httpapi.API) {
 					platform.ID(), tenantID, in.Edition, in.UserLimit, now, "platform:"+p.AdminID)
 			},
 			"crypto_key": func(ctx context.Context, tx *dualwrite.Tx) error {
-				return execBothTx(ctx, tx, `INSERT INTO tenant_crypto_key(id,tenant_id,key_version,algorithm,wrapped_key,key_wrap_ref,status,activated_at,created_by,created_at)
-					VALUES($1,$2,1,'AES-256-GCM',$3,'local-master:v1','active',$4,$5,$4)
-					ON CONFLICT(tenant_id,key_version) DO NOTHING`, keyID, tenantID, keyWrapped, now, "platform:"+p.AdminID)
+				/* DEK 与盲索引密钥同版本成对发行（与 IssueKeys 口径一致）：体验厂管理员
+				 * 手机号回填的 phone_hash 依赖 index 密钥。唯一索引为
+				 * (tenant_id,wrap_key_type,key_version)（迁移 056），冲突目标须显式带类型。 */
+				if err := execBothTx(ctx, tx, `INSERT INTO tenant_crypto_key(id,tenant_id,key_version,wrap_key_type,algorithm,wrapped_key,key_wrap_ref,status,activated_at,created_by,created_at)
+					VALUES($1,$2,1,'dek','AES-256-GCM',$3,'local-master:v1','active',$4,$5,$4)
+					ON CONFLICT(tenant_id,wrap_key_type,key_version) DO NOTHING`, keyMat.dekID, tenantID, keyMat.dekWrapped, now, "platform:"+p.AdminID); err != nil {
+					return err
+				}
+				return execBothTx(ctx, tx, `INSERT INTO tenant_crypto_key(id,tenant_id,key_version,wrap_key_type,algorithm,wrapped_key,key_wrap_ref,status,activated_at,created_by,created_at)
+					VALUES($1,$2,1,'index','HMAC-SHA256',$3,'local-master:v1','active',$4,$5,$4)
+					ON CONFLICT(tenant_id,wrap_key_type,key_version) DO NOTHING`, keyMat.indexID, tenantID, keyMat.indexWrapped, now, "platform:"+p.AdminID)
 			},
 			"lead_audit": func(ctx context.Context, tx *dualwrite.Tx) error {
 				if tx.Plain() == nil {
@@ -911,7 +1085,9 @@ func registerPlatform(api *httpapi.API) {
 			return httpapi.Error(http.StatusConflict, "NOT_PENDING", "该注册申请已处理，不能重复审批")
 		}
 		now := platform.Now()
-		if _, err := tx.Exec(r.Context(), "UPDATE tenant SET registration_status='rejected',remark=$1,expedite_requested_at=NULL,version=version+1 WHERE id=$2", strings.TrimSpace(in.Reason), r.PathValue("id")); err != nil {
+		/* 驳回即停用：registration_status='rejected' 且 status='disabled'，
+		 * 避免只改审批状态时租户仍以 active 身份出现在启用列表/登录链路。 */
+		if _, err := tx.Exec(r.Context(), "UPDATE tenant SET registration_status='rejected',status='disabled',remark=$1,expedite_requested_at=NULL,version=version+1 WHERE id=$2", strings.TrimSpace(in.Reason), r.PathValue("id")); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(r.Context(), `UPDATE visitor_lead SET intent_status='lost',lost_reason=$1,updated_at=$2,updated_by=$3
@@ -929,10 +1105,12 @@ func registerPlatform(api *httpapi.API) {
 	})
 }
 
-/* ensureSecureTenantRoot 把 plain 的 tenant 根行加密后幂等补入 secure（审批专用：
- * 待审批租户无 DEK 时 catchup 跳过，审批时密钥已就绪）。 */
+/* ensureSecureTenantRoot 幂等补齐两库的 tenant 根行（审批专用）：
+ * secure 缺行 → 读库行加密后补入（待审批租户无 DEK 时 catchup 跳过， Saga 密钥步已就绪）；
+ * plain 缺行（单写期注册仅落读库）→ 密文敏感列解密回明文后补入，
+ * 否则后续 seed/approve_core 在 plain 侧空转、订阅 INSERT 撞 FK。 */
 func ensureSecureTenantRoot(ctx context.Context, api *httpapi.API, tenantID string, tx *dualwrite.Tx) error {
-	if tx.Secure() == nil {
+	if tx.Secure() == nil && tx.Plain() == nil {
 		return nil
 	}
 	rows, err := api.DB.Query(ctx, `SELECT * FROM tenant WHERE id=$1`, tenantID)
@@ -954,14 +1132,6 @@ func ensureSecureTenantRoot(ctx context.Context, api *httpapi.API, tenantID stri
 		columns[i] = string(f.Name)
 		row[columns[i]] = values[i]
 	}
-	if api.Crypto != nil {
-		rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
-		encrypted, err := rowCrypto.ForSecure(ctx, tenantID, "tenant", tenantID, row)
-		if err != nil {
-			return err
-		}
-		row = encrypted
-	}
 	var colList, ph []string
 	args := make([]any, len(columns))
 	for i, col := range columns {
@@ -969,65 +1139,138 @@ func ensureSecureTenantRoot(ctx context.Context, api *httpapi.API, tenantID stri
 		ph = append(ph, fmt.Sprintf("$%d", i+1))
 		args[i] = row[col]
 	}
-	_, err = tx.Secure().Exec(ctx, fmt.Sprintf(`INSERT INTO tenant(%s) VALUES(%s) ON CONFLICT(id) DO NOTHING`,
-		strings.Join(colList, ","), strings.Join(ph, ",")), args...)
-	return err
+	insertSQL := fmt.Sprintf(`INSERT INTO tenant(%s) VALUES(%s) ON CONFLICT(id) DO NOTHING`,
+		strings.Join(colList, ","), strings.Join(ph, ","))
+	if tx.Secure() != nil {
+		secureRow := row
+		if api.Crypto != nil {
+			rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
+			encrypted, err := rowCrypto.ForSecure(ctx, tenantID, "tenant", tenantID, row)
+			if err != nil {
+				return err
+			}
+			secureRow = encrypted
+		}
+		secureArgs := make([]any, len(columns))
+		for i, col := range columns {
+			secureArgs[i] = secureRow[col]
+		}
+		if _, err := tx.Secure().Exec(ctx, insertSQL, secureArgs...); err != nil {
+			return err
+		}
+	}
+	if tx.Plain() != nil {
+		/* 单写期注册的租户可能仅存在于 secure（读库）：明文库缺根行时幂等补行，
+		 * 否则后续 seed/approve_core 在 plain 侧 UPDATE 空转、订阅 INSERT 撞 FK。
+		 * 敏感列若是 enc:v1 密文则先解密回明文（明文值透传）。 */
+		var exists bool
+		if err := tx.Plain().QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1)`, tenantID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			plainRow := row
+			if api.Crypto != nil {
+				rowCrypto := dualwrite.NewRowCrypto(api.Crypto)
+				decrypted, err := rowCrypto.FromSecure(ctx, tenantID, "tenant", tenantID, row)
+				if err != nil {
+					return err
+				}
+				plainRow = decrypted
+			}
+			plainArgs := make([]any, len(columns))
+			for i, col := range columns {
+				plainArgs[i] = plainRow[col]
+			}
+			if _, err := tx.Plain().Exec(ctx, insertSQL, plainArgs...); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
-/* prepareTenantCryptoKey 准备租户 DEK 落库材料（事务外）：任一库已有 active 密钥则复用其
- * id/wrapped（运行期一律从 secure 读，故优先 secure 记录），否则新生成。双写步骤两库
- * 写同一值，保证 plain/secure 加解密口径一致。 */
-func prepareTenantCryptoKey(ctx context.Context, api *httpapi.API, tenantID string) (string, string, error) {
+/* tenantKeyMaterials 审批落库所需的密钥材料：DEK（字段加密）+ 盲索引密钥
+ * （phone_hash：体验厂管理员手机号回填、后续手机号登录都依赖它，随 DEK 同版本发行）。 */
+type tenantKeyMaterials struct {
+	dekID, dekWrapped     string
+	indexID, indexWrapped string
+}
+
+/* prepareTenantCryptoKey 准备租户密钥落库材料（事务外）：任一库已有该类型的 active 密钥
+ * 则复用其 id/wrapped（运行期一律从 secure 读，故优先 secure 记录），否则新生成。
+ * 双写步骤两库写同一值，保证 plain/secure 加解密口径一致。 */
+func prepareTenantCryptoKey(ctx context.Context, api *httpapi.API, tenantID string) (*tenantKeyMaterials, error) {
 	pools := []struct {
 		name string
-		pool interface {
-			QueryRow(context.Context, string, ...any) pgx.Row
-		}
+		pool *pgxpool.Pool
 	}{}
 	if api.Store != nil && api.Store.Secure != nil {
 		pools = append(pools, struct {
 			name string
-			pool interface {
-				QueryRow(context.Context, string, ...any) pgx.Row
-			}
+			pool *pgxpool.Pool
 		}{"secure", api.Store.Secure})
 	}
 	pools = append(pools, struct {
 		name string
-		pool interface {
-			QueryRow(context.Context, string, ...any) pgx.Row
-		}
+		pool *pgxpool.Pool
 	}{"plain", api.DB})
-	for _, p := range pools {
-		var id, wrapped string
-		err := p.pool.QueryRow(ctx, `SELECT id,wrapped_key FROM tenant_crypto_key WHERE tenant_id=$1 AND status='active'
-			ORDER BY key_version DESC LIMIT 1`, tenantID).Scan(&id, &wrapped)
-		if err == nil {
-			return id, wrapped, nil
+	load := func(keyType string) (id, wrapped string, err error) {
+		for _, p := range pools {
+			e := p.pool.QueryRow(ctx, `SELECT id,wrapped_key FROM tenant_crypto_key WHERE tenant_id=$1 AND wrap_key_type=$2 AND status='active'
+				ORDER BY key_version DESC LIMIT 1`, tenantID, keyType).Scan(&id, &wrapped)
+			if e == nil {
+				return id, wrapped, nil
+			}
+			if !errors.Is(e, pgx.ErrNoRows) {
+				return "", "", fmt.Errorf("check %s tenant_crypto_key(%s): %w", p.name, keyType, e)
+			}
 		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return "", "", fmt.Errorf("check %s tenant_crypto_key: %w", p.name, err)
+		return "", "", nil
+	}
+	materials := &tenantKeyMaterials{}
+	var err error
+	if materials.dekID, materials.dekWrapped, err = load(string(seccrypto.KeyTypeDEK)); err != nil {
+		return nil, err
+	}
+	if materials.indexID, materials.indexWrapped, err = load(string(seccrypto.KeyTypeIndex)); err != nil {
+		return nil, err
+	}
+	if materials.dekID == "" {
+		materials.dekID = platform.ID()
+		if materials.dekWrapped, err = wrapLocalTenantKey(api); err != nil {
+			return nil, err
 		}
 	}
-	dek := make([]byte, 32)
-	if _, err := rand.Read(dek); err != nil {
-		return "", "", err
+	if materials.indexID == "" {
+		materials.indexID = platform.ID()
+		if materials.indexWrapped, err = wrapLocalTenantKey(api); err != nil {
+			return nil, err
+		}
 	}
+	return materials, nil
+}
+
+/* wrapLocalTenantKey 生成 32 字节密钥材料并用 local-master:v1 主密钥包装（nonce 前置的
+ * AES-256-GCM 密文，与 ensureTenantCryptoKey 旧记录同格式，local 适配器可解包）。 */
+func wrapLocalTenantKey(api *httpapi.API) (string, error) {
 	master := sha256.Sum256([]byte("yzws-tenant-crypto:v1:" + api.Config.JWTSecret))
 	block, err := aes.NewCipher(master[:])
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", "", err
+		return "", err
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return "", err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
-		return "", "", err
+		return "", err
 	}
-	wrapped := base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, dek, nil))
-	return platform.ID(), wrapped, nil
+	return base64.StdEncoding.EncodeToString(gcm.Seal(nonce, nonce, key, nil)), nil
 }
 
 func platformAudit(ctx context.Context, tx pgx.Tx, adminID, action, ownerType, ownerID string, before, after any, reason string) error {

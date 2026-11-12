@@ -7,9 +7,39 @@
 			}
 		},
 		{
-			"path": "pages/login/login",
+			"path": "pages/portal/platform",
 			"style": {
 				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/portal/factory",
+			"style": {
+				"navigationBarTitleText": "制衣厂门户"
+			}
+		},
+		{
+			"path": "pages/portal/home",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/portal/trial",
+			"style": {
+				"navigationBarTitleText": "免费体验"
+			}
+		},
+		{
+			"path": "pages/portal/pending",
+			"style": {
+				"navigationBarTitleText": "体验注册审批"
+			}
+		},
+		{
+			"path": "pages/register/register",
+			"style": {
+				"navigationBarTitleText": "申请入驻"
 			}
 		},
 		{
@@ -83,6 +113,134 @@
 			"style": {
 				"navigationBarTitleText": "项目详情"
 			}
+		},
+		{
+			"path": "pages/orders/list",
+			"style": { "navigationBarTitleText": "项目与工单" }
+		},
+		{
+			"path": "pages/orders/project",
+			"style": { "navigationBarTitleText": "项目详情" }
+		},
+		{
+			"path": "pages/orders/workorder",
+			"style": { "navigationBarTitleText": "工单详情" }
+		},
+		{
+			"path": "pages/tasks/list",
+			"style": { "navigationBarTitleText": "任务与派工" }
+		},
+		{
+			"path": "pages/quality/index",
+			"style": { "navigationBarTitleText": "质检与库存" }
+		},
+		{
+			"path": "pages/quality/process-inspections",
+			"style": { "navigationBarTitleText": "过程巡检" }
+		},
+		{
+			"path": "pages/print/center",
+			"style": { "navigationBarTitleText": "菲票打印" }
+		},
+		{
+			"path": "pages/print/labels",
+			"style": { "navigationBarTitleText": "扎标签" }
+		},
+		{
+			"path": "pages/materials/receipts",
+			"style": { "navigationBarTitleText": "物料入库" }
+		},
+		{
+			"path": "pages/materials/issues",
+			"style": { "navigationBarTitleText": "领料管理" }
+		},
+		{
+			"path": "pages/masterdata/list",
+			"style": { "navigationBarTitleText": "基础数据" }
+		},
+		{
+			"path": "pages/rework/list",
+			"style": { "navigationBarTitleText": "返工复检" }
+		},
+		{
+			"path": "pages/rework/detail",
+			"style": { "navigationBarTitleText": "返工单详情" }
+		},
+		{
+			"path": "pages/products/list",
+			"style": { "navigationBarTitleText": "产品与工序" }
+		},
+		{
+			"path": "pages/products/detail",
+			"style": { "navigationBarTitleText": "产品详情" }
+		},
+		{
+			"path": "pages/markers/list",
+			"style": { "navigationBarTitleText": "唛架管理" }
+		},
+		{
+			"path": "pages/markers/detail",
+			"style": { "navigationBarTitleText": "唛架详情" }
+		},
+		{
+			"path": "pages/settings/workshops",
+			"style": { "navigationBarTitleText": "车间管理" }
+		},
+		{
+			"path": "pages/settings/lines",
+			"style": { "navigationBarTitleText": "产线管理" }
+		},
+		{
+			"path": "pages/settings/users",
+			"style": { "navigationBarTitleText": "人员与组织" }
+		},
+		{
+			"path": "pages/settings/employees",
+			"style": { "navigationBarTitleText": "员工与账号" }
+		},
+		{
+			"path": "pages/settings/dictionaries",
+			"style": { "navigationBarTitleText": "字典维护" }
+		},
+		{
+			"path": "pages/settings/profile",
+			"style": { "navigationBarTitleText": "本厂信息" }
+		},
+		{
+			"path": "pages/settings/portal",
+			"style": { "navigationBarTitleText": "门户内容" }
+		},
+		{
+			"path": "pages/settings/identity",
+			"style": { "navigationBarTitleText": "用户角色权限" }
+		},
+		{
+			"path": "pages/settings/features",
+			"style": { "navigationBarTitleText": "功能设置" }
+		},
+		{
+			"path": "pages/settings/import-export",
+			"style": { "navigationBarTitleText": "导入导出" }
+		},
+		{
+			"path": "pages/settings/backup",
+			"style": { "navigationBarTitleText": "备份与同步" }
+		},
+		{
+			"path": "pages/settings/plain-backups",
+			"style": { "navigationBarTitleText": "明文备份导出" }
+		},
+		{
+			"path": "pages/settings/audit",
+			"style": { "navigationBarTitleText": "审计与字段" }
+		},
+		{
+			"path": "pages/my/wages",
+			"style": { "navigationBarTitleText": "我的工资" }
+		},
+		{
+			"path": "pages/my/profile",
+			"style": { "navigationBarTitleText": "我的资料" }
 		}
 	],
 	"tabBar": {

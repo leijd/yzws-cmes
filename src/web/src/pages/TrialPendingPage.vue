@@ -187,7 +187,7 @@ h1{margin:0 0 10px;font-size:22px}
 .tp-field.full{grid-column:1 / -1}
 .tp-field label{font-size:12px;color:#475569}
 .tp-field label.required::after{content:" *";color:#d92d20}
-.tp-field input,.tp-field select{border:1px solid #cbd5e1;border-radius:8px;padding:9px 12px;font-size:13.5px;font-family:inherit;color:#0f172a}
+.tp-field input,.tp-field select{border:1px solid #cbd5e1;border-radius:8px;padding:9px 12px;font-size:13.5px;font-family:inherit;color:#0f172a;min-height:36px;line-height:1.4;box-sizing:border-box}
 .tp-field input:disabled{background:#f1f5f9;color:#667085;cursor:not-allowed}
 .tp-field input:focus,.tp-field select:focus{outline:2px solid #bfdbfe;border-color:#2563eb}
 .tp-info-actions{margin-top:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}

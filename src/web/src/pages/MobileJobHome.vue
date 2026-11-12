@@ -5,6 +5,7 @@
  */
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
+import { confirmLogout } from '../session'
 
 const userName = ref('')
 const personType = ref('')
@@ -59,10 +60,9 @@ async function load() {
   }
 }
 
+/* 注销当前账号：服务端吊销会话后回登录页 */
 function logout() {
-  localStorage.removeItem('clothp_access_token')
-  localStorage.removeItem('clothp_refresh_token')
-  window.location.href = '/login'
+  void confirmLogout('退出后将注销当前账号，需要重新登录，确认退出？')
 }
 
 onMounted(load)

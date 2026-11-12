@@ -387,15 +387,28 @@ func Register(api *httpapi.API) {
 			}
 			ctx := r.Context()
 			tenantID := r.PathValue("id")
-			var previous string
-			if err := api.DB.QueryRow(ctx, "SELECT status FROM tenant WHERE id=$1", tenantID).Scan(&previous); err != nil {
+			var previous, regStatus string
+			if err := api.DB.QueryRow(ctx, "SELECT status,registration_status FROM tenant WHERE id=$1", tenantID).Scan(&previous, &regStatus); err != nil {
 				return httpapi.Error(404, "NOT_FOUND", "租户不存在")
 			}
+			/* 启用必须以注册审批通过为前提：驳回/待审的租户不能直接启用（须走审批通过流程） */
+			if status == "active" && regStatus != "approved" {
+				msg := "该制衣厂注册申请尚未审批通过，不能启用"
+				if regStatus == "rejected" {
+					msg = "该制衣厂注册申请已被驳回，不能启用"
+				}
+				return httpapi.Error(409, "REGISTRATION_NOT_APPROVED", msg)
+			}
 			payload := tenantSetStatusPayload{TenantID: tenantID, Previous: previous}
+			/* 权威防重：启用在写事务里再次约束审批状态，避免预检后被驳回的租户被并发启用 */
+			enableGuard := ""
+			if status == "active" {
+				enableGuard = " AND registration_status='approved'"
+			}
 			steps := tenantSetStatusSteps(payload, map[string]func(context.Context, *dualwrite.Tx) error{
 				"set_status": func(ctx context.Context, tx *dualwrite.Tx) error {
 					if tx.Plain() != nil {
-						result, err := tx.Plain().Exec(ctx, "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3", status, tenantID, in.Version)
+						result, err := tx.Plain().Exec(ctx, "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3"+enableGuard, status, tenantID, in.Version)
 						if err != nil {
 							return err
 						}
@@ -404,7 +417,7 @@ func Register(api *httpapi.API) {
 						}
 					}
 					if tx.Secure() != nil {
-						if _, err := tx.Secure().Exec(ctx, "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3", status, tenantID, in.Version); err != nil {
+						if _, err := tx.Secure().Exec(ctx, "UPDATE tenant SET status=$1,version=version+1 WHERE id=$2 AND version=$3"+enableGuard, status, tenantID, in.Version); err != nil {
 							return err
 						}
 					}

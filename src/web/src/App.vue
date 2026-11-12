@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from './api'
+import { confirmLogout } from './session'
 import ToastHost from './components/ToastHost.vue'
 import GuideAssistant from './components/GuideAssistant.vue'
 
@@ -48,10 +49,9 @@ const nav = [
 ]
 const visibleNav = computed(() => nav.filter(item => !item.permission || permissions.value[item.permission]))
 const groups = computed(() => [...new Set(visibleNav.value.map(item => item.group))])
+/* 从工作页面退出：服务端注销会话（吊销访问令牌与刷新令牌）后再回登录页 */
 function logout() {
-  localStorage.removeItem('clothp_access_token')
-  localStorage.removeItem('clothp_refresh_token')
-  window.location.href = '/login'
+  void confirmLogout()
 }
 async function loadPermissions() {
   if (isLogin.value || !localStorage.getItem('clothp_access_token')) {
@@ -111,7 +111,7 @@ onBeforeUnmount(() => window.removeEventListener('clothp-branding-updated', onBr
     <header class="topbar">
       <button class="icon-button" @click="collapsed = !collapsed" aria-label="折叠菜单">☰</button>
       <div class="topbar-title">服装生产管理平台</div>
-      <div class="topbar-right"><span class="sync-dot"></span><span class="hide-mobile">中心节点 · 已连接</span><button class="user-button" @click="logout">{{ currentUserName || '当前用户' }} · 退出</button></div>
+      <div class="topbar-right"><span class="sync-dot"></span><span class="hide-mobile">中心节点 · 已连接</span><button class="user-button" @click="logout" title="注销当前账号并返回登录页">{{ currentUserName || '当前用户' }} · 退出登录</button></div>
     </header>
     <main class="content"><router-view /></main>
     <nav class="mobile-nav">

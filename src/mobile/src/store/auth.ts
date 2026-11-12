@@ -61,14 +61,24 @@ export const auth = reactive({
   },
 
   async logout(): Promise<void> {
+    /* 平台注销：先让服务端吊销当前会话（访问令牌与刷新令牌同时失效），
+     * 再清本机登录态回登录页；网络失败也照常退出，避免卡在工作页面。 */
     try {
-      await request("/auth/logout", { method: "POST", silent: true });
+      await request("/auth/logout", {
+        method: "POST",
+        silent: true,
+        skipAuthRedirect: true,
+      });
     } catch {
       // 网络失败也继续清理本地会话
     }
     clearToken();
+    /* 体验厂进入凭证一并清除：否则退出后门户页「继续体验」仍可免密回到该厂工作台，
+     * 等于没注销（服务端同时已吊销该凭证）。 */
+    uni.removeStorageSync("clothp_trial_entry");
     this.user = null;
     this.permissions = {};
-    uni.reLaunch({ url: "/pages/login/login" });
+    uni.reLaunch({ url: "/pages/portal/platform?tab=login&method=sms" });
+    uni.showToast({ title: "已退出登录", icon: "none" });
   },
 });

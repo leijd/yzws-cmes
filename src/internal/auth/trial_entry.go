@@ -17,6 +17,7 @@ import (
 // 令牌只对 customer_type='trial' 的厂有效，不能用于付费厂。
 var (
 	ErrTrialPending  = errors.New("trial tenant pending approval")
+	ErrTrialRejected = errors.New("trial tenant registration rejected")
 	ErrTrialExpired  = errors.New("trial subscription expired")
 	ErrNoTrialTenant = errors.New("trial tenant not found")
 )
@@ -51,7 +52,9 @@ func (s *Service) IssueTrialEntryToken(phone, tenantCode string) (string, error)
 }
 
 // VerifyTrialEntryToken 校验体验厂进入令牌。
-func (s *Service) VerifyTrialEntryToken(token string) (string, string, error) {
+// 除签名与有效期外，还要查吊销记录：用户退出登录（平台注销）后，
+// 吊销时刻之前签发的令牌一律作废，避免旧令牌继续免密进入工作台。
+func (s *Service) VerifyTrialEntryToken(ctx context.Context, token string) (string, string, error) {
 	parsed, err := jwt.ParseWithClaims(strings.TrimSpace(token), &trialEntryClaims{}, func(t *jwt.Token) (any, error) {
 		if t.Method != jwt.SigningMethodHS256 {
 			return nil, ErrUnauthenticated
@@ -65,7 +68,50 @@ func (s *Service) VerifyTrialEntryToken(token string) (string, string, error) {
 	if !ok || !claims.TrialEntry || claims.Phone == "" || claims.TenantCode == "" {
 		return "", "", ErrUnauthenticated
 	}
+	revokedAt, err := s.trialEntryRevokedAt(ctx, claims.TenantCode, claims.Phone)
+	if err != nil {
+		return "", "", err
+	}
+	/* 只比较到秒：同一秒内签发的令牌放行，避免“退出后立即重新验证”被误判失效 */
+	if revokedAt > 0 && claims.IssuedAt != nil && claims.IssuedAt.Unix() < revokedAt/trialEntryRevokeSecond {
+		return "", "", ErrUnauthenticated
+	}
 	return claims.Phone, claims.TenantCode, nil
+}
+
+const trialEntryRevokeSecond = int64(time.Second / time.Microsecond)
+
+// RevokeTrialEntryTokens 吊销某手机号在某厂的体验进入令牌（退出登录时调用）。
+func (s *Service) RevokeTrialEntryTokens(ctx context.Context, tenantID, phone string) error {
+	phone = strings.TrimSpace(phone)
+	if s.db == nil || tenantID == "" || phone == "" {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, `INSERT INTO trial_entry_revocation(tenant_id,phone_hash,revoked_at)
+		VALUES($1,$2,$3)
+		ON CONFLICT(tenant_id,phone_hash) DO UPDATE SET revoked_at=EXCLUDED.revoked_at`,
+		tenantID, platform.Hash([]byte(phone)), platform.Now())
+	return err
+}
+
+/* trialEntryRevokedAt 返回该厂该手机号的吊销时刻（微秒）；无记录返回 0。
+ * 租户不存在（令牌指向已被删除的厂）按未吊销处理，后续登录流程会自行拒绝。 */
+func (s *Service) trialEntryRevokedAt(ctx context.Context, tenantCode, phone string) (int64, error) {
+	if s.db == nil {
+		return 0, nil
+	}
+	var revokedAt int64
+	err := s.db.QueryRow(ctx, `SELECT r.revoked_at FROM trial_entry_revocation r
+		JOIN tenant t ON t.id=r.tenant_id
+		WHERE t.code=$1 AND r.phone_hash=$2`,
+		strings.TrimSpace(tenantCode), platform.Hash([]byte(strings.TrimSpace(phone)))).Scan(&revokedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return revokedAt, nil
 }
 
 // LoginTrialUser 以手机号登录体验厂：命中哪个账号就以哪个账号的身份进入。
@@ -89,6 +135,9 @@ func (s *Service) LoginTrialUser(ctx context.Context, phone, tenantCode, passwor
 	}
 	if err != nil {
 		return nil, err
+	}
+	if regStatus == "rejected" {
+		return nil, ErrTrialRejected
 	}
 	if regStatus == "pending" {
 		return nil, ErrTrialPending

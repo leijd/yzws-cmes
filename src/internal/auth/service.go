@@ -170,7 +170,7 @@ func (s *Service) lookupPhoneAccount(ctx context.Context, phones []string, tenan
 		JOIN user_account u ON u.tenant_id=t.id AND u.status='active'
 		LEFT JOIN employee e ON e.tenant_id=t.id AND e.id=u.employee_id AND e.status='active'
 		LEFT JOIN tenant_subscription ts ON ts.tenant_id=t.id
-		WHERE t.code=$1 AND t.status='active'
+		WHERE t.code=$1 AND t.status='active' AND t.registration_status='approved'
 		AND %s
 		AND (t.customer_type<>'trial' OR (ts.status='trial' AND ts.trial_ends_at>$3))
 		ORDER BY %s DESC,
@@ -537,7 +537,8 @@ func (s *Service) AuthenticateRequest(r *http.Request) (Principal, error) {
 func (s *Service) loadPrincipal(ctx context.Context, tenantID, userID, sessionID string) (Principal, error) {
 	var principal Principal
 	var employeeID *string
-	err := s.db.QueryRow(ctx, `SELECT u.login_name,u.employee_id,u.password_change_required FROM user_account u JOIN tenant t ON t.id=u.tenant_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND t.status='active'`, tenantID, userID).Scan(&principal.LoginName, &employeeID, &principal.PasswordChangeRequired)
+	/* 每次请求都校验租户可用性：驳回/待审/停用的租户，其现存会话也立即失效 */
+	err := s.db.QueryRow(ctx, `SELECT u.login_name,u.employee_id,u.password_change_required FROM user_account u JOIN tenant t ON t.id=u.tenant_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND t.status='active' AND t.registration_status='approved'`, tenantID, userID).Scan(&principal.LoginName, &employeeID, &principal.PasswordChangeRequired)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -580,9 +581,20 @@ func (s *Service) Refresh(ctx context.Context, refreshToken, nodeID, clientType 
 	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, loginPhone, clientType)
 }
 
+/* Logout 平台注销：吊销当前会话，并顺手吊销该手机号在本厂的「体验进入令牌」。
+ * 体验令牌是无状态 JWT，只清浏览器本地副本时旧令牌仍能换取新会话，
+ * 用户退出后直接用地址（/trial/home）又能以原身份进工作台。 */
 func (s *Service) Logout(ctx context.Context, p Principal) error {
-	_, err := s.db.Exec(ctx, "UPDATE auth_session SET revoked_at=$1,reason='logout' WHERE tenant_id=$2 AND id=$3", platform.Now(), p.TenantID, p.SessionID)
-	return err
+	if _, err := s.db.Exec(ctx, "UPDATE auth_session SET revoked_at=$1,reason='logout' WHERE tenant_id=$2 AND id=$3", platform.Now(), p.TenantID, p.SessionID); err != nil {
+		return err
+	}
+	if phone := s.sessionLoginPhone(ctx, p); phone != "" {
+		/* 体验令牌吊销失败不阻断退出（例如厂从未签发过令牌） */
+		if err := s.RevokeTrialEntryTokens(ctx, p.TenantID, phone); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 /* HashPassword 生成 Argon2id 密码验证器（供人员建档/密码重置使用；密码明文不落库）。 */

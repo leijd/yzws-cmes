@@ -22,16 +22,18 @@ import (
 
 /* 凭进入令牌校验身份，返回 (phone, tenantCode, tenantID, registrationStatus) */
 func trialIdentityByEntryToken(r *http.Request, api *httpapi.API, entryToken, tenantCode string) (string, string, string, string, error) {
-	phone, tokenTenant, err := api.Auth.VerifyTrialEntryToken(entryToken)
+	phone, tokenTenant, err := api.Auth.VerifyTrialEntryToken(r.Context(), entryToken)
 	if err != nil {
 		return "", "", "", "", httpapi.Error(http.StatusUnauthorized, "INVALID_ENTRY_TOKEN", "体验凭证已失效，请重新用手机验证码登录")
 	}
 	if tenantCode != "" && tokenTenant != strings.TrimSpace(tenantCode) {
 		return "", "", "", "", httpapi.Error(http.StatusForbidden, "TENANT_MISMATCH", "体验凭证与该厂不匹配")
 	}
+	/* 不按 status 过滤：注册被驳回时租户已停用，仍需凭有效凭证让申请人查看驳回状态；
+	 * 各写接口（修改/加急/延期）再按 registration_status 分别拦截。 */
 	var tenantID, regStatus string
 	err = api.DB.QueryRow(r.Context(), `SELECT id,registration_status FROM tenant
-		WHERE code=$1 AND contact_phone=$2 AND customer_type='trial' AND status='active'
+		WHERE code=$1 AND contact_phone=$2 AND customer_type='trial'
 		ORDER BY registered_at DESC LIMIT 1`, tokenTenant, phone).
 		Scan(&tenantID, &regStatus)
 	if errors.Is(err, pgx.ErrNoRows) {

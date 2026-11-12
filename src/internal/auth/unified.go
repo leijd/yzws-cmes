@@ -13,7 +13,8 @@ func (s *Service) UnifiedLogin(ctx context.Context, input PlatformLoginInput) (m
 		platformResult["account_type"] = "platform"
 		return platformResult, "platform", nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT u.tenant_id,u.id,u.employee_id,u.password_verifier FROM user_account u JOIN tenant t ON t.id=u.tenant_id WHERE u.login_name=$1 AND u.status='active' AND t.status='active'`, input.LoginName)
+	/* 租户必须已审批通过且启用：驳回/待审的租户即使残留 active 账号也禁止登录 */
+	rows, err := s.db.Query(ctx, `SELECT u.tenant_id,u.id,u.employee_id,u.password_verifier FROM user_account u JOIN tenant t ON t.id=u.tenant_id WHERE u.login_name=$1 AND u.status='active' AND t.status='active' AND t.registration_status='approved'`, input.LoginName)
 	if err != nil {
 		return nil, "", err
 	}

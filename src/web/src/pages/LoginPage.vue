@@ -5,7 +5,7 @@ import { api } from '../api'
 import NetworkBackground from '../components/NetworkBackground.vue'
 import {
   TRIAL_RESEND_MS, clearTrialSession, formatCountdown, isValidPhone, maskPhone,
-  phoneLogin, saveTrialSession, sendTrialCode, verifyTrialCode, workspaceHome,
+  phoneLogin, readTrialSession, saveTrialSession, sendTrialCode, verifyTrialCode, workspaceHome,
   type TrialTenantEntry, type TrialVia,
 } from '../trial'
 import { createLoginQr, exchangeQrLogin, getQrStatus, makeQrImage, moduleLoginUrl, qrLoginUrl } from '../qrLogin'
@@ -280,6 +280,12 @@ async function verifyCode() {
       pendingTicket.value = result.ticket || ''
       tenantChoices.value = entries
       mode.value = 'select-tenant'
+      return
+    }
+    /* 后端只返回已启用的厂；本机有「待审体验厂」会话时不落入演示主页，直接展示审批状态 */
+    const localTrial = readTrialSession()
+    if (localTrial?.status === 'pending' && localTrial.tenantCode) {
+      void router.push('/trial/pending')
       return
     }
     enterDemoHome(phone.value, 'sms')

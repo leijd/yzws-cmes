@@ -78,6 +78,20 @@ func maskTrialPhone(phone string) string {
 	return phone[:3] + "****" + phone[7:]
 }
 
+/* IssuePhoneLoginTicket 签发一次性手机登录票据（与 /auth/trial/verify 签发的票据同库同规则，
+ * /auth/phone-login 与 /public/trial-enter 均可消费）。
+ * 供统一入口（如体验注册页）在确认手机号归属后，直接引导其进入名下制衣厂，无需二次收码。 */
+func (a *API) IssuePhoneLoginTicket(phone string) (string, error) {
+	ticket, err := trialRandomToken()
+	if err != nil {
+		return "", err
+	}
+	trialMu.Lock()
+	trialTickets[ticket] = &trialTicket{phone: strings.TrimSpace(phone), expiresAt: time.Now().Add(trialTicketTTL)}
+	trialMu.Unlock()
+	return ticket, nil
+}
+
 /** 由多服务商路由自动选路发送；未配置服务商时保持演示模式。 */
 func (a *API) sendTrialSMS(phone, code string) (bool, error) {
 	if !a.SMS.Configured() {
@@ -184,10 +198,11 @@ func (a *API) RegisterTrialRoutes() {
 		delete(trialChallenges, phone)
 		trialMu.Unlock()
 
-		/* 手机号关联的所有厂：≤1 个体验厂（手机号只能占用一个体验用户）+ N 个收费制衣厂
+		/* 手机号关联的所有【已启用】厂：≤1 个体验厂（手机号只能占用一个体验用户）+ N 个收费制衣厂
 		 * （体验厂：注册联系电话命中，或本厂任意启用账号的员工手机号/登录名命中——厂长等
 		 *   非管理员员工由此识别，进入时按本人账号签发会话；兼容旧数据租户；
-		 *   收费厂：员工档案绑定该手机号，或该厂「制衣厂信息」的联系电话即该手机号），前端据此决定直接进入门户还是弹出选厂列表 */
+		 *   收费厂：员工档案绑定该手机号，或该厂「制衣厂信息」的联系电话即该手机号），前端据此决定直接进入门户还是弹出选厂列表。
+		 * 只返回 status='active' 且 registration_status='approved' 的厂：待审/驳回/停用厂不得出现在手机登录列表中。 */
 		tenants := []map[string]any{}
 		var trialTenant map[string]any
 		if a.DB != nil {
@@ -206,7 +221,7 @@ func (a *API) RegisterTrialRoutes() {
 				 * 匹配不到；按候选体验厂逐个计算本厂哈希匹配 phone_hash（体验厂数量少，可接受）。 */
 				candRows, err := a.DB.Query(r.Context(), `SELECT t.id,t.code,t.name,COALESCE(t.short_code,''),COALESCE(t.admin_login_name,''),COALESCE(s.trial_ends_at,0),t.registration_status
 					FROM tenant t LEFT JOIN tenant_subscription s ON s.tenant_id=t.id
-					WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status<>'rejected'
+					WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status='approved'
 					ORDER BY t.registered_at DESC`)
 				if err != nil {
 					return err
@@ -255,7 +270,7 @@ func (a *API) RegisterTrialRoutes() {
 				var trialEnds int64
 				tenantErr := a.DB.QueryRow(r.Context(), `SELECT t.code,t.name,t.short_code,COALESCE(t.admin_login_name,''),COALESCE(s.trial_ends_at,0),t.registration_status
 					FROM tenant t LEFT JOIN tenant_subscription s ON s.tenant_id=t.id
-					WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status<>'rejected'
+					WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status='approved'
 					AND (t.contact_phone=$1 OR EXISTS(
 						SELECT 1 FROM user_account u
 						LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
@@ -361,7 +376,7 @@ func (a *API) RegisterTrialRoutes() {
 		phone := strings.TrimSpace(input.Phone)
 		authenticated := false
 		if token := strings.TrimSpace(input.EntryToken); token != "" {
-			tokenPhone, tokenTenant, err := a.Auth.VerifyTrialEntryToken(token)
+			tokenPhone, tokenTenant, err := a.Auth.VerifyTrialEntryToken(r.Context(), token)
 			if err != nil {
 				return Error(http.StatusUnauthorized, "INVALID_ENTRY_TOKEN", "体验凭证已失效，请重新用手机验证码登录")
 			}
@@ -393,6 +408,8 @@ func (a *API) RegisterTrialRoutes() {
 		switch {
 		case errors.Is(err, auth.ErrTrialPending):
 			return Error(http.StatusConflict, "TRIAL_PENDING", "体验制衣厂已提交，平台管理员审核通过后即可进入工作台")
+		case errors.Is(err, auth.ErrTrialRejected):
+			return Error(http.StatusForbidden, "TRIAL_REJECTED", "该体验制衣厂的注册申请已被驳回，不能进入工作台")
 		case errors.Is(err, auth.ErrTrialExpired):
 			return Error(http.StatusForbidden, "TRIAL_EXPIRED", "体验期已结束，请联系平台转为正式订阅")
 		case errors.Is(err, auth.ErrNoTrialTenant):
