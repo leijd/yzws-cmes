@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="任务与派工" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">{{ workOrderCode ? `工单 ${workOrderCode} · 任务` : "任务与派工" }}</view>

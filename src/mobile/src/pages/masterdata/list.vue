@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="基础数据" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">{{ cfg.title }}</view>

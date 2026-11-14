@@ -1192,6 +1192,8 @@ func registerSensitiveView(api *httpapi.API) {
 			"expires_at":   expiresAt,
 		})
 	})
+	/* 申请 → 租户管理员提醒 → 详情审批 → 短信/演示码下发授权码 */
+	registerSensitiveViewRequests(api)
 }
 
 /* revealTokenTTL 敏感字段查看票据有效期：5 分钟，到期自动收回（恢复 *** 显示）。 */

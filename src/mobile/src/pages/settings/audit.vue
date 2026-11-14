@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="审计与字段" />
   <view class="page">
     <view class="chips">
       <view class="chip" :class="{ on: tab === 'audit' }" @click="tab = 'audit'; loadAudit()">审计日志</view>

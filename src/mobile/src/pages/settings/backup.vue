@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="备份与同步" />
   <view class="page">
     <view class="card">
       <view class="row between">

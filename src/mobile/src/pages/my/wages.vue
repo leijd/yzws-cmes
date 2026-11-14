@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="我的工资" />
   <view class="page">
     <!-- 月份切换 -->
     <view class="card row between">

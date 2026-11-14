@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="明文备份导出" />
   <view class="page">
     <view class="card">
       <view class="row between">

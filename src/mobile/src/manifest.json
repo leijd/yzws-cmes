@@ -1,5 +1,5 @@
 {
-    "name" : "ClothP MES",
+    "name" : "YZWSMES",
     "appid" : "__UNI__840D821",
     "description" : "制衣生产移动工作台",
     "versionName" : "0.0.1",
@@ -17,11 +17,18 @@
             "delay" : 0
         },
         /* 模块配置 */
-        "modules" : {},
+        "modules" : {
+            /* 扫码报工：uni.scanCode 在 App 端依赖 Barcode 模块，不勾选会提示不支持 */
+            "Barcode" : {}
+        },
         /* 应用发布信息 */
         "distribute" : {
             /* android打包配置 */
             "android" : {
+                /* 后端走 http://106.52.168.135:18370（IP 无法签发 HTTPS 证书），
+                 * Android 9+ 默认禁止明文 HTTP，必须显式放行，否则所有接口报网络错误 */
+                "usesCleartextTraffic" : true,
+                "packagename" : "cn.yizhisuan.clothp",
                 "permissions" : [
                     "<uses-permission android:name=\"android.permission.CHANGE_NETWORK_STATE\"/>",
                     "<uses-permission android:name=\"android.permission.MOUNT_UNMOUNT_FILESYSTEMS\"/>",

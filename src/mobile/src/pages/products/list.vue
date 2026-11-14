@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="产品与工序" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">产品与工序</view>

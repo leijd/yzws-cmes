@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="生产通知" />
   <view class="page">
     <view class="chips">
       <view class="chip" :class="{ on: tab === 'notifications' }" @click="tab = 'notifications'">消息待办</view>
@@ -67,6 +68,8 @@ interface NotifyItem {
   type: string;
   title: string;
   body: string;
+  owner_type?: string;
+  owner_id?: string;
   read: boolean;
   created_at: number;
 }
@@ -148,11 +151,17 @@ async function open(item: NotifyItem) {
       // 标记失败不阻塞查看
     }
   }
-  uni.showModal({
-    title: item.title,
-    content: item.body,
-    showCancel: false,
-  });
+  /* 移动版：点击提醒切换页面显示详情（网页版为弹窗）。
+   * 敏感信息授权申请提醒带上 owner_id，详情页可展示请求信息并允许/拒绝。 */
+  const query = [
+    `id=${encodeURIComponent(item.id)}`,
+    `type=${encodeURIComponent(item.type)}`,
+    `title=${encodeURIComponent(item.title || "")}`,
+    `body=${encodeURIComponent(item.body || "")}`,
+    `time=${encodeURIComponent(String(item.created_at || ""))}`,
+    `owner_id=${encodeURIComponent(item.owner_id || "")}`,
+  ].join("&");
+  uni.navigateTo({ url: `/pages/notify/detail?${query}` });
 }
 
 async function readAll() {

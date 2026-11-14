@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="菲票打印" />
   <view class="page">
     <view class="chips">
       <view class="chip" :class="{ on: tab === 'jobs' }" @click="tab = 'jobs'">打印任务</view>

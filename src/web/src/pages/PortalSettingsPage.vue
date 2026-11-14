@@ -86,9 +86,10 @@ async function onLogoPicked(event: Event) {
   notice.value = ''
   const type = file.type || ''
   const isPng = type === 'image/png' || (!type && /\.png$/i.test(file.name))
+  const isJpg = type === 'image/jpeg' || (!type && /\.jpe?g$/i.test(file.name))
   const isGif = type === 'image/gif' || (!type && /\.gif$/i.test(file.name))
-  if (!isPng && !isGif) {
-    error.value = 'logo 仅支持 PNG 或 GIF 格式'
+  if (!isPng && !isJpg && !isGif) {
+    error.value = 'logo 仅支持 PNG、JPG 或 GIF 格式'
     return
   }
   if (file.size > LOGO_MAX_BYTES) {
@@ -99,7 +100,7 @@ async function onLogoPicked(event: Event) {
   try {
     const r = await api<{ logo_url: string; message: string }>('/tenant-portal/logo', {
       method: 'POST',
-      headers: { 'Content-Type': isPng ? 'image/png' : 'image/gif' },
+      headers: { 'Content-Type': isPng ? 'image/png' : isJpg ? 'image/jpeg' : 'image/gif' },
       body: file,
     })
     logoPreview.value = r.logo_url
@@ -163,7 +164,7 @@ onMounted(load)
     </div>
     <div class="panel-body">
       <p class="text-muted" style="margin-top:0">
-        logo 标准尺寸：<strong>{{ LOGO_STANDARD }}</strong>；支持 <strong>PNG / GIF</strong> 格式，文件不超过 <strong>500KB</strong>。
+        logo 标准尺寸：<strong>{{ LOGO_STANDARD }}</strong>；支持 <strong>PNG / JPG / GIF</strong> 格式，文件不超过 <strong>500KB</strong>。
         登录后的工作页面（左侧品牌区）会使用本厂 logo 与下方系统名称。
       </p>
       <div class="logo-row">
@@ -172,7 +173,7 @@ onMounted(load)
           <span v-else>平台默认 logo</span>
         </div>
         <div class="logo-actions">
-          <input ref="fileInput" class="hidden-file" type="file" accept="image/png,image/gif" @change="onLogoPicked">
+          <input ref="fileInput" class="hidden-file" type="file" accept="image/png,image/jpeg,image/gif" @change="onLogoPicked">
           <button class="button" type="button" :disabled="uploading || loading" @click="pickLogo">
             {{ uploading ? '处理中…' : '上传 logo' }}
           </button>

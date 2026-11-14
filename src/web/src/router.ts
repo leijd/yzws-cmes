@@ -44,6 +44,8 @@ export const router = createRouter({
     { path: '/audit/G08', component: () => import('./pages/AuditPage.vue') },
     { path: '/products/:id', component: () => import('./pages/ProductDetailPage.vue') },
     { path: '/identity/G05', component: () => import('./pages/IdentityPage.vue') },
+    /* 租户管理员：敏感信息查看授权申请审批 */
+    { path: '/identity/sensitive-requests', component: () => import('./pages/SensitiveViewRequestsPage.vue') },
     /* 车间/产线/人员管理（设计 6.2-6.4） */
     { path: '/settings/workshops', component: () => import('./pages/WorkshopListPage.vue') },
     { path: '/settings/lines', component: () => import('./pages/LineListPage.vue') },

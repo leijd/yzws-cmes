@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { api, statusText } from '../api'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { api, statusText, uuid } from '../api'
 import { usePermissions } from '../permissions'
 import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
@@ -22,6 +22,7 @@ const roles = ref<any[]>([])
 const processes = ref<any[]>([])
 const loading = ref(false)
 const saving = ref(false)
+const createKey = ref('')
 const error = ref('')
 const notice = ref('')
 const myEmployeeId = ref('')
@@ -141,7 +142,7 @@ const revealRemainText = computed(() => {
 })
 
 function isMasked(key: string) { return !isSelf.value && !revealUnlocked.value && detail.value && String(detail.value[key] ?? '') === '***' }
-function openReveal(key: string) { revealKey.value = key; revealSecret.value = ''; revealError.value = ''; showReveal.value = true }
+function openReveal(key: string) { revealKey.value = key; revealSecret.value = ''; revealError.value = ''; requestError.value = ''; requestNotice.value = ''; showReveal.value = true }
 function revealQuery() { return revealUnlocked.value ? `?reveal_token=${encodeURIComponent(revealToken.value)}` : '' }
 
 async function confirmReveal() {
@@ -187,6 +188,63 @@ async function revokeReveal() {
     } catch { /* 保持现状 */ }
   }
 }
+
+/* ===== 授权码申请：非管理员没有签发渠道，在解锁弹窗向租户管理员发起申请；
+ * 管理员在提醒详情里允许后，短信下发授权码；未接真实短信环境时授权码在申请人页面显示。
+ * 弹窗打开期间轮询自己的申请状态，审批通过后即可一键填入解锁。 ===== */
+const requestPhone = ref('')
+const requestReason = ref('')
+const requestBusy = ref(false)
+const requestError = ref('')
+const requestNotice = ref('')
+const requestInfo = ref<any>(null)
+let requestPoll: ReturnType<typeof setInterval> | undefined
+const requestPending = computed(() => requestInfo.value?.status === 'pending')
+const requestRejected = computed(() => requestInfo.value?.status === 'rejected')
+const requestApprovedCode = computed(() => requestInfo.value?.demo_code_visible ? String(requestInfo.value.demo_code) : '')
+const requestSmsSent = computed(() => !!requestInfo.value?.sms_sent)
+const requestCodeExpired = computed(() => !!requestInfo.value?.code_expired)
+const requestHandled = computed(() => ['approved', 'rejected'].includes(requestInfo.value?.status))
+const requestCodeText = computed(() => requestInfo.value?.code_expires_at
+  ? new Date(requestInfo.value.code_expires_at / 1000).toLocaleTimeString('zh-CN', { hour12: false }) : '')
+
+async function refreshViewRequest() {
+  if (!editing.value || revealByPassword.value) return
+  try {
+    const res = await api<{ items: any[] }>(`/sensitive-view-requests/mine?employee_id=${encodeURIComponent(editing.value.id)}`, {}, { silent: true })
+    requestInfo.value = res.items?.[0] || null
+  } catch { /* 轮询失败不打断解锁操作 */ }
+}
+async function applyViewRequest() {
+  if (!editing.value) return
+  requestBusy.value = true; requestError.value = ''; requestNotice.value = ''
+  try {
+    const res = await api<{ request: any }>('/sensitive-view-requests', {
+      method: 'POST',
+      body: JSON.stringify({
+        employee_id: editing.value.id,
+        field_key: revealKey.value,
+        field_label: revealLabels[revealKey.value] || '',
+        reason: requestReason.value.trim(),
+        phone: requestPhone.value.trim(),
+      }),
+    })
+    requestInfo.value = res.request
+    requestNotice.value = '申请已发送给租户管理员，请等待审批'
+  } catch (e) { requestError.value = (e as Error).message } finally { requestBusy.value = false }
+}
+function useDemoCode() {
+  if (!requestApprovedCode.value) return
+  revealSecret.value = requestApprovedCode.value
+  void confirmReveal()
+}
+watch(showReveal, open => {
+  if (requestPoll) { clearInterval(requestPoll); requestPoll = undefined }
+  if (!open || revealByPassword.value) return
+  void refreshViewRequest()
+  requestPoll = setInterval(() => { void refreshViewRequest() }, 3000)
+})
+onBeforeUnmount(() => { if (requestPoll) clearInterval(requestPoll) })
 
 async function load() {
   loading.value = true; error.value = ''
@@ -237,6 +295,9 @@ function resetAccountState() {
 async function openCreate() {
   editing.value = null; detail.value = null
   Object.assign(form, blank())
+  /* 每次打开新建表单生成一次幂等键：同一次建档的重复提交/重试复用该键，
+   * 服务端据此重放首次响应，不会再建出第二个员工 */
+  createKey.value = uuid()
   resetAccountState()
   error.value = ''
   showForm.value = true
@@ -314,7 +375,11 @@ async function save() {
       showForm.value = false
       await load()
     } else {
-      const created = await api<{ id: string }>('/employees', { method: 'POST', body: JSON.stringify(buildPayload()) })
+      const created = await api<{ id: string }>('/employees', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': createKey.value || uuid() },
+        body: JSON.stringify(buildPayload()),
+      })
       editing.value = { id: created.id, version: 1 }
       await load()
       if (canAccountWrite.value) {
@@ -536,6 +601,31 @@ watch(ready, loaded => {
     <div v-if="revealError" class="notice error">{{ revealError }}</div>
     <input v-model="revealSecret" :type="revealByPassword ? 'password' : 'text'"
       :placeholder="revealByPassword ? '输入登录密码' : '输入 12 位授权码'" autocomplete="off" style="width:100%" @keyup.enter="confirmReveal">
+    <template v-if="!revealByPassword">
+      <div style="margin:16px 0 10px;border-top:1px dashed var(--border);padding-top:12px;font-size:13px"><strong>还没有授权码？向租户管理员发起申请</strong></div>
+      <div v-if="requestError" class="notice error">{{ requestError }}</div>
+      <div v-if="requestNotice" class="notice success">{{ requestNotice }}</div>
+      <div v-if="requestPending" class="notice" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+        <span>申请已提交，等待租户管理员在提醒详情中审批…（自动刷新）</span>
+        <button class="button link" @click="refreshViewRequest">立即刷新</button>
+      </div>
+      <div v-if="requestRejected" class="notice error">上次申请已被租户管理员拒绝，可修改信息后重新提交。</div>
+      <div v-if="requestCodeExpired" class="notice">上次签发的授权码已过期，请重新发起申请。</div>
+      <div v-if="requestSmsSent && !requestCodeExpired" class="notice success">申请已通过，授权码已短信发送到您的手机，请查收后填入上方输入框。</div>
+      <div v-if="requestApprovedCode" class="notice success" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px">
+        <span>当前未连接真实短信环境，演示模式授权码：</span>
+        <strong style="font-size:18px;letter-spacing:2px;user-select:all">{{ requestApprovedCode }}</strong>
+        <span class="text-muted" style="font-size:12px">有效期至 {{ requestCodeText }}，仅申请人可见</span>
+        <button class="button secondary small" @click="useDemoCode">填入并解锁查看</button>
+      </div>
+      <div class="form-grid" style="margin-top:10px">
+        <div class="field"><label>接收授权码短信的手机号</label><input v-model.trim="requestPhone" inputmode="numeric" maxlength="11" placeholder="留空自动使用本人档案手机号"></div>
+        <div class="field"><label>申请事由（选填）</label><input v-model.trim="requestReason" placeholder="如 需核对员工联系电话"></div>
+      </div>
+      <div class="form-actions" style="justify-content:flex-start;margin-top:6px">
+        <button class="button secondary" :disabled="requestBusy" @click="applyViewRequest">{{ requestBusy ? '提交中…' : (requestPending ? '重新提交申请' : (requestHandled ? '重新申请授权码' : '申请授权码')) }}</button>
+      </div>
+    </template>
     <template #footer>
       <button class="button secondary" @click="showReveal = false">取消</button>
       <button class="button" :disabled="!revealSecret.trim()" @click="confirmReveal">解锁查看</button>

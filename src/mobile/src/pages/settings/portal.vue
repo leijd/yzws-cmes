@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="门户内容" />
   <view class="page">
     <view v-if="loading" class="empty">加载中…</view>
     <template v-else-if="content">
@@ -25,7 +26,7 @@
           <input class="input" v-model.trim="form.logo_url" placeholder="https://... 或 /path" />
         </view>
         <view class="actions" style="margin-top: 12rpx">
-          <button class="btn btn-outline btn-sm" @click="uploadLogo">上传 logo（PNG/GIF ≤500KB）</button>
+          <button class="btn btn-outline btn-sm" @click="uploadLogo">上传 logo（PNG/JPG/GIF ≤500KB）</button>
           <button v-if="content.has_uploaded_logo || form.logo_url" class="btn btn-danger btn-sm" @click="removeLogo">移除 logo</button>
         </view>
       </view>
@@ -173,7 +174,8 @@ function resetDefault() {
 function uploadLogo() {
   uni.chooseImage({
     count: 1,
-    sizeType: ["compressed"],
+    /* 用原图：App 端「压缩」可能把 PNG/GIF 转码成 JPEG，导致服务端按文件头校验被拒 */
+    sizeType: ["original"],
     success: (res) => {
       const path = res.tempFilePaths[0];
       const files = (res.tempFiles as unknown as { size?: number }[]) || [];
@@ -191,11 +193,19 @@ function uploadLogo() {
           if (uploadRes.statusCode >= 200 && uploadRes.statusCode < 300) {
             uni.showToast({ title: "logo 已上传", icon: "none" });
             load();
-          } else {
-            uni.showToast({ title: "上传失败", icon: "none" });
+            return;
           }
+          /* 显示后端的具体原因（格式/大小/权限），不要只报一个笼统的「上传失败」 */
+          let msg = `上传失败 (${uploadRes.statusCode})`;
+          try {
+            const body = JSON.parse(uploadRes.data as string) as { message?: string };
+            if (body?.message) msg = body.message;
+          } catch {
+            /* 响应不是 JSON 时保留状态码提示 */
+          }
+          uni.showToast({ title: msg, icon: "none" });
         },
-        fail: () => uni.showToast({ title: "上传失败", icon: "none" }),
+        fail: (err) => uni.showToast({ title: err.errMsg || "上传失败，请检查网络", icon: "none" }),
       });
     },
   });

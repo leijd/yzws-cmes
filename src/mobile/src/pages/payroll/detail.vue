@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="工资单详情" />
   <view class="page">
     <view v-if="sheet" class="card head">
       <view class="row between">

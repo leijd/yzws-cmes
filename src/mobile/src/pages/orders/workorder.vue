@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="工单详情" />
   <view class="page">
     <view v-if="loading" class="empty">加载中…</view>
     <view v-else-if="!item" class="empty">工单不存在</view>

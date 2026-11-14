@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="过程巡检" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">过程巡检</view>

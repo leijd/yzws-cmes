@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="扫码派工/报工" />
   <view class="page">
     <!-- 第一步：扫码 -->
     <view v-if="!ticket" class="scan-area">

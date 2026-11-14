@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="扎标签" />
   <view class="page">
     <view class="card">
       <view class="field" style="padding-top: 0">

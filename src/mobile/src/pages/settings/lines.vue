@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="产线管理" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">{{ workshopName ? `${workshopName} · 产线` : "产线管理" }}</view>

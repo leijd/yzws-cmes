@@ -10,6 +10,8 @@ src/server.exe
 *.exe
 *.log
 *.tsbuildinfo
+# 部署构建产物（deploy.ps1 生成）：含可执行文件、前端包与含数据库口令/HSM API Key 的 config.yaml
+src/deploy/build/
 
 # ===== 本地运行数据与密钥（勿入库） =====
 # config.yaml / config-*.yaml 含数据库口令，请复制 config.example.yaml 后自行填写
@@ -17,10 +19,16 @@ src/data/
 src/config.yaml
 src/config-*.yaml
 !src/config.example.yaml
+# .env 可能含 CLOTHP_JWT_SECRET 等真实密钥（该密钥同时是 local-master 解包口令）
+src/.env
+src/.env.*
+!src/.env.example
 src/config.zip
 db-backup/
 *.dump
 *.bak
+# 本地 SSH 隧道脚本（含服务器地址与 root 账号，勿入库）
+ssh-tunel.bat
 
 # ===== 需求资料中的临时文件与压缩包 =====
 req/*.zip

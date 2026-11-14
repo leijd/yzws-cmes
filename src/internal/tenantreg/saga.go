@@ -10,6 +10,9 @@ import (
 	"encoding/json"
 
 	"clothp/internal/dualwrite"
+	"clothp/internal/platform"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func init() {
@@ -33,6 +36,22 @@ type tenantApprovePayload struct {
 	OldExpediteAt   *int64 `json:"old_expedite_at,omitempty"`
 	HadSubscription bool   `json:"had_subscription"`
 	OldSubscription string `json:"old_subscription,omitempty"` // row_to_json 快照
+}
+
+/* existingSubscriptionID 取该租户已有订阅行 id（优先密文库=运行期读源，回落明文库），
+ * 两侧都没有时才新生成。两库共用同一 id 是 UK(tenant_id) 不分叉的前提：
+ * 若一侧缺行时各自 INSERT 新 id，两库会各有一行不同 id 的订阅，增量补偿永久 23505。 */
+func existingSubscriptionID(ctx context.Context, tx *dualwrite.Tx, tenantID string) string {
+	for _, q := range []pgx.Tx{tx.Secure(), tx.Plain()} {
+		if q == nil {
+			continue
+		}
+		var id string
+		if err := q.QueryRow(ctx, `SELECT id FROM tenant_subscription WHERE tenant_id=$1`, tenantID).Scan(&id); err == nil && id != "" {
+			return id
+		}
+	}
+	return platform.ID()
 }
 
 func execBothTx(ctx context.Context, tx *dualwrite.Tx, sql string, args ...any) error {

@@ -35,9 +35,11 @@ interface RequestOptions {
   skipAuthRedirect?: boolean;
   /** 携带 Idempotency-Key 头（后端写接口要求） */
   idempotency?: boolean;
+  /** 指定幂等键：同一次提交的重试要复用同一个键才能真正去重（不传则每次新生成） */
+  idempotencyKey?: string;
 }
 
-function uuid(): string {
+export function uuid(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
     return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
@@ -52,7 +54,8 @@ export function request<T>(path: string, options: RequestOptions = {}): Promise<
     const token = getToken();
     if (token) header.Authorization = `Bearer ${token}`;
     if (options.data !== undefined) header["Content-Type"] = "application/json";
-    if (options.idempotency) header["Idempotency-Key"] = uuid();
+    if (options.idempotencyKey) header["Idempotency-Key"] = options.idempotencyKey;
+    else if (options.idempotency) header["Idempotency-Key"] = uuid();
 
     uni.request({
       url: API_BASE_URL + "/api/v1" + path,

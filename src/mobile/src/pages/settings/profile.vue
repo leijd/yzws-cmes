@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="本厂信息" />
   <view class="page">
     <view v-if="loading" class="empty">加载中…</view>
     <template v-else-if="profile">

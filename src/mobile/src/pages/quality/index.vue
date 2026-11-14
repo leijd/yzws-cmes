@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="质检与库存" />
   <view class="page">
     <view class="chips">
       <view v-for="t in tabs" :key="t.value" class="chip" :class="{ on: tab === t.value }" @click="switchTab(t.value)">{{ t.label }}</view>

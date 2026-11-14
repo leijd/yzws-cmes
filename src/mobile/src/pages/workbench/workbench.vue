@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="工作台" />
   <view class="page">
     <view class="hero">
       <text class="hero-logout" @click="onLogout">退出</text>
@@ -46,11 +47,12 @@ import { request } from "../../utils/request";
 const displayName = computed(
   () => auth.user?.employee_name || auth.user?.login_name || ""
 );
-/* 厂牌名称：/tenant/branding 返回 {code,name}，失败则用默认文案 */
+/* 品牌（logo + 厂名）已由统一标题栏组件 BrandNavBar 渲染，
+ * 这里只保留欢迎语中的厂名。 */
 const tenantName = ref("");
 async function loadBranding() {
   try {
-    const res = await request<{ code?: string; name?: string; tenant_name?: string }>("/tenant/branding", { silent: true });
+    const res = await request<{ tenant_name?: string; name?: string }>("/tenant/branding", { silent: true });
     tenantName.value = res.tenant_name || res.name || "";
   } catch {
     tenantName.value = "";
@@ -174,6 +176,7 @@ const groups: Group[] = [
       { icon: "🏢", name: "本厂信息", url: "/pages/settings/profile" },
       { icon: "🌐", name: "门户内容", url: "/pages/settings/portal" },
       { icon: "🔑", name: "用户角色权限", url: "/pages/settings/identity", perm: "identity:read" },
+      { icon: "🔐", name: "敏感信息授权申请", url: "/pages/notify/sensitive-requests", perm: "identity:write" },
       { icon: "⚙️", name: "功能设置", url: "/pages/settings/features", perm: "settings:read" },
       { icon: "⇅", name: "导入导出", url: "/pages/settings/import-export", perm: "settings:read" },
       { icon: "🗄️", name: "备份与同步", url: "/pages/settings/backup", perm: "settings:read" },

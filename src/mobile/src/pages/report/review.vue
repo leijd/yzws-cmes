@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="报工审批" />
   <view class="page">
     <view v-if="!loading && !items.length" class="empty">没有待审批的报工</view>
 

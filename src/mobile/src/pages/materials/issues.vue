@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="领料管理" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">领料管理</view>

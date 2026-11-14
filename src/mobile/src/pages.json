@@ -45,202 +45,285 @@
 		{
 			"path": "pages/workbench/workbench",
 			"style": {
-				"navigationBarTitleText": "工作台"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/me/me",
 			"style": {
-				"navigationBarTitleText": "我的"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/report/scan",
 			"style": {
-				"navigationBarTitleText": "扫码派工/报工"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/report/mine",
 			"style": {
-				"navigationBarTitleText": "我的报工"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/report/review",
 			"style": {
-				"navigationBarTitleText": "报工审批"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/stats/output",
 			"style": {
-				"navigationBarTitleText": "产量查询"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/stats/piecework",
 			"style": {
-				"navigationBarTitleText": "我的计件"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/notify/list",
 			"style": {
-				"navigationBarTitleText": "生产通知"
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/notify/detail",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/notify/sensitive-apply",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/notify/sensitive-requests",
+			"style": {
+				"navigationStyle": "custom",
+				"enablePullDownRefresh": true
 			}
 		},
 		{
 			"path": "pages/payroll/list",
 			"style": {
-				"navigationBarTitleText": "工资单"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/payroll/detail",
 			"style": {
-				"navigationBarTitleText": "工资单详情"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/progress/styles",
 			"style": {
-				"navigationBarTitleText": "项目进度"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/progress/detail",
 			"style": {
-				"navigationBarTitleText": "项目详情"
+				"navigationStyle": "custom"
 			}
 		},
 		{
 			"path": "pages/orders/list",
-			"style": { "navigationBarTitleText": "项目与工单" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/orders/project",
-			"style": { "navigationBarTitleText": "项目详情" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/orders/workorder",
-			"style": { "navigationBarTitleText": "工单详情" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/tasks/list",
-			"style": { "navigationBarTitleText": "任务与派工" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/quality/index",
-			"style": { "navigationBarTitleText": "质检与库存" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/quality/process-inspections",
-			"style": { "navigationBarTitleText": "过程巡检" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/print/center",
-			"style": { "navigationBarTitleText": "菲票打印" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/print/labels",
-			"style": { "navigationBarTitleText": "扎标签" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/materials/receipts",
-			"style": { "navigationBarTitleText": "物料入库" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/materials/issues",
-			"style": { "navigationBarTitleText": "领料管理" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/masterdata/list",
-			"style": { "navigationBarTitleText": "基础数据" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/rework/list",
-			"style": { "navigationBarTitleText": "返工复检" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/rework/detail",
-			"style": { "navigationBarTitleText": "返工单详情" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/products/list",
-			"style": { "navigationBarTitleText": "产品与工序" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/products/detail",
-			"style": { "navigationBarTitleText": "产品详情" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/markers/list",
-			"style": { "navigationBarTitleText": "唛架管理" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/markers/detail",
-			"style": { "navigationBarTitleText": "唛架详情" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/workshops",
-			"style": { "navigationBarTitleText": "车间管理" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/lines",
-			"style": { "navigationBarTitleText": "产线管理" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/users",
-			"style": { "navigationBarTitleText": "人员与组织" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/employees",
-			"style": { "navigationBarTitleText": "员工与账号" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/dictionaries",
-			"style": { "navigationBarTitleText": "字典维护" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/profile",
-			"style": { "navigationBarTitleText": "本厂信息" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/portal",
-			"style": { "navigationBarTitleText": "门户内容" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/identity",
-			"style": { "navigationBarTitleText": "用户角色权限" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/features",
-			"style": { "navigationBarTitleText": "功能设置" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/import-export",
-			"style": { "navigationBarTitleText": "导入导出" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/backup",
-			"style": { "navigationBarTitleText": "备份与同步" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/plain-backups",
-			"style": { "navigationBarTitleText": "明文备份导出" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/settings/audit",
-			"style": { "navigationBarTitleText": "审计与字段" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/my/wages",
-			"style": { "navigationBarTitleText": "我的工资" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		},
 		{
 			"path": "pages/my/profile",
-			"style": { "navigationBarTitleText": "我的资料" }
+			"style": {
+				"navigationStyle": "custom"
+			}
 		}
 	],
 	"tabBar": {

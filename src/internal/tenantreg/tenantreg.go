@@ -760,8 +760,13 @@ func registerPlatform(api *httpapi.API) {
 		if status == "" {
 			status = "pending"
 		}
+		/* 驳回即停用（tenant.status='disabled'）：驳回记录不再作为注册申请展示，
+		 * 统一在「租户运营」列表按停用状态查看，避免同一厂同时出现在两个列表。 */
+		if status == "rejected" {
+			return httpapi.Error(http.StatusBadRequest, "REGISTRATION_REJECTED_HIDDEN", "已驳回的注册申请不再在本列表展示，请在租户运营的停用列表中查看")
+		}
 		if _, ok := registrationSet[status]; !ok {
-			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "status 只能为 pending、approved 或 rejected")
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "status 只能为 pending 或 approved")
 		}
 		rows, err := api.DB.Query(r.Context(), `SELECT t.id,t.code,t.name,t.short_code,COALESCE(t.contact_name,''),
 			COALESCE(t.contact_phone,''),COALESCE(t.contact_wechat,''),COALESCE(t.contact_qq,''),COALESCE(t.contact_alipay,''),
@@ -965,6 +970,10 @@ func registerPlatform(api *httpapi.API) {
 					customerType, now, p.AdminID, plan.AdminLogin, plan.Verifier, plan.EmployeeID, tenantID); err != nil {
 					return err
 				}
+				/* 订阅行 id 两库必须一致：UK(tenant_id) 已存在时复用该行 id，只有两侧都没有时才新生成。
+				 * 否则某一侧缺行（如注册期行未同步）时会以新 id 插入，与另一侧已有的不同 id 行在
+				 * UK(tenant_id) 上并存，增量补偿每轮撞 23505，永不收敛。 */
+				subID := existingSubscriptionID(ctx, tx, tenantID)
 				if isTrial {
 					/* 体验订阅：审批通过才正式开始 30 天，功能点亮进度保留。 */
 					trialEnds := now + int64((30*24*time.Hour)/time.Microsecond)
@@ -974,7 +983,7 @@ func registerPlatform(api *httpapi.API) {
 						ON CONFLICT(tenant_id) DO UPDATE SET edition=EXCLUDED.edition,user_limit=EXCLUDED.user_limit,
 						customer_type='trial',status='trial',trial_ends_at=EXCLUDED.trial_ends_at,activated_at=EXCLUDED.activated_at,
 						updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_subscription.version+1`,
-						platform.ID(), tenantID, in.Edition, in.UserLimit, trialEnds, now, p.AdminID); err != nil {
+						subID, tenantID, in.Edition, in.UserLimit, trialEnds, now, p.AdminID); err != nil {
 						return err
 					}
 					/* 管理员员工档案回填注册手机号：微信扫码/短信登录都按该手机号识别到管理员。
@@ -1017,7 +1026,7 @@ func registerPlatform(api *httpapi.API) {
 					customer_type='paid',status='active',activated_at=EXCLUDED.activated_at,
 					features_confirmed_by=EXCLUDED.features_confirmed_by,features_confirmed_at=EXCLUDED.features_confirmed_at,
 					updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_subscription.version+1`,
-					platform.ID(), tenantID, in.Edition, in.UserLimit, now, "platform:"+p.AdminID)
+					subID, tenantID, in.Edition, in.UserLimit, now, "platform:"+p.AdminID)
 			},
 			"crypto_key": func(ctx context.Context, tx *dualwrite.Tx) error {
 				/* DEK 与盲索引密钥同版本成对发行（与 IssueKeys 口径一致）：体验厂管理员

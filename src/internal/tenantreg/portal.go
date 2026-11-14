@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -39,15 +42,51 @@ func tenantLogoURL(code string, version int64) string {
 	return "/api/v1/public/tenant-logo?code=" + url.QueryEscape(code) + "&v=" + strconv.FormatInt(version, 10)
 }
 
-/* 按文件头识别 logo 格式：仅允许 PNG 与 GIF */
+/* 按文件头识别 logo 格式：PNG / JPEG / GIF（手机相册多为 JPG，必须支持） */
 func tenantLogoContentType(data []byte) string {
 	switch {
 	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
 		return "image/png"
+	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}):
+		return "image/jpeg"
 	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
 		return "image/gif"
 	}
 	return ""
+}
+
+/* extractLogoPayload 兼容两种提交方式：
+ * - 网页版 fetch：raw body 就是图片二进制（Content-Type: image/png 等），原样返回
+ * - 移动端 uni.uploadFile：multipart/form-data，取 name="file"（或任意带文件名的）part 内容
+ * 解析只依赖内存中的 raw，不产生临时文件。 */
+func extractLogoPayload(raw []byte, contentType string) ([]byte, error) {
+	if !strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return raw, nil
+	}
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil || params["boundary"] == "" {
+		return nil, fmt.Errorf("上传数据格式不正确，请重新选择 logo")
+	}
+	mr := multipart.NewReader(bytes.NewReader(raw), params["boundary"])
+	for {
+		part, err := mr.NextPart()
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("请选择要上传的 logo 文件")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("上传数据解析失败，请重新选择 logo")
+		}
+		if part.FormName() != "file" && part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
+		partData, err := io.ReadAll(io.LimitReader(part, tenantLogoMaxBytes+1))
+		_ = part.Close()
+		if err != nil {
+			return nil, fmt.Errorf("logo 文件读取失败，请重新选择")
+		}
+		return partData, nil
+	}
 }
 
 func registerTenantPortal(api *httpapi.API) {
@@ -337,8 +376,13 @@ func registerTenantPortal(api *httpapi.API) {
 		if !isAdmin && !p.Permissions["settings:write"] {
 			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "仅本厂管理员可上传企业 logo")
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, tenantLogoMaxBytes)
-		data, readErr := io.ReadAll(r.Body)
+		/* 两种提交方式：
+		 * - 网页版 fetch：raw body 就是图片二进制（Content-Type: image/png 等）
+		 * - 移动端 uni.uploadFile：multipart/form-data，文件在 name="file" 的 part 里
+		 * multipart 边界与头部有几百字节开销，读取上限放宽 4KB，最终仍按图片本体 ≤500KB 校验。 */
+		const multipartOverhead = 4096
+		r.Body = http.MaxBytesReader(w, r.Body, tenantLogoMaxBytes+multipartOverhead)
+		raw, readErr := io.ReadAll(r.Body)
 		_ = r.Body.Close()
 		if readErr != nil {
 			var maxErr *http.MaxBytesError
@@ -346,6 +390,11 @@ func registerTenantPortal(api *httpapi.API) {
 				return httpapi.Error(http.StatusRequestEntityTooLarge, "LOGO_TOO_LARGE", "logo 文件不能超过 500KB")
 			}
 			return httpapi.Error(http.StatusBadRequest, "INVALID_LOGO", "logo 文件读取失败，请重新选择")
+		}
+
+		data, extractErr := extractLogoPayload(raw, r.Header.Get("Content-Type"))
+		if extractErr != nil {
+			return httpapi.Error(http.StatusBadRequest, "INVALID_LOGO", extractErr.Error())
 		}
 		if len(data) == 0 {
 			return httpapi.Error(http.StatusBadRequest, "INVALID_LOGO", "请选择要上传的 logo 文件")
@@ -355,7 +404,7 @@ func registerTenantPortal(api *httpapi.API) {
 		}
 		contentType := tenantLogoContentType(data)
 		if contentType == "" {
-			return httpapi.Error(http.StatusBadRequest, "UNSUPPORTED_LOGO", "logo 仅支持 PNG 或 GIF 格式")
+			return httpapi.Error(http.StatusBadRequest, "UNSUPPORTED_LOGO", "logo 仅支持 PNG、JPG 或 GIF 格式")
 		}
 		var code string
 		if err := api.DB.QueryRow(r.Context(), `SELECT code FROM tenant WHERE id=$1`, p.TenantID).Scan(&code); err != nil {

@@ -59,6 +59,12 @@ func Error(status int, code, message string) *AppError {
 	return &AppError{Status: status, Code: code, Message: message}
 }
 
+/* RetryableError 临时性失败（依赖不可用、锁冲突、连接中断）：语义是"稍后原样重试即可"，
+ * 响应体 retryable=true，前端可自动重试而不必让用户改数据。 */
+func RetryableError(status int, code, message string) *AppError {
+	return &AppError{Status: status, Code: code, Message: message, Retryable: true}
+}
+
 func New(db *pgxpool.Pool, authService *auth.Service, cfg config.Config) *API {
 	api := &API{DB: db, Auth: authService, Config: cfg, SMS: sms.NewRouter(cfg.SMS), mux: http.NewServeMux()}
 	api.Public("GET /api/v1/system/health/live", func(w http.ResponseWriter, r *http.Request) error {

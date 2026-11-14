@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="字典维护" />
   <view class="page">
     <view class="chips">
       <view

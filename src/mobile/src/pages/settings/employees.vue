@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="员工与账号" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">员工与账号</view>
@@ -34,6 +35,7 @@
         <button v-if="!e.has_account && canWrite" class="btn btn-solid btn-sm" @click="openAccount(e)">开通账号</button>
         <button v-if="e.has_account && canWrite" class="btn btn-outline btn-sm" @click="resetPassword(e)">重置密码</button>
         <button v-if="e.status === 'active' && canWrite" class="btn btn-danger btn-sm" @click="disable(e)">停用</button>
+        <button v-if="!auth.hasPerm('identity:write')" class="btn btn-outline btn-sm" @click="applyView(e)">申请查看敏感信息</button>
       </view>
     </view>
 
@@ -131,7 +133,7 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { onLoad } from "@dcloudio/uni-app";
-import { request } from "../../utils/request";
+import { request, uuid } from "../../utils/request";
 import { auth } from "../../store/auth";
 
 interface EmployeeItem {
@@ -146,6 +148,7 @@ const items = ref<EmployeeItem[]>([]);
 const roles = ref<RoleItem[]>([]);
 const loading = ref(false);
 const saving = ref(false);
+const createKey = ref("");
 const keyword = ref("");
 const status = ref("");
 const statusOptions = [
@@ -195,6 +198,13 @@ function reload() {
   load();
 }
 
+/* 非租户管理员：发起敏感信息查看授权码申请，审批结果/演示授权码在申请页展示 */
+function applyView(e: EmployeeItem) {
+  uni.navigateTo({
+    url: `/pages/notify/sensitive-apply?employee_id=${encodeURIComponent(e.id)}&employee_name=${encodeURIComponent(e.name || "")}&field_label=${encodeURIComponent("员工全部敏感信息")}`,
+  });
+}
+
 async function loadRoles() {
   try {
     const res = await request<{ items: RoleItem[] }>("/roles", { silent: true });
@@ -209,6 +219,8 @@ function openCreate() {
   genderIndex.value = 0;
   payModeIndex.value = 0;
   formError.value = "";
+  /* 一次建档一个幂等键：连点/网络重试复用同键，服务端重放首次响应，不会多建员工 */
+  createKey.value = uuid();
   sheet.value = true;
 }
 
@@ -245,7 +257,7 @@ async function save() {
       await request(`/employees/${f.id}`, { method: "PATCH", data });
     } else {
       if (f.employee_no) data.employee_no = f.employee_no;
-      await request("/employees", { method: "POST", data, idempotency: true });
+      await request("/employees", { method: "POST", data, idempotency: true, idempotencyKey: createKey.value || undefined });
     }
     uni.showToast({ title: "已保存", icon: "none" });
     sheet.value = false;

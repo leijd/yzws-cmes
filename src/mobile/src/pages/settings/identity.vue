@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="用户角色权限" />
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">用户角色权限</view>

@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="我的" />
   <view class="page">
     <view class="profile">
       <view class="avatar">{{ avatarText }}</view>

@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="我的报工" />
   <view class="page">
     <view class="tabs">
       <view

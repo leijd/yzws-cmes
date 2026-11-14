@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="产量查询" />
   <view class="page">
     <view class="chips">
       <view v-for="m in metrics" :key="m.value" class="chip" :class="{ on: metric === m.value }" @click="metric = m.value; load()">{{ m.label }}</view>

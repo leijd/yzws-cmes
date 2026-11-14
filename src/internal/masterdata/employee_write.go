@@ -24,6 +24,13 @@ func createEmployeeSecure(api *httpapi.API, w http.ResponseWriter, r *http.Reque
 			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "缺少必填字段："+field)
 		}
 	}
+	/* 幂等键必需：双击/重试不得建出第二个员工（见 idempotency.go） */
+	idemKey, err := httpapi.IdempotencyKey(r)
+	if err != nil {
+		return err
+	}
+	requestHash := idempotencyHash(input)
+
 	id, now := platform.ID(), platform.Now()
 
 	/* 手机号：规范化 + 盲索引 + 本厂查重（phone_hash 唯一性依赖这里维护） */
@@ -36,12 +43,12 @@ func createEmployeeSecure(api *httpapi.API, w http.ResponseWriter, r *http.Reque
 		if phone != "" && api.Crypto != nil {
 			h, err := api.Crypto.PhoneHash(r.Context(), p.TenantID, "employee.phone", phone)
 			if err != nil {
-				return err
+				return writeFailure(err, "crypto")
 			}
 			phoneHash = h
 			var dup bool
 			if err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM employee WHERE tenant_id=$1 AND phone_hash=$2)`, p.TenantID, phoneHash).Scan(&dup); err != nil {
-				return err
+				return writeFailure(err, "plain")
 			}
 			if dup {
 				return httpapi.Error(http.StatusConflict, "DUPLICATE_PHONE", "该手机号已被本厂其他人员使用")
@@ -73,27 +80,36 @@ func createEmployeeSecure(api *httpapi.API, w http.ResponseWriter, r *http.Reque
 		placeholders[i] = fmt.Sprintf("$%d", i+1)
 	}
 	insertSQL := fmt.Sprintf("INSERT INTO employee(%s) VALUES(%s)", strings.Join(columns, ","), strings.Join(placeholders, ","))
+	response := map[string]any{"id": id, "version": 1, "status": "active", "sync_status": "pending"}
 
 	/* 未配置双写（单库旧部署）：保持旧的单库直写行为 */
 	if api.Writer == nil || api.Store == nil || api.Store.Plain == nil || api.Store.Secure == nil {
 		tx, err := api.DB.Begin(r.Context())
 		if err != nil {
-			return err
+			return writeFailure(err, "plain")
 		}
 		defer tx.Rollback(r.Context())
+		if replay, replayed, err := beginIdempotent(r.Context(), tx, p.TenantID, idemKey, "employee.create", id, requestHash); err != nil {
+			return err
+		} else if replayed {
+			return httpapi.JSON(w, http.StatusOK, replay)
+		}
 		if _, err := tx.Exec(r.Context(), insertSQL, valuesPlain...); err != nil {
-			return httpapi.Error(http.StatusConflict, "DUPLICATE_OR_INVALID_REFERENCE", "编码重复或引用数据无效")
+			return writeFailure(err, "plain")
 		}
 		if err := syncEmployeeSkills(r.Context(), tx, p.TenantID, id, input["skill_process_ids"]); err != nil {
-			return err
+			return writeFailure(err, "plain")
 		}
 		if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "create", "employee", id, nil, input, ""); err != nil {
 			return err
 		}
-		if err := tx.Commit(r.Context()); err != nil {
+		if err := completeIdempotent(r.Context(), tx, p.TenantID, idemKey, response); err != nil {
 			return err
 		}
-		return httpapi.JSON(w, http.StatusCreated, map[string]any{"id": id, "version": 1, "status": "active", "sync_status": "pending"})
+		if err := tx.Commit(r.Context()); err != nil {
+			return writeFailure(err, "plain")
+		}
+		return httpapi.JSON(w, http.StatusCreated, response)
 	}
 
 	/* 敏感列在密文侧替换为 enc:v1 信封（明文侧保持明文） */
@@ -104,7 +120,8 @@ func createEmployeeSecure(api *httpapi.API, w http.ResponseWriter, r *http.Reque
 	}
 	enc, err := rc.ForSecure(r.Context(), p.TenantID, "employee", id, vals)
 	if err != nil {
-		return err
+		/* 信封加密失败多为密钥服务不可用：可重试，不能报成数据重复 */
+		return writeFailure(err, "crypto")
 	}
 	for i, col := range columns {
 		if v, ok := enc[col]; ok {
@@ -114,28 +131,40 @@ func createEmployeeSecure(api *httpapi.API, w http.ResponseWriter, r *http.Reque
 
 	dwtx, err := api.Writer.Begin(r.Context(), p.TenantID)
 	if err != nil {
-		return err
+		return writeFailure(err, "dualwrite")
 	}
 	defer dwtx.Rollback(r.Context())
 	dwtx.MarkAggregate("employee", id)
+
+	/* 幂等占位只写审计侧：command_request 不参与双库复制 */
+	idemTx := dwtx.Secure()
+	if idemTx == nil {
+		idemTx = dwtx.Plain()
+	}
+	if replay, replayed, err := beginIdempotent(r.Context(), idemTx, p.TenantID, idemKey, "employee.create", id, requestHash); err != nil {
+		return err
+	} else if replayed {
+		return httpapi.JSON(w, http.StatusOK, replay)
+	}
+
 	if api.Store.WriteMode() != "secure_only" {
 		if _, err := dwtx.Plain().Exec(r.Context(), insertSQL, valuesPlain...); err != nil {
-			return httpapi.Error(http.StatusConflict, "DUPLICATE_OR_INVALID_REFERENCE", "编码重复或引用数据无效")
+			return writeFailure(err, "plain")
 		}
 	}
 	if api.Store.WriteMode() != "plain_only" {
 		if _, err := dwtx.Secure().Exec(r.Context(), insertSQL, valuesSecure...); err != nil {
-			return httpapi.Error(http.StatusConflict, "DUPLICATE_OR_INVALID_REFERENCE", "编码重复或引用数据无效")
+			return writeFailure(err, "secure")
 		}
 	}
 	if dwtx.Plain() != nil {
 		if err := syncEmployeeSkills(r.Context(), dwtx.Plain(), p.TenantID, id, input["skill_process_ids"]); err != nil {
-			return err
+			return writeFailure(err, "plain")
 		}
 	}
 	if dwtx.Secure() != nil {
 		if err := syncEmployeeSkills(r.Context(), dwtx.Secure(), p.TenantID, id, input["skill_process_ids"]); err != nil {
-			return err
+			return writeFailure(err, "secure")
 		}
 	}
 	auditTx := dwtx.Secure()
@@ -145,8 +174,11 @@ func createEmployeeSecure(api *httpapi.API, w http.ResponseWriter, r *http.Reque
 	if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "create", "employee", id, nil, input, ""); err != nil {
 		return err
 	}
-	if err := dwtx.Commit(r.Context()); err != nil {
+	if err := completeIdempotent(r.Context(), idemTx, p.TenantID, idemKey, response); err != nil {
 		return err
 	}
-	return httpapi.JSON(w, http.StatusCreated, map[string]any{"id": id, "version": 1, "status": "active", "sync_status": "pending"})
+	if err := dwtx.Commit(r.Context()); err != nil {
+		return writeFailure(err, "dualwrite")
+	}
+	return httpapi.JSON(w, http.StatusCreated, response)
 }

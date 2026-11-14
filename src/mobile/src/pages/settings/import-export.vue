@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="导入导出" />
   <view class="page">
     <view class="chips">
       <view class="chip" :class="{ on: tab === 'export' }" @click="tab = 'export'; load()">导出</view>
@@ -139,16 +140,19 @@ async function createExport() {
 
 function downloadExport(j: ExportJob) {
   const url = `${API_BASE_URL}/api/v1/export-jobs/${j.id}/content`;
-  // H5：新窗口打开下载链接；App：提示复制链接
-  try {
-    (window as unknown as { open: (u: string) => void }).open(url);
-  } catch {
-    uni.setClipboardData({ data: url });
-    uni.showToast({ title: "链接已复制，请在浏览器打开下载", icon: "none" });
-  }
+  // #ifdef H5
+  /* H5：新窗口打开下载链接 */
+  (window as unknown as { open: (u: string) => void }).open(url);
+  // #endif
+  // #ifndef H5
+  /* App：没有浏览器下载入口，复制链接后到系统浏览器打开 */
+  uni.setClipboardData({ data: url });
+  uni.showToast({ title: "链接已复制，请在浏览器打开下载", icon: "none" });
+  // #endif
 }
 
 function chooseFile() {
+  // #ifdef H5
   uni.chooseFile({
     count: 1,
     extension: [".csv"],
@@ -161,6 +165,15 @@ function chooseFile() {
     },
     fail: () => uni.showToast({ title: "未选择文件", icon: "none" }),
   });
+  // #endif
+  // #ifndef H5
+  /* App 端不支持 uni.chooseFile（无法唤起系统文件选择器），引导到网页版完成导入 */
+  uni.showModal({
+    title: "请在网页版操作",
+    content: "App 端暂不支持选择 CSV 文件，员工导入请在电脑浏览器打开网页版完成。",
+    showCancel: false,
+  });
+  // #endif
 }
 
 function uploadCsv(path: string) {

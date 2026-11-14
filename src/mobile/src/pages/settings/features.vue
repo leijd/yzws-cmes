@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="功能设置" />
   <view class="page">
     <view class="title" style="margin-bottom: 20rpx">功能设置</view>
     <view v-if="loading && !items.length" class="empty">加载中…</view>

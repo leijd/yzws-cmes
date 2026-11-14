@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="我的计件" />
   <view class="page">
     <view class="summary card">
       <view class="summary-item">

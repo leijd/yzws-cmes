@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="项目详情" />
   <view class="page">
     <view v-if="detail" class="card head">
       <view class="row between">

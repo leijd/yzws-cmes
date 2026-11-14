@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="项目进度" />
   <view class="page">
     <view class="search">
       <input

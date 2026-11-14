@@ -19,6 +19,8 @@ import (
  *   - 明文库版本较新 → 按主键更新（SQL 侧带 version 守卫，禁止覆盖较新版本）；
  *   - 密文库有、明文库无 → 记 last_error 提示人工核对，不自动删除。
  * 差异处理写 dual_write_journal(source_db='plain', state='committed') 留痕，不保存业务内容。
+ * 单行失败（唯一约束/FK/加密失败等）只跳过该行并计数，不中断整表——失败行仍留在差异集合，
+ * 下一轮补偿自然重试；避免一行异常导致整表长期停更、且每轮刷屏。
  */
 func (w *Writer) CatchUp(ctx context.Context, rowCrypto *RowCrypto) (int, error) {
 	if w.store.Secure == nil {
@@ -42,19 +44,46 @@ func (w *Writer) CatchUp(ctx context.Context, rowCrypto *RowCrypto) (int, error)
 		return 0, err
 	}
 	skipped := map[string]bool{}
-	synced := 0
+	synced, failed := 0, 0
 	for _, table := range tables {
-		n, err := w.catchUpTable(ctx, table, rowCrypto, secureTenants, plainTenants, skipped)
+		if err := ctx.Err(); err != nil {
+			log.Printf("dualwrite catchup: interrupted after %d row(s) synced, %d row(s) failed", synced, failed)
+			return synced, err
+		}
+		n, f, err := w.catchUpTable(ctx, table, rowCrypto, secureTenants, plainTenants, skipped)
+		synced += n
+		failed += f
 		if err != nil {
 			log.Printf("dualwrite catchup: table %s: %v", table, err)
 			continue
 		}
-		synced += n
+		if f > 0 {
+			log.Printf("dualwrite catchup: table %s: %d row(s) failed, left for next round", table, f)
+		}
 	}
 	if len(skipped) > 0 {
 		log.Printf("dualwrite catchup: %d tenant(s) skipped (root row not in secure yet, e.g. pending approval)", len(skipped))
 	}
+	if failed > 0 {
+		log.Printf("dualwrite catchup: %d row(s) synced, %d row(s) failed (will retry next round)", synced, failed)
+	}
 	return synced, nil
+}
+
+/* rowFailure 单行补偿失败的计数与明细输出：每表最多输出 maxRowFailureDetail 条明细，
+ * 其余仅计数，避免差异较大时每轮刷屏。 */
+type rowFailure struct {
+	limit int
+	count int
+}
+
+const maxRowFailureDetail = 3
+
+func (f *rowFailure) report(table, key string, err error) {
+	f.count++
+	if f.count <= f.limit {
+		log.Printf("dualwrite catchup: table %s row %s skipped: %s", table, key, sanitizeError(err))
+	}
 }
 
 func tenantIDSet(ctx context.Context, db *pgxpool.Pool) (map[string]bool, error) {
@@ -205,18 +234,18 @@ func loadVersions(ctx context.Context, db *pgxpool.Pool, table string, shape *ta
 	return out, rows.Err()
 }
 
-func (w *Writer) catchUpTable(ctx context.Context, table string, rowCrypto *RowCrypto, secureTenants, plainTenants map[string]bool, skipped map[string]bool) (int, error) {
+func (w *Writer) catchUpTable(ctx context.Context, table string, rowCrypto *RowCrypto, secureTenants, plainTenants map[string]bool, skipped map[string]bool) (int, int, error) {
 	shape, err := detectShape(ctx, w.store.Plain, table)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	plainVersions, err := loadVersions(ctx, w.store.Plain, table, shape)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	secureVersions, err := loadVersions(ctx, w.store.Secure, table, shape)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	/* 需要复制/更新的冲突键；比较口径：优先 version，无 version 用 updated_at，都没有则只补缺失行 */
 	newer := func(pv, sv rowVersion) bool {
@@ -243,7 +272,8 @@ func (w *Writer) catchUpTable(ctx context.Context, table string, rowCrypto *RowC
 	if orphans > 0 {
 		log.Printf("dualwrite catchup: table %s has %d row(s) only in secure database, manual reconcile required", table, orphans)
 	}
-	synced := 0
+	synced, failed := 0, 0
+	failures := &rowFailure{limit: maxRowFailureDetail}
 	batch := func(keys []string, update bool) error {
 		const batchSize = 200
 		for start := 0; start < len(keys); start += batchSize {
@@ -251,31 +281,37 @@ func (w *Writer) catchUpTable(ctx context.Context, table string, rowCrypto *RowC
 			if end > len(keys) {
 				end = len(keys)
 			}
-			n, err := w.copyRows(ctx, table, keys[start:end], update, rowCrypto, shape, secureTenants, skipped)
+			n, f, err := w.copyRows(ctx, table, keys[start:end], update, rowCrypto, shape, secureTenants, skipped, failures)
+			synced += n
+			failed += f
 			if err != nil {
 				return err
 			}
-			synced += n
 		}
 		return nil
 	}
 	if err := batch(insertKeys, false); err != nil {
-		return synced, err
+		return synced, failed, err
 	}
 	if err := batch(updateKeys, true); err != nil {
-		return synced, err
+		return synced, failed, err
 	}
-	return synced, nil
+	return synced, failed, nil
 }
 
 /* copyRows 按冲突键从明文库读行写入密文库；敏感表先加密；version/updated_at 守卫禁止旧值覆盖新值。
- * 目标库缺租户根行的行跳过（待根行就绪后下一轮自然同步）；tenant 根行缺 DEK 时同样跳过。 */
-func (w *Writer) copyRows(ctx context.Context, table string, keys []string, update bool, rowCrypto *RowCrypto, shape *tableShape, secureTenants map[string]bool, skipped map[string]bool) (int, error) {
+ * 目标库缺租户根行的行跳过（待根行就绪后下一轮自然同步）；tenant 根行缺 DEK 时同样跳过。
+ * 单行读/加密/写入失败只跳过该行并计数（记录到 failures），不中断整批：
+ * 差异集合每轮重算，失败行下一轮自动重试；仅上下文取消/超时才终止。 */
+func (w *Writer) copyRows(ctx context.Context, table string, keys []string, update bool, rowCrypto *RowCrypto, shape *tableShape, secureTenants map[string]bool, skipped map[string]bool, failures *rowFailure) (int, int, error) {
 	if len(keys) == 0 {
-		return 0, nil
+		return 0, 0, nil
 	}
-	synced := 0
+	synced, failed := 0, 0
 	for _, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return synced, failed, err
+		}
 		pkVals := splitKeyN(key, len(shape.PK))
 		where := make([]string, len(shape.PK))
 		args := make([]any, len(shape.PK))
@@ -285,12 +321,22 @@ func (w *Writer) copyRows(ctx context.Context, table string, keys []string, upda
 		}
 		rows, err := w.store.Plain.Query(ctx, fmt.Sprintf(`SELECT * FROM "%s" WHERE %s`, table, stringsJoin(where, " AND ")), args...)
 		if err != nil {
-			return synced, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return synced, failed, ctxErr
+			}
+			failures.report(table, key, err)
+			failed++
+			continue
 		}
 		values, fields, err := readOneRow(rows)
 		rows.Close()
 		if err != nil {
-			return synced, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return synced, failed, ctxErr
+			}
+			failures.report(table, key, err)
+			failed++
+			continue
 		}
 		row := map[string]any{}
 		columns := make([]string, len(fields))
@@ -315,16 +361,26 @@ func (w *Writer) copyRows(ctx context.Context, table string, keys []string, upda
 					skipped[tenantID] = true
 					continue
 				}
-				return synced, fmt.Errorf("encrypt %s %s: %w", table, key, err)
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return synced, failed, ctxErr
+				}
+				failures.report(table, key, fmt.Errorf("encrypt: %w", err))
+				failed++
+				continue
 			}
 			row = encrypted
 		}
 		if err := upsertSecureRow(ctx, w.store.Secure, table, columns, row, update, shape); err != nil {
-			return synced, err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return synced, failed, ctxErr
+			}
+			failures.report(table, key, err)
+			failed++
+			continue
 		}
 		synced++
 	}
-	return synced, nil
+	return synced, failed, nil
 }
 
 func readOneRow(rows pgx.Rows) ([]any, []pgconn.FieldDescription, error) {

@@ -27,7 +27,7 @@ import (
 
 func main() {
 	configPath := flag.String("config", "", "指定配置文件路径（该文件中的配置优先于环境变量；也可用 CLOTHP_CONFIG 环境变量指定）")
-	datatoolCmd := flag.String("datatool", "", "数据互转工具：convert=全量转换；repair-phone-hash=修复手机号盲索引（执行后退出，需配置 databases.secure）")
+	datatoolCmd := flag.String("datatool", "", "数据互转工具：convert=全量转换；repair-phone-hash=修复手机号盲索引；repair-permission-divergence=修复两库权限点/授权主键分叉；align-subscription-keys=对齐订阅表业务键分叉；rewrap-local-master=用新口令重包租户密钥（读 CLOTHP_NEW_JWT_SECRET）；执行后退出，需配置 databases.secure")
 	datatoolDirection := flag.String("direction", "plain2secure", "convert 方向：plain2secure（明文→密文）| secure2plain（密文→明文）")
 	datatoolDryRun := flag.Bool("dry-run", true, "convert/repair-phone-hash 仅预检不落库；确认行数后用 -dry-run=false 执行")
 	flag.Parse()
@@ -90,6 +90,35 @@ func main() {
 	}
 	if *datatoolCmd == "repair-phone-hash" {
 		result, err := datatool.RepairPhoneHash(ctx, store, cryptoSvc, *datatoolDryRun)
+		datatool.LogResult(result)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *datatoolCmd == "repair-permission-divergence" {
+		result, err := datatool.RepairPermissionDivergence(ctx, store, *datatoolDryRun)
+		datatool.LogResult(result)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *datatoolCmd == "align-subscription-keys" {
+		result, err := datatool.AlignSubscriptionKeys(ctx, store, *datatoolDryRun)
+		datatool.LogResult(result)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if *datatoolCmd == "rewrap-local-master" {
+		/* 新口令只从环境变量读取，避免出现在命令行历史/进程列表 */
+		newSecret := os.Getenv("CLOTHP_NEW_JWT_SECRET")
+		if newSecret == "" {
+			log.Fatal("rewrap-local-master: set CLOTHP_NEW_JWT_SECRET to the new secret")
+		}
+		result, err := datatool.RewrapLocalMaster(ctx, store, cfg.JWTSecret, newSecret, *datatoolDryRun)
 		datatool.LogResult(result)
 		if err != nil {
 			log.Fatal(err)

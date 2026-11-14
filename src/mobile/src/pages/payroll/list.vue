@@ -1,4 +1,5 @@
 <template>
+  <BrandNavBar title="工资单" />
   <view class="page">
     <view class="filter-bar">
       <view class="period">
