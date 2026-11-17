@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -81,6 +82,80 @@ func maskTrialPhone(phone string) string {
 /* IssuePhoneLoginTicket 签发一次性手机登录票据（与 /auth/trial/verify 签发的票据同库同规则，
  * /auth/phone-login 与 /public/trial-enter 均可消费）。
  * 供统一入口（如体验注册页）在确认手机号归属后，直接引导其进入名下制衣厂，无需二次收码。 */
+/* trialTenantHit 命中的体验厂（matchTrialTenants 返回项）。 */
+type trialTenantHit struct {
+	id, code, name, shortCode, adminLogin, regStatus string
+	trialEnds                                        int64
+}
+
+/* matchTrialTenants 返回该手机号命中的全部启用且审批通过的体验厂（按注册时间倒序）：
+ * 注册联系电话命中，或本厂任意启用账号的员工手机号/登录名命中。
+ * 盲索引模式按候选厂逐个计算 phone_hash 匹配；明文库模式等值比较。
+ * 供 /auth/trial/verify 登录选厂与 /auth/my-factories 切换厂列表共用。 */
+func matchTrialTenants(ctx context.Context, a *API, phone string) ([]trialTenantHit, error) {
+	var hits []trialTenantHit
+	candRows, err := a.DB.Query(ctx, `SELECT t.id,t.code,t.name,COALESCE(t.short_code,''),COALESCE(t.admin_login_name,''),COALESCE(s.trial_ends_at,0),t.registration_status
+		FROM tenant t LEFT JOIN tenant_subscription s ON s.tenant_id=t.id
+		WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status='approved'
+		ORDER BY t.registered_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	var cands []trialTenantHit
+	for candRows.Next() {
+		var c trialTenantHit
+		if err := candRows.Scan(&c.id, &c.code, &c.name, &c.shortCode, &c.adminLogin, &c.trialEnds, &c.regStatus); err != nil {
+			candRows.Close()
+			return nil, err
+		}
+		cands = append(cands, c)
+	}
+	candRows.Close()
+	if err := candRows.Err(); err != nil {
+		return nil, err
+	}
+	if phoneCrypto := a.phoneCrypto(); phoneCrypto != nil {
+		/* 盲索引模式：注册联系电话/员工手机号列在密文库为 enc:v1 密文，等值比较永远
+		 * 匹配不到；按候选体验厂逐个计算本厂哈希匹配 phone_hash（体验厂数量少，可接受）。 */
+		for _, c := range cands {
+			contactHash, errH := phoneCrypto.PhoneHash(ctx, c.id, "tenant.contact_phone", phone)
+			if errH != nil {
+				return nil, errH
+			}
+			empHash, errH2 := phoneCrypto.PhoneHash(ctx, c.id, "employee.phone", phone)
+			if errH2 != nil {
+				return nil, errH2
+			}
+			var hit bool
+			_ = a.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1 AND (contact_phone_hash=$2 OR contact_phone=$3))`, c.id, contactHash, phone).Scan(&hit)
+			if !hit {
+				/* phone_hash 优先；明文兜底兼容历史明文行（早期写入路径未加密/未建盲索引），
+				 * 密文行等值比较自然不中，不会绕过盲索引。 */
+				_ = a.DB.QueryRow(ctx, `SELECT EXISTS(
+						SELECT 1 FROM user_account u
+						LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
+						WHERE u.tenant_id=$1 AND u.status='active' AND (e.phone_hash=$3 OR e.phone=$4 OR u.login_name=$2))`, c.id, phone, empHash, phone).Scan(&hit)
+			}
+			if hit {
+				hits = append(hits, c)
+			}
+		}
+		return hits, nil
+	}
+	/* 明文库模式：明文等值比较 */
+	for _, c := range cands {
+		var hit bool
+		_ = a.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1 AND (contact_phone=$2 OR EXISTS(
+				SELECT 1 FROM user_account u
+				LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
+				WHERE u.tenant_id=$1 AND u.status='active' AND (e.phone=$2 OR u.login_name=$2))))`, c.id, phone).Scan(&hit)
+		if hit {
+			hits = append(hits, c)
+		}
+	}
+	return hits, nil
+}
+
 func (a *API) IssuePhoneLoginTicket(phone string) (string, error) {
 	ticket, err := trialRandomToken()
 	if err != nil {
@@ -198,88 +273,33 @@ func (a *API) RegisterTrialRoutes() {
 		delete(trialChallenges, phone)
 		trialMu.Unlock()
 
-		/* 手机号关联的所有【已启用】厂：≤1 个体验厂（手机号只能占用一个体验用户）+ N 个收费制衣厂
-		 * （体验厂：注册联系电话命中，或本厂任意启用账号的员工手机号/登录名命中——厂长等
-		 *   非管理员员工由此识别，进入时按本人账号签发会话；兼容旧数据租户；
-		 *   收费厂：员工档案绑定该手机号，或该厂「制衣厂信息」的联系电话即该手机号），前端据此决定直接进入门户还是弹出选厂列表。
+		/* 手机号关联的所有【已启用】厂：N 个体验厂 + N 个收费制衣厂
+		 * （体验厂：注册联系电话命中，或本厂任意启用账号的员工手机号/登录名命中——同一手机号
+		 *   可在多家体验厂登记员工，全部返回由用户选取；收费厂：员工档案绑定该手机号，或该厂
+		 *   「制衣厂信息」的联系电话即该手机号），前端据此决定直接进入门户还是弹出选厂列表。
 		 * 只返回 status='active' 且 registration_status='approved' 的厂：待审/驳回/停用厂不得出现在手机登录列表中。 */
 		tenants := []map[string]any{}
 		var trialTenant map[string]any
 		if a.DB != nil {
 			addTrialTenant := func(tCode, tName, tShortCode, tAdminLogin string, trialEnds int64, tRegStatus string) {
-				trialTenant = map[string]any{"kind": "trial", "code": tCode, "name": tName, "short_code": tShortCode,
+				entry := map[string]any{"kind": "trial", "code": tCode, "name": tName, "short_code": tShortCode,
 					"admin_login_name": tAdminLogin, "trial_ends_at": trialEnds, "returning": true,
 					"status": tRegStatus, "registration_status": tRegStatus}
 				/* 本机保存进入令牌：体验主页点击“开始体验”即可换取管理员会话，无需再次短信验证 */
 				if entryToken, tokenErr := a.Auth.IssueTrialEntryToken(phone, tCode); tokenErr == nil {
-					trialTenant["entry_token"] = entryToken
+					entry["entry_token"] = entryToken
 				}
-				tenants = append(tenants, trialTenant)
+				tenants = append(tenants, entry)
+				if trialTenant == nil {
+					trialTenant = entry /* 兼容旧字段 result.tenant：取第一个命中的体验厂 */
+				}
 			}
-			if phoneCrypto := a.phoneCrypto(); phoneCrypto != nil {
-				/* 盲索引模式：注册联系电话/员工手机号列在密文库为 enc:v1 密文，等值比较永远
-				 * 匹配不到；按候选体验厂逐个计算本厂哈希匹配 phone_hash（体验厂数量少，可接受）。 */
-				candRows, err := a.DB.Query(r.Context(), `SELECT t.id,t.code,t.name,COALESCE(t.short_code,''),COALESCE(t.admin_login_name,''),COALESCE(s.trial_ends_at,0),t.registration_status
-					FROM tenant t LEFT JOIN tenant_subscription s ON s.tenant_id=t.id
-					WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status='approved'
-					ORDER BY t.registered_at DESC`)
-				if err != nil {
-					return err
-				}
-				type trialCand struct {
-					id, code, name, short, adminLogin, regStatus string
-					trialEnds                                    int64
-				}
-				var cands []trialCand
-				for candRows.Next() {
-					var c trialCand
-					if err := candRows.Scan(&c.id, &c.code, &c.name, &c.short, &c.adminLogin, &c.trialEnds, &c.regStatus); err != nil {
-						candRows.Close()
-						return err
-					}
-					cands = append(cands, c)
-				}
-				candRows.Close()
-				for _, c := range cands {
-					contactHash, errH := phoneCrypto.PhoneHash(r.Context(), c.id, "tenant.contact_phone", phone)
-					if errH != nil {
-						return errH
-					}
-					empHash, errH2 := phoneCrypto.PhoneHash(r.Context(), c.id, "employee.phone", phone)
-					if errH2 != nil {
-						return errH2
-					}
-					var hit bool
-					_ = a.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM tenant WHERE id=$1 AND (contact_phone_hash=$2 OR contact_phone=$3))`, c.id, contactHash, phone).Scan(&hit)
-					if !hit {
-						/* phone_hash 优先；明文兜底兼容历史明文行（早期写入路径未加密/未建盲索引），
-						 * 密文行等值比较自然不中，不会绕过盲索引。 */
-						_ = a.DB.QueryRow(r.Context(), `SELECT EXISTS(
-								SELECT 1 FROM user_account u
-								LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
-								WHERE u.tenant_id=$1 AND u.status='active' AND (e.phone_hash=$3 OR e.phone=$4 OR u.login_name=$2))`, c.id, phone, empHash, phone).Scan(&hit)
-					}
-					if hit {
-						addTrialTenant(c.code, c.name, c.short, c.adminLogin, c.trialEnds, c.regStatus)
-						break
-					}
-				}
-			} else {
-				/* 明文库模式：明文等值比较 */
-				var tCode, tName, tShortCode, tAdminLogin, tRegStatus string
-				var trialEnds int64
-				tenantErr := a.DB.QueryRow(r.Context(), `SELECT t.code,t.name,t.short_code,COALESCE(t.admin_login_name,''),COALESCE(s.trial_ends_at,0),t.registration_status
-					FROM tenant t LEFT JOIN tenant_subscription s ON s.tenant_id=t.id
-					WHERE t.customer_type='trial' AND t.status='active' AND t.registration_status='approved'
-					AND (t.contact_phone=$1 OR EXISTS(
-						SELECT 1 FROM user_account u
-						LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
-						WHERE u.tenant_id=t.id AND u.status='active' AND (e.phone=$1 OR u.login_name=$1)))
-					ORDER BY t.registered_at DESC LIMIT 1`, phone).
-					Scan(&tCode, &tName, &tShortCode, &tAdminLogin, &trialEnds, &tRegStatus)
-				if tenantErr == nil {
-					addTrialTenant(tCode, tName, tShortCode, tAdminLogin, trialEnds, tRegStatus)
-				}
+			trialHits, err := matchTrialTenants(r.Context(), a, phone)
+			if err != nil {
+				return err
+			}
+			for _, h := range trialHits {
+				addTrialTenant(h.code, h.name, h.shortCode, h.adminLogin, h.trialEnds, h.regStatus)
 			}
 			/* 收费制衣厂：员工档案绑定该手机号，或该厂「制衣厂信息」的联系电话即该手机号（对应厂管理员账号）。 */
 			if factories, err := a.Auth.PhoneTenants(r.Context(), []string{phone}, a.phoneCrypto()); err == nil {
@@ -336,17 +356,17 @@ func (a *API) RegisterTrialRoutes() {
 		trialMu.Unlock()
 
 		result, err := a.Auth.LoginByPhone(r.Context(), phone, tenantCode, input.Password, input.NodeID, a.phoneCrypto())
-		/* 首次密码错误时保留 ticket，允许用户补充密码后重试；登录成功后再作废。 */
+		/* 密码验证失败时保留 ticket，允许补充密码后重试；登录成功后再作废。 */
 		if err == nil {
 			trialMu.Lock()
 			delete(trialTickets, ticket)
 			trialMu.Unlock()
 		}
 		if errors.Is(err, auth.ErrPasswordRequired) {
-			return Error(http.StatusForbidden, "PASSWORD_REQUIRED", "该手机号在本厂首次登录，请输入厂管理员提供的密码")
+			return Error(http.StatusForbidden, "PASSWORD_REQUIRED", "该账号已开启密码验证，请输入密码")
 		}
 		if errors.Is(err, auth.ErrInvalidCredentials) {
-			return Error(http.StatusForbidden, "NO_ACCOUNT", "该手机号在此制衣厂没有绑定的账号，或首次登录密码不正确")
+			return Error(http.StatusForbidden, "NO_ACCOUNT", "该手机号在此制衣厂没有绑定的账号，或密码不正确")
 		}
 		if err != nil {
 			return err
@@ -359,7 +379,7 @@ func (a *API) RegisterTrialRoutes() {
 
 	/* 体验主页“开始体验”：凭本机进入令牌（或一次性短信 ticket）换取体验厂账号的真实 MES 会话。
 	 * 手机号命中本厂哪个账号就以哪个身份进入（管理员或厂长等员工，菜单按本人权限显示）；
-	 * 普通员工首次进入须提供厂管理员设置的密码。返回的 permissions 用于前端选择首页。 */
+	 * 默认凭短信/进入令牌即可进入，只有账号开通「密码验证」时才需补密码。返回的 permissions 用于前端选择首页。 */
 	a.Public("POST /api/v1/public/trial-enter", func(w http.ResponseWriter, r *http.Request) error {
 		var input struct {
 			EntryToken string `json:"entry_token"`
@@ -415,9 +435,9 @@ func (a *API) RegisterTrialRoutes() {
 		case errors.Is(err, auth.ErrNoTrialTenant):
 			return Error(http.StatusNotFound, "NO_TRIAL_TENANT", "该手机号还没有体验制衣厂，请先完成体验注册")
 		case errors.Is(err, auth.ErrPasswordRequired):
-			return Error(http.StatusForbidden, "PASSWORD_REQUIRED", "该手机号在本厂首次进入，请输入厂管理员提供的密码")
+			return Error(http.StatusForbidden, "PASSWORD_REQUIRED", "该账号已开启密码验证，请输入密码")
 		case errors.Is(err, auth.ErrInvalidCredentials):
-			return Error(http.StatusForbidden, "INVALID_PASSWORD", "首次登录密码不正确，请向厂管理员确认后重试")
+			return Error(http.StatusForbidden, "INVALID_PASSWORD", "密码不正确，请向厂管理员确认后重试")
 		case err != nil:
 			return err
 		}

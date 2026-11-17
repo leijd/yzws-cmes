@@ -8,7 +8,7 @@ import DatePicker from '../components/DatePicker.vue'
 import FilterSelect from '../components/FilterSelect.vue'
 
 const { has } = usePermissions()
-const canWrite = computed(() => has('work_order:write'))
+const canWrite = computed(() => has('inventory:receipt'))
 const receipts = ref<any[]>([])
 const projects = ref<any[]>([])
 const warehouses = ref<any[]>([])
@@ -113,9 +113,9 @@ onMounted(load)
     <PageState v-if="!loading" :empty="!receipts.length"/>
   </section>
 
-  <ModalDialog v-if="modal === 'receipt'" wide title="新增物料入库单" @close="modal = ''">
+  <ModalDialog v-if="modal === 'receipt'" wide width="min(1500px, 96vw)" body-class="receipt-body" title="新增物料入库单" @close="modal = ''">
     <div v-if="error" class="notice error">{{ error }}</div>
-    <div class="form-grid">
+    <div class="form-grid receipt-form">
       <div class="field"><label class="required">入库单号</label><input v-model.trim="form.receipt_no" placeholder="RK20261103001"></div>
       <div class="field"><label>入库日期</label><DatePicker v-model="form.receipt_date"/></div>
       <div class="field"><label class="required">项目</label><FilterSelect v-model="form.project_id" :options="projectOptions" placeholder="选择项目"/></div>
@@ -123,10 +123,11 @@ onMounted(load)
       <div class="field"><label class="required">供应商</label><FilterSelect v-model="form.supplier_id" :options="supplierOptions" placeholder="选择供应商"/></div>
       <div class="field"><label class="required">收货人</label><FilterSelect v-model="form.receiver_employee_id" :options="employeeOptions" placeholder="选择员工"/></div>
     </div>
-    <h3 style="margin-top:20px">明细</h3>
-    <div class="table-wrap" style="max-height:40vh"><table><thead><tr><th>物料</th><th>颜色/色号</th><th>缸号</th><th>来料</th><th>合格</th><th>不合格</th><th>让步</th><th>待检</th><th>实收</th><th>单价</th><th>金额</th><th>备注</th><th></th></tr></thead><tbody><tr v-for="(line, index) in form.lines" :key="index"><td style="min-width:220px"><FilterSelect v-model="line.material_id" :options="materialOptions" placeholder="选择物料"/></td><td><input v-model.trim="line.color_no" placeholder="颜色" style="width:80px"><input v-model.trim="line.bed_no" placeholder="色号" style="width:80px"></td><td><input v-model.trim="line.batch_no" style="width:90px"></td><td><input v-model="line.received_qty" inputmode="decimal" style="width:80px"></td><td><input v-model="line.pass_qty" inputmode="decimal" style="width:80px"></td><td>{{ lineReject(line) }}</td><td><input v-model="line.concession_qty" inputmode="decimal" style="width:70px"></td><td><input v-model="line.pending_qty" inputmode="decimal" style="width:70px"></td><td><input v-model="line.accepted_qty" inputmode="decimal" :placeholder="line.pass_qty || '0'" style="width:80px"></td><td><input v-model="line.unit_price" inputmode="decimal" style="width:80px"></td><td>{{ lineAmount(line) }}</td><td><input v-model.trim="line.remark" placeholder="差异说明" style="width:120px"></td><td><button type="button" class="button link text-danger" @click="removeLine(index)">删除</button></td></tr></tbody></table></div>
-    <div class="form-actions"><button type="button" class="button secondary small" @click="addLine">+ 增加明细</button></div>
-    <div class="notice">实收可小于合格，但必须填写差异说明；IQC 不合格的行应走隔离/让步流程。</div>
+    <div class="detail-head">
+      <div class="detail-head-left"><h3>明细</h3><span class="detail-tip">实收可小于合格，但必须填写差异说明；IQC 不合格的行应走隔离/让步流程。</span></div>
+      <button type="button" class="button secondary small" @click="addLine">+ 增加明细</button>
+    </div>
+    <div class="table-wrap receipt-lines"><table><thead><tr><th>物料</th><th>颜色/色号</th><th>缸号</th><th>来料</th><th>合格</th><th>不合格</th><th>让步</th><th>待检</th><th>实收</th><th>单价</th><th>金额</th><th>备注</th><th>操作</th></tr></thead><tbody><tr v-for="(line, index) in form.lines" :key="index"><td style="min-width:220px"><FilterSelect v-model="line.material_id" :options="materialOptions" placeholder="选择物料"/></td><td><input v-model.trim="line.color_no" placeholder="颜色" style="width:80px"><input v-model.trim="line.bed_no" placeholder="色号" style="width:80px"></td><td><input v-model.trim="line.batch_no" style="width:90px"></td><td><input v-model="line.received_qty" inputmode="decimal" style="width:80px"></td><td><input v-model="line.pass_qty" inputmode="decimal" style="width:80px"></td><td>{{ lineReject(line) }}</td><td><input v-model="line.concession_qty" inputmode="decimal" style="width:70px"></td><td><input v-model="line.pending_qty" inputmode="decimal" style="width:70px"></td><td><input v-model="line.accepted_qty" inputmode="decimal" :placeholder="line.pass_qty || '0'" style="width:80px"></td><td><input v-model="line.unit_price" inputmode="decimal" style="width:80px"></td><td>{{ lineAmount(line) }}</td><td><input v-model.trim="line.remark" placeholder="差异说明" style="width:120px"></td><td><button type="button" class="button link text-danger" @click="removeLine(index)">删除</button></td></tr></tbody></table></div>
     <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving" @click="save">保存草稿</button></template>
   </ModalDialog>
 

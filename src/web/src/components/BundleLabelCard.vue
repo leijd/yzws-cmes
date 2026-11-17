@@ -20,7 +20,7 @@ function formatDate(micros?: number) {
 
 <template>
   <article class="bundle-label" :style="{ width, fontSize }">
-    <div class="bl-tenant">{{ label.tenant_name || '一智算' }}</div>
+    <div class="bl-tenant">{{ label.tenant_name || '本厂' }}</div>
     <div class="bl-brand">{{ label.brand || label.customer_name || '—' }}</div>
     <div class="bl-title">{{ label.project_code || '—' }} · 扎 {{ label.bundle_no }}</div>
     <img v-if="label.qr_image" class="bl-qr" :src="label.qr_image" :style="{ width: qrSize, height: qrSize }" alt="扎二维码">

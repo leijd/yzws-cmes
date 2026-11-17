@@ -8,7 +8,9 @@ import { api } from '../api'
 import { confirmLogout } from '../session'
 
 const userName = ref('')
+const tenantName = ref('')
 const personType = ref('')
+const roleCodes = ref<string[]>([])
 const entries = ref<{ key: string; label: string; route: string; icon: string }[]>([])
 
 const ROLE_ENTRIES: Record<string, { key: string; label: string; route: string; icon: string; permission: string }[]> = {
@@ -43,17 +45,45 @@ const ROLE_ENTRIES: Record<string, { key: string; label: string; route: string; 
   ],
 }
 
+/* 新旧角色模板编码映射：平台新模板与旧租户 role.code 并存，统一归到岗位模板 */
+const ROLE_ALIASES: Record<string, string> = {
+  tenant_admin: 'factory_head',
+  factory_manager: 'factory_head',
+  production_supervisor: 'factory_head',
+  process_engineer: 'factory_head',
+  process_technician: 'factory_head',
+  payroll_finance: 'factory_head',
+  statistician: 'factory_head',
+  manager: 'factory_head',
+  FChief: 'factory_head',
+  FM: 'factory_head',
+  warehouse: 'warehouse_keeper',
+  cutting_lead: 'group_leader',
+}
+
 async function load() {
   try {
     const [me, perms] = await Promise.all([
-      api<{ user: { employee_name?: string | null; login_name: string } }>('/me', {}, { silent: true }),
+      api<{ user: { employee_name?: string | null; login_name: string; person_type?: string | null; role_codes?: string[] } }>('/me', {}, { silent: true }),
       api<{ actions: Record<string, boolean> }>('/me/permissions', {}, { silent: true }),
     ])
     userName.value = me.user.employee_name || me.user.login_name
-    const list = await api<{ items: { person_type: string }[] }>('/people', {}, { silent: true }).catch(() => ({ items: [] as { person_type: string }[] }))
-    personType.value = list.items[0]?.person_type || ''
-    /* 固定岗位入口：按身份类型取模板，再按权限过滤 */
-    const template = ROLE_ENTRIES[personType.value] || ROLE_ENTRIES.worker
+    /* 顶部品牌显示本厂厂名，不出现产品名 */
+    try {
+      const brand = await api<{ tenant_name?: string }>('/tenant/branding', {}, { silent: true })
+      tenantName.value = brand.tenant_name || ''
+    } catch { /* 品牌加载失败只用中性标题 */ }
+    /* 身份类型由 /me 返回当前登录人的 person_type，不再拉全厂人员列表取首条 */
+    personType.value = me.user.person_type || ''
+    roleCodes.value = me.user.role_codes || []
+    /* 固定岗位入口：优先按有效角色编码匹配岗位模板（person_type 只有 manager/worker，
+     * 无法区分组长、仓管、总检等岗位），无匹配时再按人员类型兜底；最后按权限过滤。 */
+    const matched = roleCodes.value
+      .map(code => ROLE_ALIASES[code] || code)
+      .find(code => ROLE_ENTRIES[code])
+    const template = (matched ? ROLE_ENTRIES[matched] : undefined)
+      || (personType.value === 'worker' ? ROLE_ENTRIES.worker : ROLE_ENTRIES.factory_head)
+      || ROLE_ENTRIES.worker
     entries.value = template.filter(e => !e.permission || perms.actions[e.permission])
   } catch {
     entries.value = []
@@ -71,7 +101,7 @@ onMounted(load)
 <template>
   <div class="mj-page">
     <header class="mj-header">
-      <div class="mj-brand"><span class="mj-mark">智</span><strong>一智算</strong></div>
+      <div class="mj-brand"><span class="mj-mark">{{ (tenantName || '厂').slice(0, 1) }}</span><strong>{{ tenantName || '本厂工作台' }}</strong></div>
       <div class="mj-user">{{ userName }} <button class="mj-logout" @click="logout">退出</button></div>
     </header>
     <main class="mj-main">

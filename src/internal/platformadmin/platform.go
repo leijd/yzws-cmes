@@ -314,7 +314,7 @@ func Register(api *httpapi.API) {
 			if templateMode == "all" {
 				templateIDs = nil
 			}
-			tplPlan, err = planRoleTemplates(ctx, api.DB, plan.TenantID, templateIDs, p.AdminID, api.Config.NodeID)
+			tplPlan, err = planRoleTemplates(ctx, api.DB, plan.TenantID, templateIDs, p.AdminID, api.Config.NodeID, false)
 			if err != nil {
 				return err
 			}

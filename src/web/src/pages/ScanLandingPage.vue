@@ -192,7 +192,7 @@ onMounted(load)
 <template>
   <div class="scan-page">
     <header class="scan-head">
-      <div class="scan-tenant">{{ label?.tenant_name || '一智算' }}</div>
+      <div class="scan-tenant">{{ label?.tenant_name || '本厂' }}</div>
       <h1 v-if="label">{{ label.project_code }} · 扎 {{ label.bundle_no }}</h1>
       <h1 v-else>扎标签</h1>
       <p v-if="label">{{ label.work_order_code }} · {{ label.product_name }}</p>
@@ -267,7 +267,7 @@ onMounted(load)
       </section>
     </template>
 
-    <footer class="scan-foot">一智算 · 扫码派工 / 报工</footer>
+    <footer class="scan-foot">扫码派工 / 报工</footer>
   </div>
 </template>
 

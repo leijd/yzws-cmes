@@ -45,10 +45,10 @@ func registerIdentity(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"items": items})
 	})
 	api.Handle("GET /api/v1/roles", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		rows, err := api.DB.Query(r.Context(), `SELECT r.id,r.code,r.name,COALESCE(r.description,''),r.is_system,r.version,r.source,r.platform_template_id,COUNT(DISTINCT ur.user_id)
+		rows, err := api.DB.Query(r.Context(), `SELECT r.id,r.code,r.name,COALESCE(r.description,''),r.is_system,r.version,r.source,r.platform_template_id,COALESCE(r.default_data_scope,''),COUNT(DISTINCT ur.user_id)
 			FROM role r LEFT JOIN user_role ur ON ur.tenant_id=r.tenant_id AND ur.role_id=r.id
 			WHERE r.tenant_id=$1
-			GROUP BY r.id,r.code,r.name,r.description,r.is_system,r.version,r.source,r.platform_template_id
+			GROUP BY r.id,r.code,r.name,r.description,r.is_system,r.version,r.source,r.platform_template_id,r.default_data_scope
 			ORDER BY r.source DESC,r.code`, p.TenantID)
 		if err != nil {
 			return err
@@ -56,38 +56,207 @@ func registerIdentity(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, code, name, description, source string
+			var id, code, name, description, source, dataScope string
 			var templateID *string
 			var system bool
 			var version, users int64
-			if err := rows.Scan(&id, &code, &name, &description, &system, &version, &source, &templateID, &users); err != nil {
+			if err := rows.Scan(&id, &code, &name, &description, &system, &version, &source, &templateID, &dataScope, &users); err != nil {
 				return err
 			}
-			items = append(items, map[string]any{"id": id, "code": code, "name": name, "description": description, "is_system": system, "version": version, "source": source, "platform_template_id": templateID, "user_count": users})
+			items = append(items, map[string]any{"id": id, "code": code, "name": name, "description": description, "is_system": system, "version": version, "source": source, "platform_template_id": templateID, "default_data_scope": dataScope, "user_count": users})
+		}
+		return httpapi.JSON(w, 200, map[string]any{"items": items})
+	})
+	/* 角色默认数据范围（设计 4.8）：factory/workshop/line/team/self/warehouse/custom，仅自定义角色可改。 */
+	api.Handle("PATCH /api/v1/roles/{id}", "identity:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Name             string `json:"name"`
+			Description      string `json:"description"`
+			DefaultDataScope string `json:"default_data_scope"`
+			Version          int64  `json:"version"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		scope := strings.TrimSpace(in.DefaultDataScope)
+		if scope == "" {
+			scope = "self"
+		}
+		switch scope {
+		case "factory", "workshop", "line", "team", "self", "warehouse", "custom":
+		default:
+			return httpapi.Error(400, "VALIDATION_ERROR", "数据范围必须是 factory/workshop/line/team/self/warehouse/custom")
+		}
+		var system bool
+		var currentVersion int64
+		if err := api.DB.QueryRow(r.Context(), `SELECT is_system,version FROM role WHERE tenant_id=$1 AND id=$2`, p.TenantID, r.PathValue("id")).Scan(&system, &currentVersion); err != nil {
+			return httpapi.Error(404, "NOT_FOUND", "角色不存在")
+		}
+		if system {
+			return httpapi.Error(409, "SYSTEM_ROLE_IMMUTABLE", "内置管理员角色不可修改，请创建自定义角色")
+		}
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "角色名称必填")
+		}
+		var duplicated bool
+		if err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM role WHERE tenant_id=$1 AND id<>$2 AND lower(btrim(name))=lower($3))`, p.TenantID, r.PathValue("id"), name).Scan(&duplicated); err != nil {
+			return err
+		}
+		if duplicated {
+			return httpapi.Error(409, "DUPLICATE_ROLE_NAME", "角色名称已存在，请换一个名称")
+		}
+		result, err := api.DB.Exec(r.Context(), `UPDATE role SET name=$3,description=$4,default_data_scope=$5,
+			version=version+1,updated_at=$6,updated_by=$7,updated_node=$8
+			WHERE tenant_id=$1 AND id=$2 AND version=$9`,
+			p.TenantID, r.PathValue("id"), name, in.Description, scope, platform.Now(), p.UserID, api.Config.NodeID, in.Version)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() == 0 {
+			return httpapi.Error(409, "VERSION_CONFLICT", "角色信息已变更，请刷新后重试")
+		}
+		return httpapi.JSON(w, 200, map[string]any{"saved": true, "version": currentVersion + 1})
+	})
+	/* 管理级别字典（设计 4.17.1）：L1～L4，供人员建档选择。 */
+	api.Handle("GET /api/v1/mgmt-levels", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		rows, err := api.DB.Query(r.Context(), `SELECT id,level_code,level_name,COALESCE(description,''),sort_no,status
+			FROM mgmt_level WHERE tenant_id=$1 AND status='active' ORDER BY sort_no`, p.TenantID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var id, code, name, description, status string
+			var sortNo int64
+			if err := rows.Scan(&id, &code, &name, &description, &sortNo, &status); err != nil {
+				return err
+			}
+			items = append(items, map[string]any{"id": id, "level_code": code, "level_name": name, "description": description, "sort_no": sortNo, "status": status})
+		}
+		return httpapi.JSON(w, 200, map[string]any{"items": items})
+	})
+	/* 用户数据范围补充（设计 4.8 user_scope）：整体替换，effect=deny 优先。 */
+	api.Handle("PUT /api/v1/users/{id}/scopes", "identity:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Scopes []struct {
+				ScopeType  string `json:"scope_type"`
+				ScopeValue string `json:"scope_value"`
+				Effect     string `json:"effect"`
+			} `json:"scopes"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		userID := r.PathValue("id")
+		var exists bool
+		if err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM user_account WHERE tenant_id=$1 AND id=$2)`, p.TenantID, userID).Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			return httpapi.Error(404, "NOT_FOUND", "账号不存在")
+		}
+		tx, err := api.DB.Begin(r.Context())
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(r.Context())
+		if _, err := tx.Exec(r.Context(), `DELETE FROM user_scope WHERE tenant_id=$1 AND user_id=$2`, p.TenantID, userID); err != nil {
+			return err
+		}
+		for _, scope := range in.Scopes {
+			scopeType := strings.TrimSpace(scope.ScopeType)
+			scopeValue := strings.TrimSpace(scope.ScopeValue)
+			if scopeValue == "" {
+				return httpapi.Error(400, "VALIDATION_ERROR", "数据范围取值必填")
+			}
+			switch scopeType {
+			case "workshop", "line", "team", "warehouse", "self", "field":
+			default:
+				return httpapi.Error(400, "VALIDATION_ERROR", "数据范围类型必须是 workshop/line/team/warehouse/self/field")
+			}
+			effect := strings.TrimSpace(scope.Effect)
+			if effect == "" {
+				effect = "allow"
+			}
+			if effect != "allow" && effect != "deny" {
+				return httpapi.Error(400, "VALIDATION_ERROR", "effect 必须是 allow 或 deny")
+			}
+			if _, err := tx.Exec(r.Context(), `INSERT INTO user_scope(tenant_id,id,user_id,scope_type,scope_value,effect)
+				VALUES($1,$2,$3,$4,$5,$6)`, p.TenantID, platform.ID(), userID, scopeType, scopeValue, effect); err != nil {
+				return err
+			}
+		}
+		if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "configure_user_scope", "user_account", userID, nil, in, ""); err != nil {
+			return err
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 200, map[string]any{"saved": true, "count": len(in.Scopes)})
+	})
+	/* 读取用户数据范围补充，供人员管理页回显。 */
+	api.Handle("GET /api/v1/users/{id}/scopes", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		rows, err := api.DB.Query(r.Context(), `SELECT scope_type,scope_value,effect FROM user_scope
+			WHERE tenant_id=$1 AND user_id=$2 ORDER BY scope_type,scope_value`, p.TenantID, r.PathValue("id"))
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var scopeType, scopeValue, effect string
+			if err := rows.Scan(&scopeType, &scopeValue, &effect); err != nil {
+				return err
+			}
+			items = append(items, map[string]any{"scope_type": scopeType, "scope_value": scopeValue, "effect": effect})
 		}
 		return httpapi.JSON(w, 200, map[string]any{"items": items})
 	})
 	api.Handle("POST /api/v1/roles", "identity:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
-			Code        string `json:"code"`
 			Name        string `json:"name"`
 			Description string `json:"description"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
-		if in.Code == "" || in.Name == "" {
-			return httpapi.Error(400, "VALIDATION_ERROR", "角色编码和名称必填")
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "角色名称必填")
 		}
-		id, now := platform.ID(), platform.Now()
-		_, err := api.DB.Exec(r.Context(), `INSERT INTO role(tenant_id,id,code,name,description,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$6,$7,$8)`, p.TenantID, id, in.Code, in.Name, in.Description, now, p.UserID, api.Config.NodeID)
-		if isUniqueViolation(err) {
-			return httpapi.Error(409, "DUPLICATE_ROLE", "角色编码已存在")
-		}
-		if err != nil {
+		/* 同厂不允许同名（忽略大小写与首尾空格）；编码由服务端生成，不接受前端传入 */
+		var duplicated bool
+		if err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM role WHERE tenant_id=$1 AND lower(btrim(name))=lower($2))`, p.TenantID, name).Scan(&duplicated); err != nil {
 			return err
 		}
-		return httpapi.JSON(w, 201, map[string]any{"id": id, "version": 1})
+		if duplicated {
+			return httpapi.Error(409, "DUPLICATE_ROLE_NAME", "角色名称已存在，请换一个名称")
+		}
+		id, now := platform.ID(), platform.Now()
+		var code string
+		var err error
+		/* 并发创建可能取到同一个自动编码：由唯一约束兜底后重新取号 */
+		for attempt := 0; attempt < 5; attempt++ {
+			if code, err = nextCustomRoleCode(r.Context(), api.DB, p.TenantID); err != nil {
+				return err
+			}
+			_, err = api.DB.Exec(r.Context(), `INSERT INTO role(tenant_id,id,code,name,description,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$6,$7,$8)`, p.TenantID, id, code, name, in.Description, now, p.UserID, api.Config.NodeID)
+			if err == nil {
+				break
+			}
+			if !isUniqueViolation(err) {
+				return err
+			}
+			if uniqueViolationConstraint(err) == "ux_role_tenant_name" {
+				return httpapi.Error(409, "DUPLICATE_ROLE_NAME", "角色名称已存在，请换一个名称")
+			}
+		}
+		if err != nil {
+			return httpapi.Error(409, "DUPLICATE_ROLE_CODE", "角色编码生成冲突，请重试")
+		}
+		return httpapi.JSON(w, 201, map[string]any{"id": id, "code": code, "version": 1})
 	})
 	api.Handle("GET /api/v1/roles/{id}/permissions", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		rows, err := api.DB.Query(r.Context(), `SELECT p.code FROM role_permission rp JOIN permission p ON p.tenant_id=rp.tenant_id AND p.id=rp.permission_id WHERE rp.tenant_id=$1 AND rp.role_id=$2 ORDER BY p.code`, p.TenantID, r.PathValue("id"))
@@ -196,14 +365,16 @@ func registerIdentity(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"deleted": true, "source": source})
 	})
 	api.Handle("GET /api/v1/users", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		rows, err := api.DB.Query(r.Context(), `SELECT u.id,u.login_name,e.name,u.status,
+		rows, err := api.DB.Query(r.Context(), `SELECT u.id,u.login_name,u.employee_id,e.employee_no,e.name,e.position,u.status,
+			(SELECT w.name FROM org_unit w WHERE w.tenant_id=e.tenant_id AND w.id=e.workshop_org_id) AS workshop_name,
+			(SELECT l.name FROM org_unit l WHERE l.tenant_id=e.tenant_id AND l.id=e.line_org_id) AS line_name,
 			COALESCE(json_agg(r.id) FILTER(WHERE r.id IS NOT NULL),'[]'),
 			COALESCE(json_agg(r.code) FILTER(WHERE r.code IS NOT NULL),'[]')
 			FROM user_account u JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id
 			LEFT JOIN user_role ur ON ur.tenant_id=u.tenant_id AND ur.user_id=u.id
 			LEFT JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
 			WHERE u.tenant_id=$1
-			GROUP BY u.id,u.login_name,e.name,u.status
+			GROUP BY u.id,u.login_name,u.employee_id,e.tenant_id,e.employee_no,e.name,e.position,e.workshop_org_id,e.line_org_id,u.status
 			ORDER BY u.login_name`, p.TenantID)
 		if err != nil {
 			return err
@@ -211,15 +382,18 @@ func registerIdentity(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, login, name, status string
+			var id, login, employeeID, employeeNo, name, status string
+			var position, workshopName, lineName *string
 			var roleIDBody, roleCodeBody []byte
-			if err := rows.Scan(&id, &login, &name, &status, &roleIDBody, &roleCodeBody); err != nil {
+			if err := rows.Scan(&id, &login, &employeeID, &employeeNo, &name, &position, &status, &workshopName, &lineName, &roleIDBody, &roleCodeBody); err != nil {
 				return err
 			}
 			roleIDs, roleCodes := []string{}, []string{}
 			_ = json.Unmarshal(roleIDBody, &roleIDs)
 			_ = json.Unmarshal(roleCodeBody, &roleCodes)
-			items = append(items, map[string]any{"id": id, "login_name": login, "name": name, "status": status, "role_ids": roleIDs, "roles": roleCodes})
+			items = append(items, map[string]any{"id": id, "login_name": login, "employee_id": employeeID,
+				"employee_no": employeeNo, "name": name, "position": position, "status": status,
+				"workshop_name": workshopName, "line_name": lineName, "role_ids": roleIDs, "roles": roleCodes})
 		}
 		return httpapi.JSON(w, 200, map[string]any{"items": items})
 	})
@@ -533,6 +707,8 @@ func registerIdentity(api *httpapi.API) {
 		}
 		return httpapi.JSON(w, 200, result)
 	})
+	registerRoleLibrary(api)
+	registerAuthMethods(api)
 }
 
 // checkUserQuota 校验订阅规模：tenant_subscription.user_limit 为本厂启用账号数量上限，

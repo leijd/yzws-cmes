@@ -1,0 +1,81 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e138]:
+    - complementary [ref=e139]:
+      - generic [ref=e140] [cursor=pointer]:
+        - img "本厂 logo" [ref=e141]
+        - generic [ref=e142]: 通道MES
+        - generic [ref=e143]: ▾
+      - navigation [ref=e144]:
+        - generic [ref=e145]: 生产管理
+        - link "✉ 消息与会话" [ref=e146] [cursor=pointer]:
+          - /url: /notifications/A04
+          - generic [ref=e147]: ✉
+          - generic [ref=e148]: 消息与会话
+        - link "¥ 我的工资" [ref=e149] [cursor=pointer]:
+          - /url: /mywage/H02
+          - generic [ref=e150]: ¥
+          - generic [ref=e151]: 我的工资
+        - link "▥ 物料入库" [ref=e152] [cursor=pointer]:
+          - /url: /materials/receipts
+          - generic [ref=e153]: ▥
+          - generic [ref=e154]: 物料入库
+      - navigation [ref=e155]:
+        - generic [ref=e156]: 基础资料
+        - link "▦ 物料管理" [ref=e157] [cursor=pointer]:
+          - /url: /materials/master
+          - generic [ref=e158]: ▦
+          - generic [ref=e159]: 物料管理
+        - link "♙ 人员与组织" [ref=e160] [cursor=pointer]:
+          - /url: /settings/users
+          - generic [ref=e161]: ♙
+          - generic [ref=e162]: 人员与组织
+        - link "♟ 生产组管理" [ref=e163] [cursor=pointer]:
+          - /url: /settings/teams
+          - generic [ref=e164]: ♟
+          - generic [ref=e165]: 生产组管理
+        - link "♙ 员工信息" [ref=e166] [cursor=pointer]:
+          - /url: /masterdata/B06
+          - generic [ref=e167]: ♙
+          - generic [ref=e168]: 员工信息
+      - navigation [ref=e169]:
+        - generic [ref=e170]: 系统管理
+        - link "⌂ 本厂信息" [ref=e171] [cursor=pointer]:
+          - /url: /tenant/profile
+          - generic [ref=e172]: ⌂
+          - generic [ref=e173]: 本厂信息
+        - link "▤ 门户内容" [ref=e174] [cursor=pointer]:
+          - /url: /portal/settings
+          - generic [ref=e175]: ▤
+          - generic [ref=e176]: 门户内容
+        - link "⚷ 用户角色权限" [ref=e177] [cursor=pointer]:
+          - /url: /identity/G05
+          - generic [ref=e178]: ⚷
+          - generic [ref=e179]: 用户角色权限
+        - link "✉ 敏感信息授权审批" [ref=e180] [cursor=pointer]:
+          - /url: /identity/sensitive-requests
+          - generic [ref=e181]: ✉
+          - generic [ref=e182]: 敏感信息授权审批
+      - button "🤖 问题助手" [ref=e183] [cursor=pointer]:
+        - generic [ref=e184]: 🤖
+        - generic [ref=e185]: 问题助手
+    - banner [ref=e186]:
+      - button "折叠菜单" [ref=e187] [cursor=pointer]: ☰
+      - generic [ref=e188]: 服装生产管理平台
+      - generic [ref=e189]:
+        - generic [ref=e191]: 中心节点 · 已连接
+        - button "✉ 提醒" [ref=e192] [cursor=pointer]
+        - button "阿达 · 退出登录" [ref=e193] [cursor=pointer]
+    - main [ref=e194]:
+      - generic [ref=e195]:
+        - generic [ref=e196]:
+          - heading "生产工作台" [level=1] [ref=e197]
+          - paragraph [ref=e198]: 实时掌握生产进度、待办事项与有效计件
+        - link "进入报工" [ref=e200] [cursor=pointer]:
+          - /url: /tasks/D01
+      - generic [ref=e201]:
+        - text: 没有执行此操作的权限
+        - button "重试" [ref=e202] [cursor=pointer]
+    - button "?" [ref=e203] [cursor=pointer]
+  - alert:
+    - generic: 没有执行此操作的权限
+    - generic: 没有执行此操作的权限

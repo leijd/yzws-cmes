@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { api, command, statusText } from '../api'
 import { usePermissions } from '../permissions'
 import ModalDialog from '../components/ModalDialog.vue'
@@ -8,17 +8,29 @@ import DatePicker from '../components/DatePicker.vue'
 import FilterSelect from '../components/FilterSelect.vue'
 import ProductImage from '../components/ProductImage.vue'
 
-const { has } = usePermissions()
+const { has, ready } = usePermissions()
+const canProjectRead = computed(() => has('project:read'))
+const canWorkOrderRead = computed(() => has('work_order:read'))
+const canCuttingRead = computed(() => has('cutting:read'))
 const canProjectWrite = computed(() => has('project:write'))
 const canWorkOrderWrite = computed(() => has('work_order:write'))
 const canCuttingWrite = computed(() => has('cutting:write'))
 const canReview = computed(() => has('work_order:review'))
 
-const tab = ref<'projects' | 'work-orders' | 'cutting-orders'>('work-orders')
+type TabKey = 'projects' | 'work-orders' | 'cutting-orders'
+const availableTabs = computed<TabKey[]>(() => {
+  const tabs: TabKey[] = []
+  if (canWorkOrderRead.value) tabs.push('work-orders')
+  if (canProjectRead.value) tabs.push('projects')
+  if (canCuttingRead.value) tabs.push('cutting-orders')
+  return tabs
+})
+const tab = ref<TabKey>('work-orders')
 const data = reactive<Record<string, any[]>>({ projects: [], 'work-orders': [], 'cutting-orders': [] })
 const products = ref<any[]>([])
 const customers = ref<any[]>([])
 const loading = ref(false)
+const loaded = ref(false)
 const error = ref('')
 const notice = ref('')
 const modal = ref('')
@@ -49,14 +61,39 @@ const productOptions = computed(() => products.value.map(item => ({ value: item.
 const customerOptions = computed(() => customers.value.map(item => ({ value: item.id, label: item.name })))
 const cuttingOrderOptions = computed(() => data['work-orders'].filter(o => o.status === 'pending_release').map(item => ({ value: item.id, label: `${item.work_order_code} · ${item.product_name}` })))
 
+/* 各区块独立加载：无权限的接口直接跳过，其余接口互不影响，避免整页因某个 403 报错 */
+async function loadSection(path: string): Promise<{ items: any[] } | null> {
+  try { return await api<{ items: any[] }>(path, {}, { silent: true }) } catch { return null }
+}
 async function load() {
+  if (!ready.value) return
   loading.value = true; error.value = ''
-  try {
-    const [projects, orders, cuttings, productData, customerData] = await Promise.all([
-      api<{ items: any[] }>('/projects'), api<{ items: any[] }>('/work-orders' + (statusFilter.value ? '?status=' + statusFilter.value : '')), api<{ items: any[] }>('/cutting-orders'), api<{ items: any[] }>('/products'), api<{ items: any[] }>('/customers'),
-    ])
-    data.projects = projects.items; data['work-orders'] = orders.items; data['cutting-orders'] = cuttings.items; products.value = productData.items; customers.value = customerData.items
-  } catch (e) { error.value = (e as Error).message } finally { loading.value = false }
+  const [projects, orders, cuttings, productData, customerData] = await Promise.all([
+    canProjectRead.value ? loadSection('/projects') : Promise.resolve(null),
+    canWorkOrderRead.value ? loadSection('/work-orders' + (statusFilter.value ? '?status=' + statusFilter.value : '')) : Promise.resolve(null),
+    canCuttingRead.value ? loadSection('/cutting-orders') : Promise.resolve(null),
+    loadSection('/products'),
+    loadSection('/customers'),
+  ])
+  if (projects) data.projects = projects.items
+  if (orders) data['work-orders'] = orders.items
+  if (cuttings) data['cutting-orders'] = cuttings.items
+  if (productData) products.value = productData.items
+  if (customerData) customers.value = customerData.items
+  loading.value = false
+  loaded.value = true
+}
+/* 进入页面即加载：权限已就绪时立即加载，未就绪时等权限到位再加载。
+ * 当前 tab 无权限时切到第一个有权限的 tab。 */
+watch(ready, (r) => {
+  if (!r) return
+  if (availableTabs.value.length && !availableTabs.value.includes(tab.value)) tab.value = availableTabs.value[0]
+  void load()
+}, { immediate: true })
+/* 切换 tab 时确保数据已加载（进入页面 watch 通常已完成，这里兜底防止空列表） */
+function switchTab(next: TabKey) {
+  tab.value = next
+  if (!loaded.value && !loading.value) void load()
 }
 function open(type: string) {
   error.value = ''
@@ -126,12 +163,11 @@ async function release(item: any) {
   error.value = ''
   try { const result = await command<{ tasks: any[] }>(`/work-orders/${item.id}/release`, { version: item.version, remark: '裁床复核完成' }); notice.value = `工单下发成功，已生成 ${result.tasks.length} 道工序任务`; await load() } catch (e) { error.value = (e as Error).message }
 }
-onMounted(load)
 </script>
 <template>
   <div class="page-header"><div><h1>项目与工单</h1><p>项目、裁床确认、工单下发与工序快照一体化管理</p></div><div class="header-actions"><button v-if="canProjectWrite" class="button secondary" @click="open('project')">+ 项目</button><button v-if="canWorkOrderWrite" class="button secondary" @click="open('order')">+ 工单</button><button v-if="canCuttingWrite" class="button" @click="open('cutting')">+ 裁床</button></div></div>
   <div v-if="error" class="notice error">{{ error }}</div><div v-if="notice" class="notice success">{{ notice }}</div>
-  <section class="panel"><div class="tabs"><button :class="{ active: tab === 'work-orders' }" @click="tab = 'work-orders'">生产工单</button><button :class="{ active: tab === 'projects' }" @click="tab = 'projects'">客户项目</button><button :class="{ active: tab === 'cutting-orders' }" @click="tab = 'cutting-orders'">裁床与分扎</button></div><div class="toolbar"><FilterSelect v-model="statusFilter" :options="[{value:'',label:'全部状态'},{value:'pending_release',label:'待下发'},{value:'in_production',label:'生产中'}]" @change="load"/><input class="search-input" placeholder="搜索编号或产品"><span class="spacer"></span><button class="button secondary" @click="load">刷新</button></div><PageState :loading="loading" />
+  <section class="panel"><div class="tabs"><button v-if="canWorkOrderRead" :class="{ active: tab === 'work-orders' }" @click="switchTab('work-orders')">生产工单</button><button v-if="canProjectRead" :class="{ active: tab === 'projects' }" @click="switchTab('projects')">客户项目</button><button v-if="canCuttingRead" :class="{ active: tab === 'cutting-orders' }" @click="switchTab('cutting-orders')">裁床与分扎</button></div><div class="toolbar"><FilterSelect v-model="statusFilter" :options="[{value:'',label:'全部状态'},{value:'pending_release',label:'待下发'},{value:'in_production',label:'生产中'}]" @change="load"/><input class="search-input" placeholder="搜索编号或产品"><span class="spacer"></span><button class="button secondary" @click="load">刷新</button></div><PageState :loading="loading" />
     <div v-if="!loading && tab === 'work-orders'" class="table-wrap"><table><thead><tr><th>工单编号</th><th>产品</th><th>计划数</th><th>良品数</th><th>综合进度</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in data['work-orders']" :key="item.id"><td><strong>{{ item.work_order_code }}</strong><small class="text-muted" style="display:block">优先级：{{ item.priority }}</small></td><td><div style="display:flex;align-items:center;gap:10px"><ProductImage :attachment-id="item.image_attachment_id" :width="40" :height="40" /><span>{{ item.product_name }}</span></div></td><td>{{ item.planned_product_qty }}</td><td>{{ item.approved_good_qty }}</td><td><div class="progress-track" style="width:110px"><div class="progress-bar" :style="{ width: `${Math.min(item.progress_ratio * 100, 100)}%` }"></div></div></td><td><span class="status" :class="item.status">{{ statusText[item.status] }}</span></td><td><span v-if="item.review_status" class="status" :class="item.review_status" style="margin-right:6px">{{ item.review_status === 'approved' ? '已审核' : (item.review_status === 'rejected' ? '已驳回' : '待审核') }}</span><button v-if="item.status === 'pending_release' && item.review_status !== 'approved' && canReview" class="button small" @click="reviewOrder(item)">审核</button><button v-if="item.status === 'pending_release' && item.review_status === 'approved'" class="button small" @click="release(item)">下发</button><button v-if="item.status === 'pending_release' && canWorkOrderWrite" class="button link text-danger" @click="removeOrder(item)">删除</button><button v-if="canWorkOrderWrite && ['pending_release','in_production'].includes(item.status)" class="button link text-danger" @click="cancelOrder(item)">取消</button><span v-if="item.status !== 'pending_release'" class="text-muted">v{{ item.version }}</span></td></tr></tbody></table><PageState :empty="!data['work-orders'].length" /></div>
     <div v-if="!loading && tab === 'projects'" class="table-wrap"><table><thead><tr><th>项目编号</th><th>客户</th><th>产品</th><th>订单数</th><th>未出货</th><th>货期</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in data.projects" :key="item.id"><td>{{ item.project_code }}</td><td>{{ item.customer_name }}</td><td><div style="display:flex;align-items:center;gap:10px"><ProductImage :attachment-id="item.image_attachment_id" :width="40" :height="40" /><span>{{ item.product_name }}</span></div></td><td>{{ item.order_qty }}</td><td>{{ item.unshipped_qty }}</td><td>{{ item.required_delivery_date || '—' }}</td><td><span class="status">{{ statusText[item.status] }}</span></td><td><button v-if="canProjectWrite" class="button link" @click="openAdjust(item)">调整</button><button v-if="canProjectWrite" class="button link text-danger" @click="removeProject(item)">删除</button></td></tr></tbody></table><PageState :empty="!data.projects.length" /></div>
     <div v-if="!loading && tab === 'cutting-orders'" class="table-wrap"><table><thead><tr><th>裁床单号</th><th>工单 ID</th><th>裁片数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in data['cutting-orders']" :key="item.id"><td>{{ item.cutting_no }}</td><td class="text-muted">{{ item.work_order_id }}</td><td>{{ item.cut_qty }}</td><td><span class="status" :class="item.status">{{ statusText[item.status] || item.status }}</span></td><td><button v-if="item.status === 'draft'" class="button small" @click="confirmCutting(item)">确认并生成菲票</button><button v-if="item.status === 'draft' && canCuttingWrite" class="button link text-danger" @click="removeCutting(item)">删除</button><span v-if="item.status !== 'draft'" class="text-muted">扎/票已生成</span></td></tr></tbody></table><PageState :empty="!data['cutting-orders'].length" /></div>

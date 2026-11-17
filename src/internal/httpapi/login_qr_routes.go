@@ -230,9 +230,9 @@ func (a *API) RegisterLoginQRRoutes() {
 		result, err := a.Auth.LoginByWechatDevice(r.Context(), deviceID, phone, tenantCode, input.Password, input.NodeID)
 		switch {
 		case errors.Is(err, auth.ErrPasswordRequired):
-			return Error(http.StatusForbidden, "PASSWORD_REQUIRED", "该手机号在本厂首次微信登录，请输入厂管理员提供的密码")
+			return Error(http.StatusForbidden, "PASSWORD_REQUIRED", "该账号已开启密码验证，请输入密码")
 		case errors.Is(err, auth.ErrInvalidCredentials):
-			return Error(http.StatusForbidden, "NO_ACCOUNT", "微信登录失败：账号不存在或首次登录密码不正确")
+			return Error(http.StatusForbidden, "NO_ACCOUNT", "微信登录失败：账号不存在或密码不正确")
 		case err != nil:
 			return err
 		}

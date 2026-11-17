@@ -6,6 +6,7 @@ import (
 
 	"clothp/internal/auth"
 	"clothp/internal/httpapi"
+	"clothp/internal/orgapp"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 )
@@ -109,11 +110,20 @@ func listTasks(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.
 	}
 	if !canViewAllTasks(p) {
 		if p.EmployeeID == "" {
+			api.RecordDenied(r.Context(), p, "production_task", "*", "账号未绑定员工，尝试查看生产任务")
 			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "当前账号未绑定员工，不能查看生产任务")
 		}
 		args = append(args, p.EmployeeID)
 		where += fmt.Sprintf(" AND t.employee_id=$%d", len(args))
 	}
+	/* 数据范围：车间/产线/班组负责人只能看本范围内的任务（设计 5.7） */
+	access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+	if err != nil {
+		return err
+	}
+	scopeCond, scopeArgs := access.OrgScopeSQL("e", len(args)+1)
+	args = append(args, scopeArgs...)
+	where += scopeCond
 	rows, err := api.DB.Query(r.Context(), taskSelect()+" WHERE "+where+" ORDER BY t.id DESC LIMIT 200", args...)
 	if err != nil {
 		return err
@@ -186,6 +196,27 @@ func getTask(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Pr
 	if !canViewAllTasks(p) {
 		employeeID, _ := item["employee_id"].(*string)
 		if employeeID == nil || *employeeID != p.EmployeeID {
+			api.RecordDenied(r.Context(), p, "production_task", r.PathValue("id"), "查看他人工序任务")
+			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "无权查看该任务")
+		}
+	}
+	/* 详情同样执行组织范围过滤（设计 5.7 第 5 条） */
+	access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+	if err != nil {
+		return err
+	}
+	if !access.All || access.Deny != nil {
+		employeeID, _ := item["employee_id"].(*string)
+		var workshopID, lineID, teamID *string
+		if employeeID != nil {
+			_ = api.DB.QueryRow(r.Context(), `SELECT workshop_org_id,line_org_id,team_org_id FROM employee WHERE tenant_id=$1 AND id=$2`, p.TenantID, *employeeID).Scan(&workshopID, &lineID, &teamID)
+		}
+		var emp string
+		if employeeID != nil {
+			emp = *employeeID
+		}
+		if !access.AllowEmployeeOrg(workshopID, lineID, teamID, emp) {
+			api.RecordDenied(r.Context(), p, "production_task", r.PathValue("id"), "超出组织数据范围查看任务")
 			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "无权查看该任务")
 		}
 	}

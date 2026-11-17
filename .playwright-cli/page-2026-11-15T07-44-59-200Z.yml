@@ -1,0 +1,16 @@
+- generic [ref=f3e6]:
+  - generic [ref=f3e8]:
+    - generic [ref=f3e9]: 员工信息
+    - generic [ref=f3e10]: 鼎顺服贸
+  - generic [ref=f3e14]:
+    - generic [ref=f3e15]: 员工信息
+    - generic [ref=f3e17]:
+      - generic [ref=f3e19]:
+        - generic: 姓名/工号搜索
+        - textbox [ref=f3e20]
+      - generic [ref=f3e21] [cursor=pointer]: 查询
+    - generic [ref=f3e22]:
+      - generic [ref=f3e23]: 全部
+      - generic [ref=f3e24]: 在职
+      - generic [ref=f3e25]: 停用
+    - generic [ref=f3e26]: 加载中…

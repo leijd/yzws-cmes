@@ -145,8 +145,8 @@ const groups: Group[] = [
       { icon: "🔍", name: "过程巡检", url: "/pages/quality/process-inspections", perm: "work_order:read" },
       { icon: "🖨️", name: "菲票打印", url: "/pages/print/center", perm: "print:read" },
       { icon: "🏷️", name: "扎标签", url: "/pages/print/labels", perm: "work_order:read" },
-      { icon: "📥", name: "物料入库", url: "/pages/materials/receipts", perm: "work_order:read" },
-      { icon: "📦", name: "物料管理", url: "/pages/masterdata/list?type=materials", perm: "masterdata:read" },
+      { icon: "📥", name: "物料入库", url: "/pages/materials/receipts", perm: "inventory:read" },
+      { icon: "📦", name: "物料管理", url: "/pages/masterdata/list?type=materials", perm: "warehouse:read" },
       { icon: "🔁", name: "返工复检", url: "/pages/rework/list", perm: "work_order:read" },
     ],
   },
@@ -165,8 +165,8 @@ const groups: Group[] = [
       { icon: "📐", name: "唛架管理", url: "/pages/markers/list", perm: "marker:read" },
       { icon: "🏭", name: "车间管理", url: "/pages/settings/workshops", perm: "workshop:read" },
       { icon: "🛠️", name: "产线管理", url: "/pages/settings/lines", perm: "line:read" },
-      { icon: "👥", name: "人员与组织", url: "/pages/settings/users", perm: "identity:read" },
-      { icon: "🙋", name: "员工与账号", url: "/pages/settings/employees" },
+      { icon: "🔀", name: "生产组调人", url: "/pages/settings/team-assign", perm: "team:write" },
+      { icon: "🙋", name: "员工信息", url: "/pages/settings/employees" },
       { icon: "📚", name: "字典维护", url: "/pages/settings/dictionaries", perm: "masterdata:read" },
     ],
   },
@@ -281,16 +281,16 @@ onShow(() => {
 }
 .kpi-num {
   color: #fff;
-  font-size: 38rpx;
+  font-size: 46rpx;
   font-weight: 700;
 }
 .kpi-label {
-  color: rgba(255, 255, 255, 0.75);
-  font-size: 22rpx;
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 26rpx;
   margin-top: 6rpx;
 }
 .group-title {
-  font-size: 26rpx;
+  font-size: 30rpx;
   font-weight: 700;
   color: #17255f;
   margin: 28rpx 0 16rpx;
@@ -315,8 +315,10 @@ onShow(() => {
   margin-bottom: 12rpx;
 }
 .cell-name {
-  font-size: 24rpx;
+  font-size: 28rpx;
   color: #334155;
+  line-height: 1.35;
+  text-align: center;
 }
 .empty {
   text-align: center;

@@ -109,7 +109,7 @@ func Export(ctx context.Context, store *datastore.Store, crypto *seccrypto.Servi
 	 * 失败清理目录，不留部分明文包——设计 3.9.5） */
 	insertJob := `INSERT INTO backup_job(tenant_id,id,node_id,backup_type,storage_key,manifest_sha256,includes_attachments,status,
 		started_at,finished_at,source_db,format_version,snapshot_at,requested_by,total_rows,table_count)
-		VALUES($1,$2,'center','plaintext_export',$3,$4,TRUE,'succeeded',$5,$5,'secure',$6,$5,$7,$8,$9)`
+		VALUES($1,$2,'center','plaintext_export',$3,$4,FALSE,'succeeded',$5,$5,'secure',$6,$5,$7,$8,$9)`
 	for _, pool := range []*pgxpool.Pool{store.Secure, store.Plain} {
 		if pool == nil {
 			continue

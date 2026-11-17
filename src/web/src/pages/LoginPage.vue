@@ -29,8 +29,9 @@ const notice = ref('')
 const form = reactive({ tenant_code: '', login_name: '', password: '', node_id: 'web-local' })
 const TENANT_CODE_KEY = 'clothp_last_tenant_code'
 
-/* ===== 账号密码登录：厂编码 + 工号/手机号（设计 5.6.1，固定错误顺序 5.6.3） =====
- * 工号与手机号均为租户内唯一，必须带厂编码；平台管理员请走 /platform/login。 */
+/* ===== 账号密码登录：工号/手机号 + 密码（固定错误顺序 5.6.3） =====
+ * 界面不显示厂编码：自动携带本机上次登录记忆的厂编码（TENANT_CODE_KEY）；
+ * 同一账号在多个厂使用时请用短信登录选择工厂；平台管理员请走 /platform/login。 */
 const REMEMBER_KEY = 'clothp_login_remember'
 const HISTORY_KEY = 'clothp_login_history'
 const AUTO_TRY_KEY = 'clothp_autologin_tried'
@@ -57,8 +58,13 @@ function persistCredentials() {
 
 async function login(silent = false) {
   error.value = ''
-  if (!form.tenant_code || !form.login_name || !form.password) {
-    if (!silent) error.value = '请填写厂编码、账号和密码'
+  if (!form.login_name || !form.password) {
+    if (!silent) error.value = '请填写账号和密码'
+    return
+  }
+  /* 厂编码不再展示输入框：自动携带本机记忆值；首次使用本机账号登录时先短信登录一次以记住厂编码 */
+  if (!form.tenant_code) {
+    if (!silent) error.value = '本机尚未记住厂编码，请先用短信验证码登录一次后再使用账号登录'
     return
   }
   loading.value = true
@@ -359,7 +365,7 @@ async function openQr() {
   } catch {
     url = moduleLoginUrl('zhisuan')
     qrState.value = 'offline'
-    qrHint.value = '二维码服务未启动，扫码将打开一智算登录页'
+    qrHint.value = '二维码服务未启动，扫码将打开登录页'
   }
   qrTarget.value = url
   qrImage.value = await makeQrImage(url, '#1d4ed8', 720)
@@ -426,11 +432,11 @@ onBeforeUnmount(() => { if (flowTimer) window.clearInterval(flowTimer); stopQrPo
     <div class="zs-inner">
       <section class="zs-hero">
         <RouterLink to="/portal" class="zs-back">← 返回门户</RouterLink>
-        <h1><span class="zs-dark">一智</span><span class="zs-grad">算</span></h1>
-        <p class="zs-en">AI Accounting &amp; Settlement</p>
-        <p class="zs-slogan">算账结算省心</p>
+        <h1><span class="zs-dark">生产</span><span class="zs-grad">管理</span></h1>
+        <p class="zs-en">Garment Production Management</p>
+        <p class="zs-slogan">订单、报工与工资一条线</p>
         <p class="zs-desc">贯通产品、工单、派工、报工、审批和工资，用一致的数据口径连接管理端与生产现场。</p>
-        <p class="zs-company">南宁一智万商科技有限责任公司</p>
+        <p class="zs-company">本厂内部账号登录</p>
       </section>
 
       <section class="zs-card-wrap">
@@ -446,12 +452,6 @@ onBeforeUnmount(() => { if (flowTimer) window.clearInterval(flowTimer); stopQrPo
 
                 <template v-if="mode === 'account'">
                   <div v-if="error" class="zs-error">{{ error }}</div>
-                  <div class="zs-field zs-with-icon">
-                    <span class="zs-field-icon" aria-hidden="true">
-                      <svg viewBox="0 0 24 24"><path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/></svg>
-                    </span>
-                    <input v-model.trim="form.tenant_code" autocomplete="organization" placeholder="厂编码（如 YZWS001）" />
-                  </div>
                   <div class="zs-field zs-with-icon">
                     <span class="zs-field-icon" aria-hidden="true">
                       <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.4"/><path d="M5 20c0-3.4 3.1-5.6 7-5.6s7 2.2 7 5.6"/></svg>
@@ -502,9 +502,9 @@ onBeforeUnmount(() => { if (flowTimer) window.clearInterval(flowTimer); stopQrPo
                     <span class="zs-field-icon" aria-hidden="true">
                       <svg viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
                     </span>
-                    <input v-model="smsPassword" type="password" autocomplete="current-password" placeholder="首次登录密码（厂管理员提供）" />
+                    <input v-model="smsPassword" type="password" autocomplete="current-password" placeholder="账号密码" />
                   </div>
-                  <p v-if="needFactoryPassword" class="zs-flow-msg">该手机号在本厂首次登录，请输入厂管理员提供的密码；验证成功后，以后只需手机验证码。</p>
+                  <p v-if="needFactoryPassword" class="zs-flow-msg">该账号已开启密码验证，请输入账号密码；关闭密码验证后只需手机验证码。</p>
                   <div class="zs-tenant-list">
                     <button v-for="t in tenantChoices" :key="t.kind + t.code" type="button" class="zs-tenant"
                       :class="{ trial: t.kind === 'trial' }" :disabled="pickingTenant" @click="enterByEntry(t, pendingTicket)">
@@ -595,7 +595,7 @@ onBeforeUnmount(() => { if (flowTimer) window.clearInterval(flowTimer); stopQrPo
         <button type="button" class="zs-qr-close" aria-label="关闭" @click="closeQr">✕</button>
         <h3>扫码登录</h3>
         <div class="zs-qr">
-          <img v-if="qrImage" :src="qrImage" alt="一智算扫码登录二维码" />
+          <img v-if="qrImage" :src="qrImage" alt="扫码登录二维码" />
           <div v-else class="zs-qr-loading">二维码生成中…</div>
         </div>
         <p v-if="qrState === 'scanned'">已扫码，请在手机上点击确认</p>

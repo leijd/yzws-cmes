@@ -1,0 +1,85 @@
+- generic [ref=e422]:
+  - generic [ref=e424]:
+    - generic [ref=e425]: ‹ 返回
+    - generic [ref=e426]: 员工信息
+    - generic [ref=e427] [cursor=pointer]: 鼎顺服贸 ▾
+  - generic [ref=e432]:
+    - generic [ref=e433]:
+      - generic [ref=e434]: 员工信息
+      - generic [ref=e435] [cursor=pointer]: ＋ 新建员工
+    - generic [ref=e436]:
+      - generic [ref=e438]:
+        - generic: 姓名/工号搜索
+        - textbox [ref=e439]
+      - generic [ref=e440] [cursor=pointer]: 查询
+    - generic [ref=e441]:
+      - generic [ref=e442]: 全部
+      - generic [ref=e443]: 在职
+      - generic [ref=e444]: 停用
+    - generic [ref=e445]:
+      - generic [ref=e447]:
+        - generic [ref=e448]:
+          - generic [ref=e449]: 体验用户
+          - generic [ref=e450]: 在职
+          - generic [ref=e452]: 已开通账号
+        - generic [ref=e454]: 工号 TYC0D-000001 · 系统管理员
+        - generic [ref=e455]: 性别未设 · 计薪未设
+      - generic [ref=e456]: 未分配车间 · 133****1235
+      - generic [ref=e458]: 租户管理员
+      - generic [ref=e461]:
+        - generic [ref=e462] [cursor=pointer]: 编辑
+        - generic [ref=e463] [cursor=pointer]: 角色/状态
+        - generic [ref=e464] [cursor=pointer]: 验证方式
+        - generic [ref=e465] [cursor=pointer]: 重置密码
+        - generic [ref=e466] [cursor=pointer]: 停用
+        - generic [ref=e467] [cursor=pointer]: 删除
+    - generic [ref=e468]:
+      - generic [ref=e470]:
+        - generic [ref=e471]:
+          - generic [ref=e472]: 李涛
+          - generic [ref=e473]: 在职
+          - generic [ref=e475]: 已开通账号
+        - generic [ref=e477]: 工号 TYC0D-00002 · 未设置岗位
+        - generic [ref=e478]: 男 · 计薪未设
+      - generic [ref=e479]: 未分配车间 · 13300199999
+      - generic [ref=e481]: 厂长
+      - generic [ref=e484]:
+        - generic [ref=e485] [cursor=pointer]: 编辑
+        - generic [ref=e486] [cursor=pointer]: 角色/状态
+        - generic [ref=e487] [cursor=pointer]: 验证方式
+        - generic [ref=e488] [cursor=pointer]: 重置密码
+        - generic [ref=e489] [cursor=pointer]: 停用
+        - generic [ref=e490] [cursor=pointer]: 删除
+    - generic [ref=e491]:
+      - generic [ref=e493]:
+        - generic [ref=e494]:
+          - generic [ref=e495]: 李小蔓
+          - generic [ref=e496]: 在职
+          - generic [ref=e498]: 已开通账号
+        - generic [ref=e500]: 工号 TYC0D-00003 · 质检
+        - generic [ref=e501]: 女 · 计件 · 2026-11-19 入职
+      - generic [ref=e502]: 未分配车间 · 133****9998
+      - generic [ref=e504]: 仓管/质检
+      - generic [ref=e507]:
+        - generic [ref=e508] [cursor=pointer]: 编辑
+        - generic [ref=e509] [cursor=pointer]: 角色/状态
+        - generic [ref=e510] [cursor=pointer]: 验证方式
+        - generic [ref=e511] [cursor=pointer]: 重置密码
+        - generic [ref=e512] [cursor=pointer]: 停用
+        - generic [ref=e513] [cursor=pointer]: 删除
+    - generic [ref=e514]:
+      - generic [ref=e516]:
+        - generic [ref=e517]:
+          - generic [ref=e518]: 跨厂测试员工
+          - generic [ref=e519]: 在职
+          - generic [ref=e521]: 已开通账号
+        - generic [ref=e523]: 工号 TYC0D-990001 · 未设置岗位
+        - generic [ref=e524]: 性别未设 · 计薪未设
+      - generic [ref=e525]: 未分配车间 · 133****9999
+      - generic [ref=e527]:
+        - generic [ref=e528] [cursor=pointer]: 编辑
+        - generic [ref=e529] [cursor=pointer]: 角色/状态
+        - generic [ref=e530] [cursor=pointer]: 验证方式
+        - generic [ref=e531] [cursor=pointer]: 重置密码
+        - generic [ref=e532] [cursor=pointer]: 停用
+        - generic [ref=e533] [cursor=pointer]: 删除

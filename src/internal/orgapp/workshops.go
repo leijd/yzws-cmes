@@ -77,8 +77,8 @@ func registerWorkshops(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, code, name, status, nature, remark string
-			var managerID, partner, capacity *string
+			var id, code, name, status, nature string
+			var managerID, partner, capacity, remark *string
 			var established *int64
 			var version, lineCount, employeeCount int64
 			if err := rows.Scan(&id, &code, &name, &status, &managerID, &nature, &partner, &established, &capacity, &remark, &version, &lineCount, &employeeCount); err != nil {
@@ -244,10 +244,13 @@ func registerWorkshops(api *httpapi.API) {
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"disabled": true})
 	})
-	/* 产线下的班组列表（人员建档级联用，line:read） */
+	/* 产线下的班组列表（人员建档级联用，line:read；含组长/组员数/版本，供班组管理视图） */
 	api.Handle("GET /api/v1/lines/{id}/teams", "line:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		id := r.PathValue("id")
-		rows, err := api.DB.Query(r.Context(), `SELECT o.id,o.code,o.name,o.status FROM org_unit o
+		rows, err := api.DB.Query(r.Context(), `SELECT o.id,o.code,o.name,o.status,o.version,COALESCE(o.remark,''),COALESCE(o.manager_employee_id,''),
+			(SELECT e.name FROM employee e WHERE e.tenant_id=o.tenant_id AND e.id=o.manager_employee_id) AS manager_name,
+			(SELECT COUNT(*) FROM employee e WHERE e.tenant_id=o.tenant_id AND e.team_org_id=o.id AND e.status='active') AS member_count
+			FROM org_unit o
 			WHERE o.tenant_id=$1 AND o.parent_id=$2 AND o.org_type='team' ORDER BY o.code`, p.TenantID, id)
 		if err != nil {
 			return err
@@ -255,11 +258,191 @@ func registerWorkshops(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, code, name, status string
-			if err := rows.Scan(&id, &code, &name, &status); err != nil {
+			var id, code, name, status, remark, managerID string
+			var managerName *string
+			var version, memberCount int64
+			if err := rows.Scan(&id, &code, &name, &status, &version, &remark, &managerID, &managerName, &memberCount); err != nil {
 				return err
 			}
-			items = append(items, map[string]any{"id": id, "code": code, "name": name, "status": status})
+			items = append(items, map[string]any{"id": id, "code": code, "name": name, "status": status, "version": version,
+				"remark": remark, "manager_employee_id": managerID, "manager_name": managerName, "member_count": memberCount})
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
+	})
+
+	/* 新建班组（生产组）：挂在指定产线下；编码留空自动生成（BZ-00001 式）；
+	 * 组长可选、须为本厂 active 管理人员；停用产线下不得新增。team:write 权限。 */
+	api.Handle("POST /api/v1/lines/{id}/teams", "team:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Code              string `json:"code"`
+			Name              string `json:"name"`
+			ManagerEmployeeID string `json:"manager_employee_id"`
+			Remark            string `json:"remark"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		lineID := r.PathValue("id")
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "班组名称必填")
+		}
+		var lineStatus, linePath string
+		if err := api.DB.QueryRow(r.Context(), `SELECT status, path FROM org_unit WHERE tenant_id=$1 AND id=$2 AND org_type='line'`, p.TenantID, lineID).Scan(&lineStatus, &linePath); err != nil {
+			return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "产线不存在")
+		}
+		if lineStatus != "active" {
+			return httpapi.Error(http.StatusConflict, "ORG_DISABLED", "产线已停用，不能新增班组")
+		}
+		code := strings.TrimSpace(in.Code)
+		if code == "" {
+			generated, err := codegen.Generate(r.Context(), api.DB, api.Writer, "org_unit", "code", p.TenantID, "org.team")
+			if err != nil {
+				return err
+			}
+			code = generated
+		}
+		var dup bool
+		if err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM org_unit WHERE tenant_id=$1 AND org_type='team' AND code=$2)`, p.TenantID, code).Scan(&dup); err != nil {
+			return err
+		}
+		if dup {
+			return httpapi.Error(http.StatusConflict, "DUPLICATE_TEAM_CODE", "班组编码已存在，请更换")
+		}
+		if err := validateManager(r.Context(), api.DB, p.TenantID, in.ManagerEmployeeID); err != nil {
+			return err
+		}
+		id := platform.ID()
+		now := platform.Now()
+		path := linePath + id + "/"
+		err := withDualTx(r.Context(), api, p.TenantID, "team", id, func(tx *dualwrite.Tx) error {
+			return execBoth(r.Context(), tx, `INSERT INTO org_unit(tenant_id,id,parent_id,org_type,code,name,manager_employee_id,path,status,remark,created_at,updated_at,created_by,created_node,updated_by,updated_node,version)
+				VALUES($1,$2,$3,'team',$4,$5,NULLIF($6,''),$7,'active',NULLIF($8,''),$9,$9,$10,$11,$10,$11,1)`,
+				p.TenantID, id, lineID, code, name, in.ManagerEmployeeID, path, in.Remark, now, p.UserID, api.Config.NodeID)
+		})
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"id": id, "code": code, "path": path})
+	})
+
+	/* 班组编辑：名称/组长/备注，乐观锁 version（team:write）。 */
+	api.Handle("PATCH /api/v1/teams/{id}", "team:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Name              string `json:"name"`
+			ManagerEmployeeID string `json:"manager_employee_id"`
+			Remark            string `json:"remark"`
+			Version           int64  `json:"version"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		id := r.PathValue("id")
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "班组名称必填")
+		}
+		if err := validateManager(r.Context(), api.DB, p.TenantID, in.ManagerEmployeeID); err != nil {
+			return err
+		}
+		now := platform.Now()
+		err := withDualTx(r.Context(), api, p.TenantID, "team", id, func(tx *dualwrite.Tx) error {
+			return execBoth(r.Context(), tx, `UPDATE org_unit SET name=$3,manager_employee_id=NULLIF($4,''),remark=NULLIF($5,''),
+				version=version+1,updated_at=$6,updated_by=$7,updated_node=$8
+				WHERE tenant_id=$1 AND id=$2 AND org_type='team' AND version=$9`,
+				p.TenantID, id, name, in.ManagerEmployeeID, in.Remark, now, p.UserID, api.Config.NodeID, in.Version)
+		})
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"saved": true, "version": in.Version + 1})
+	})
+
+	/* 停用班组：仍有在职组员时拒绝（先把组员调出或调入其他班组）。 */
+	api.Handle("POST /api/v1/teams/{id}/disable", "team:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		id := r.PathValue("id")
+		var members int
+		if err := api.DB.QueryRow(r.Context(), `SELECT COUNT(*) FROM employee
+			WHERE tenant_id=$1 AND status='active' AND (team_org_id=$2 OR org_unit_id=$2)`, p.TenantID, id).Scan(&members); err != nil {
+			return err
+		}
+		if members > 0 {
+			return httpapi.Error(http.StatusConflict, "ORG_HAS_ACTIVE_CHILDREN", "班组下仍有在职组员，请先调出或调入其他班组")
+		}
+		now := platform.Now()
+		err := withDualTx(r.Context(), api, p.TenantID, "team", id, func(tx *dualwrite.Tx) error {
+			return execBoth(r.Context(), tx, `UPDATE org_unit SET status='disabled',version=version+1,updated_at=$3,updated_by=$4,updated_node=$5
+				WHERE tenant_id=$1 AND id=$2 AND org_type='team'`, p.TenantID, id, now, p.UserID, api.Config.NodeID)
+		})
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"disabled": true})
+	})
+
+	/* 启用班组（产线必须处于启用状态，否则启用后无法向其分配人员）。 */
+	api.Handle("POST /api/v1/teams/{id}/enable", "team:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		id := r.PathValue("id")
+		var lineStatus string
+		if err := api.DB.QueryRow(r.Context(), `SELECT COALESCE((SELECT l.status FROM org_unit l
+			WHERE l.tenant_id=o.tenant_id AND l.id=o.parent_id),'') FROM org_unit o
+			WHERE o.tenant_id=$1 AND o.id=$2 AND o.org_type='team'`, p.TenantID, id).Scan(&lineStatus); err != nil {
+			return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "班组不存在")
+		}
+		if lineStatus != "active" {
+			return httpapi.Error(http.StatusConflict, "ORG_DISABLED", "所属产线已停用，请先启用产线")
+		}
+		now := platform.Now()
+		err := withDualTx(r.Context(), api, p.TenantID, "team", id, func(tx *dualwrite.Tx) error {
+			return execBoth(r.Context(), tx, `UPDATE org_unit SET status='active',version=version+1,updated_at=$3,updated_by=$4,updated_node=$5
+				WHERE tenant_id=$1 AND id=$2 AND org_type='team'`, p.TenantID, id, now, p.UserID, api.Config.NodeID)
+		})
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"enabled": true})
+	})
+
+	/* 删除班组：仅当无任何引用（员工当前归属硬外键 + 历史归属软引用）；
+	 * 有引用时返回 409 引导走停用。 */
+	api.Handle("DELETE /api/v1/teams/{id}", "team:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		id := r.PathValue("id")
+		var refs int
+		if err := api.DB.QueryRow(r.Context(), `SELECT
+				(SELECT COUNT(*) FROM employee WHERE tenant_id=$1 AND (team_org_id=$2 OR org_unit_id=$2)) +
+				(SELECT COUNT(*) FROM employee_org_binding WHERE tenant_id=$1 AND team_org_id=$2)`,
+			p.TenantID, id).Scan(&refs); err != nil {
+			return err
+		}
+		if refs > 0 {
+			return httpapi.Error(http.StatusConflict, "ORG_REFERENCED", "该班组存在组员或历史归属记录，不能直接删除，请先停用")
+		}
+		err := withDualTx(r.Context(), api, p.TenantID, "team", id, func(tx *dualwrite.Tx) error {
+			return execBoth(r.Context(), tx, `DELETE FROM org_unit WHERE tenant_id=$1 AND id=$2 AND org_type='team'`, p.TenantID, id)
+		})
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"deleted": true})
+	})
+
+	/* 班组当前组员列表（team:read）：在职人员，含工号/姓名/岗位。 */
+	api.Handle("GET /api/v1/teams/{id}/members", "team:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		id := r.PathValue("id")
+		rows, err := api.DB.Query(r.Context(), `SELECT e.id,e.employee_no,e.name,e.person_type,e.status,e.version
+			FROM employee e WHERE e.tenant_id=$1 AND e.team_org_id=$2 AND e.status='active' ORDER BY e.employee_no`, p.TenantID, id)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var empID, no, name, ptype, status string
+			var version int64
+			if err := rows.Scan(&empID, &no, &name, &ptype, &status, &version); err != nil {
+				return err
+			}
+			items = append(items, map[string]any{"id": empID, "employee_no": no, "name": name, "person_type": ptype, "status": status, "version": version})
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
 	})
@@ -353,6 +536,9 @@ func registerLines(api *httpapi.API) {
 		}
 		/* active 产线必须指定有效线长；disabled 可暂存无线长（附录 A.6） */
 		if status == "active" {
+			if strings.TrimSpace(in.ManagerEmployeeID) == "" {
+				return httpapi.Error(http.StatusBadRequest, "LINE_MANAGER_REQUIRED", "启用产线必须指定线长")
+			}
 			if err := validateManager(r.Context(), api.DB, p.TenantID, in.ManagerEmployeeID); err != nil {
 				return err
 			}
@@ -405,7 +591,8 @@ func registerLines(api *httpapi.API) {
 		id := r.PathValue("id")
 		var currentVersion int64
 		var currentStatus string
-		if err := api.DB.QueryRow(r.Context(), `SELECT version,status FROM org_unit WHERE tenant_id=$1 AND id=$2 AND org_type='line'`, p.TenantID, id).Scan(&currentVersion, &currentStatus); err != nil {
+		var currentManager *string
+		if err := api.DB.QueryRow(r.Context(), `SELECT version,status,manager_employee_id FROM org_unit WHERE tenant_id=$1 AND id=$2 AND org_type='line'`, p.TenantID, id).Scan(&currentVersion, &currentStatus, &currentManager); err != nil {
 			return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "产线不存在")
 		}
 		if in.Version != currentVersion {
@@ -415,13 +602,21 @@ func registerLines(api *httpapi.API) {
 		if targetStatus == "" {
 			targetStatus = currentStatus
 		}
-		/* 启用（或由 disabled 转 active）必须指定线长；active 状态不允许清空线长 */
+		/* 启用（或由 disabled 转 active）必须指定线长；未传则沿用现任线长，仍为空返回 LINE_MANAGER_REQUIRED */
+		managerID := strings.TrimSpace(in.ManagerEmployeeID)
 		if targetStatus == "active" {
-			if err := validateManager(r.Context(), api.DB, p.TenantID, in.ManagerEmployeeID); err != nil {
+			if managerID == "" && currentManager != nil {
+				managerID = strings.TrimSpace(*currentManager)
+			}
+			if managerID == "" {
+				return httpapi.Error(http.StatusBadRequest, "LINE_MANAGER_REQUIRED", "启用产线必须指定线长")
+			}
+			if err := validateManager(r.Context(), api.DB, p.TenantID, managerID); err != nil {
 				return err
 			}
-		} else if in.ManagerEmployeeID != "" {
-			if err := validateManager(r.Context(), api.DB, p.TenantID, in.ManagerEmployeeID); err != nil {
+			in.ManagerEmployeeID = managerID
+		} else if managerID != "" {
+			if err := validateManager(r.Context(), api.DB, p.TenantID, managerID); err != nil {
 				return err
 			}
 		}
@@ -493,7 +688,7 @@ func registerLines(api *httpapi.API) {
 			recordDenied(r.Context(), api, p, "line", id, "超出本线数据范围")
 			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "只能查看本产线人员")
 		}
-		rows, err := api.DB.Query(r.Context(), `SELECT e.id,e.employee_no,e.name,e.person_type,e.position,e.status
+		rows, err := api.DB.Query(r.Context(), `SELECT e.id,e.employee_no,e.name,e.person_type,e.position,e.status,e.version
 			FROM employee_org_binding b JOIN employee e ON e.tenant_id=b.tenant_id AND e.id=b.employee_id
 			WHERE b.tenant_id=$1 AND b.line_org_id=$2 AND b.is_primary=TRUE AND b.valid_to IS NULL
 			ORDER BY e.employee_no`, p.TenantID, id)
@@ -503,11 +698,13 @@ func registerLines(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, no, name, ptype, position, status string
-			if err := rows.Scan(&id, &no, &name, &ptype, &position, &status); err != nil {
+			var id, no, name, ptype, status string
+			var position *string
+			var version int64
+			if err := rows.Scan(&id, &no, &name, &ptype, &position, &status, &version); err != nil {
 				return err
 			}
-			items = append(items, map[string]any{"id": id, "employee_no": no, "name": name, "person_type": ptype, "position": position, "status": status})
+			items = append(items, map[string]any{"id": id, "employee_no": no, "name": name, "person_type": ptype, "position": position, "status": status, "version": version})
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
 	})
@@ -541,7 +738,7 @@ func orDefault(v, fallback string) string {
 /* workshopScopeSQL / lineScopeSQL 数据范围谓词（设计 5.7 第 5 条：SQL 始终包含范围谓词）。 */
 func workshopScopeSQL(a *Access, firstArg int) (string, []any) {
 	if a.All {
-		return "", nil
+		return a.DenyOrgSQL("o.id", "", firstArg)
 	}
 	if len(a.WorkshopIDs) == 0 {
 		return " AND FALSE", nil
@@ -557,7 +754,7 @@ func workshopScopeSQL(a *Access, firstArg int) (string, []any) {
 
 func lineScopeSQL(a *Access, firstArg int) (string, []any) {
 	if a.All {
-		return "", nil
+		return a.DenyOrgSQL("o.id", "o.parent_id", firstArg)
 	}
 	conds := []string{}
 	args := []any{}
@@ -583,9 +780,7 @@ func lineScopeSQL(a *Access, firstArg int) (string, []any) {
 	return " AND (" + strings.Join(conds, " OR ") + ")", args
 }
 
-/* recordDenied 越权访问审计（设计 4.9：access_denied 写 audit_log）。 */
+/* recordDenied 越权访问审计（设计 4.9），统一走 httpapi.API.RecordDenied。 */
 func recordDenied(ctx context.Context, api *httpapi.API, p auth.Principal, ownerType, ownerID, reason string) {
-	_, _ = api.DB.Exec(ctx, `INSERT INTO audit_log(tenant_id,id,request_id,actor_type,actor_id,action,owner_type,owner_id,reason,created_node,created_at)
-		VALUES($1,$2,$3,'user',$4,'access_denied',$5,$6,$7,$8,$9)`,
-		p.TenantID, "deny-"+platform.ID(), httpapi.RequestID(ctx), p.UserID, ownerType, ownerID, reason, api.Config.NodeID, platform.Now())
+	api.RecordDenied(ctx, p, ownerType, ownerID, reason)
 }

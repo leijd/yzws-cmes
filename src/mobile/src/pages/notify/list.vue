@@ -301,13 +301,13 @@ onShow(() => {
   color: #718096;
 }
 .muted {
-  font-size: 22rpx;
+  font-size: 26rpx;
   color: #94a3b8;
   display: block;
   margin-top: 6rpx;
 }
 .tag {
-  font-size: 20rpx;
+  font-size: 22rpx;
   padding: 2rpx 14rpx;
   border-radius: 999rpx;
   background: #dcfce7;

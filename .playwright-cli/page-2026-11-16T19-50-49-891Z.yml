@@ -1,0 +1,13 @@
+- generic [ref=f3e463]:
+  - generic [ref=f3e465]:
+    - generic [ref=f3e466]: ‹ 返回
+    - generic [ref=f3e467]: 扫码派工/报工
+    - generic [ref=f3e468] [cursor=pointer]: 大大制衣厂 ▾
+  - generic [ref=f3e474]:
+    - generic [ref=f3e475] [cursor=pointer]: 扫 码 派 工 / 报 工
+    - generic [ref=f3e476]:
+      - generic [ref=f3e478]:
+        - generic: 手动输入菲票号 / 扎号 / 扫码链接
+        - textbox [ref=f3e479]
+      - generic [ref=f3e480] [cursor=pointer]: 确定
+    - generic [ref=f3e481]: 二维码内容也可以是 /s/租户/菲票码 形式的链接

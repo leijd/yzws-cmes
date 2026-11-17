@@ -11,7 +11,7 @@ import { loadEnv } from 'vite'
  */
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
-  const apiTarget = process.env.API_TARGET || env.API_TARGET || 'http://localhost:18370'
+  const apiTarget = process.env.API_TARGET || env.API_TARGET || 'http://localhost:18390'
   return {
     plugins: [vue()],
     server: { port: 18379, proxy: { '/api': apiTarget } },

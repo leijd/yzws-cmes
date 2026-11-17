@@ -130,7 +130,7 @@ onLoad((options: any) => {
 .card { background: #fff; border-radius: 16rpx; padding: 24rpx 32rpx; margin-bottom: 20rpx; }
 .card-title { font-size: 30rpx; font-weight: 600; color: #2d3748; margin-bottom: 12rpx; }
 .body { display: block; font-size: 26rpx; color: #475569; margin-top: 16rpx; line-height: 1.7; }
-.muted { font-size: 24rpx; color: #94a3b8; }
+.muted { font-size: 26rpx; color: #94a3b8; }
 .kv { display: flex; padding: 12rpx 0; border-bottom: 1px solid #f1f5f9; font-size: 26rpx; }
 .k { width: 180rpx; color: #94a3b8; }
 .v { flex: 1; color: #2d3748; }

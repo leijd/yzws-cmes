@@ -158,7 +158,7 @@ func registerRoleTemplates(api *httpapi.API) {
 		tenantID := r.PathValue("id")
 		/* 计划事务外完成（读读主库 api.DB，即 secure；设计 2.2 第 7 条：业务不得读明文库）；
 		 * 单步双写事务落两库（设计原则：禁止长事务） */
-		plan, err := planRoleTemplates(ctx, api.DB, tenantID, in.TemplateIDs, p.AdminID, api.Config.NodeID)
+		plan, err := planRoleTemplates(ctx, api.DB, tenantID, in.TemplateIDs, p.AdminID, api.Config.NodeID, false)
 		if err != nil {
 			return err
 		}
@@ -237,12 +237,14 @@ type roleApplyPlan struct {
 	Updated  []string
 }
 
-type templateQuerier interface {
+type TemplateQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-func planRoleTemplates(ctx context.Context, db templateQuerier, tenantID string, templateIDs []string, actorID, nodeID string) (*roleApplyPlan, error) {
+/* onlyMissing=true 用于租户端「从平台库补充角色」：已存在的角色保持原样（名称与权限都不覆盖），
+ * 只把本厂缺失的模板角色加入计划；false 为平台端 apply-role-templates 的覆盖语义。 */
+func planRoleTemplates(ctx context.Context, db TemplateQuerier, tenantID string, templateIDs []string, actorID, nodeID string, onlyMissing bool) (*roleApplyPlan, error) {
 	query := `SELECT id,code,name,description FROM platform_role_template WHERE status='active' ORDER BY sort_no,code`
 	args := []any{}
 	if len(templateIDs) > 0 {
@@ -271,6 +273,10 @@ func planRoleTemplates(ctx context.Context, db templateQuerier, tenantID string,
 		return nil, httpapi.Error(400, "INVALID_TEMPLATE", "角色模板不存在或已停用")
 	}
 	plan := &roleApplyPlan{TenantID: tenantID, ActorID: actorID, NodeID: nodeID, Now: platform.Now()}
+	/* 本计划内待新建权限点 code → 统一 ID：多个模板角色含同一权限点时共用同一 ID。
+	 * 否则各角色各生成一个 ID，apply 时 ON CONFLICT(tenant_id,code) DO NOTHING 只插入第一个，
+	 * 后续角色的授权引用其自生成 ID → 外键 23503（role_permission_tenant_id_permission_id_fkey）。 */
+	pendingPermID := map[string]string{}
 	for _, item := range templates {
 		if item.code == "tenant_admin" {
 			return nil, httpapi.Error(400, "INVALID_TEMPLATE", "角色模板不能覆盖固定租户管理员")
@@ -278,11 +284,22 @@ func planRoleTemplates(ctx context.Context, db templateQuerier, tenantID string,
 		role := plannedRole{Code: item.code, Name: item.name, Description: item.description, TemplateID: item.id}
 		err = db.QueryRow(ctx, "SELECT id FROM role WHERE tenant_id=$1 AND code=$2", tenantID, item.code).Scan(&role.RoleID)
 		if errors.Is(err, pgx.ErrNoRows) {
+			/* 编码缺失但同厂已有同名角色（自定义或改名过）：跳过，避免撞 (tenant_id, lower(name))
+			 * 唯一约束；同名时无法自动复制，跳过比整个事务失败更安全。 */
+			var nameTaken bool
+			if err := db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM role WHERE tenant_id=$1 AND lower(btrim(name))=lower($2))", tenantID, item.name).Scan(&nameTaken); err != nil {
+				return nil, err
+			}
+			if nameTaken {
+				continue
+			}
 			role.IsNew = true
 			role.RoleID = platform.ID()
 			plan.Created = append(plan.Created, item.code)
 		} else if err != nil {
 			return nil, err
+		} else if onlyMissing {
+			continue
 		} else {
 			plan.Updated = append(plan.Updated, item.code)
 		}
@@ -308,7 +325,12 @@ func planRoleTemplates(ctx context.Context, db templateQuerier, tenantID string,
 			err = db.QueryRow(ctx, "SELECT id FROM permission WHERE tenant_id=$1 AND code=$2", tenantID, code).Scan(&perm.PermissionID)
 			if errors.Is(err, pgx.ErrNoRows) {
 				perm.InsertPermission = true
-				perm.PermissionID = platform.ID()
+				if id, ok := pendingPermID[code]; ok {
+					perm.PermissionID = id
+				} else {
+					perm.PermissionID = platform.ID()
+					pendingPermID[code] = perm.PermissionID
+				}
 			} else if err != nil {
 				return nil, err
 			}
@@ -356,7 +378,7 @@ func (p *roleApplyPlan) apply(ctx context.Context, tx pgx.Tx) error {
 /* applyRoleTemplates 单事务兼容入口（计划+执行同事务）。新代码请用 planRoleTemplates
  * 事务外计划、双写事务分别 apply。 */
 func applyRoleTemplates(ctx context.Context, tx pgx.Tx, tenantID string, templateIDs []string, actorID, nodeID string) (map[string]any, error) {
-	plan, err := planRoleTemplates(ctx, tx, tenantID, templateIDs, actorID, nodeID)
+	plan, err := planRoleTemplates(ctx, tx, tenantID, templateIDs, actorID, nodeID, false)
 	if err != nil {
 		return nil, err
 	}
@@ -365,3 +387,22 @@ func applyRoleTemplates(ctx context.Context, tx pgx.Tx, tenantID string, templat
 	}
 	return plan.Summary(), nil
 }
+
+/* RoleTemplatePlan 供租户端「从平台库补充缺少的角色」使用：只增不改，
+ * 已存在的角色不进入计划，名称与权限保持原样。事务外生成计划、双写事务内 Apply。 */
+type RoleTemplatePlan struct{ plan *roleApplyPlan }
+
+func PlanMissingRoleTemplates(ctx context.Context, db TemplateQuerier, tenantID string, templateIDs []string, actorID, nodeID string) (*RoleTemplatePlan, error) {
+	plan, err := planRoleTemplates(ctx, db, tenantID, templateIDs, actorID, nodeID, true)
+	if err != nil {
+		return nil, err
+	}
+	return &RoleTemplatePlan{plan: plan}, nil
+}
+
+func (p *RoleTemplatePlan) Apply(ctx context.Context, tx pgx.Tx) error { return p.plan.apply(ctx, tx) }
+
+// Created 返回本次新建的角色编码（已存在的角色不在其中）。
+func (p *RoleTemplatePlan) Created() []string { return p.plan.Created }
+
+func (p *RoleTemplatePlan) Summary() map[string]any { return p.plan.Summary() }

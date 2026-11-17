@@ -25,7 +25,7 @@ const busy = ref(false)
 const deviceId = ref(wechatDeviceID())
 const boundAccount = ref<WechatBoundAccount | null>(null)
 
-/* 首次微信登录表单：手机号 + 验证码 + 厂管理员提供的密码（管理员本人免密码） */
+/* 微信登录表单：手机号 + 验证码；账号开启「密码验证」时再补账号密码 */
 const phone = ref('')
 const code = ref('')
 const password = ref('')
@@ -174,7 +174,7 @@ async function cancel() {
         <button class="qr-cancel" :disabled="busy" @click="cancel">取消登录</button>
       </template>
 
-      <!-- 首次微信登录：手机号 + 验证码（+ 工厂首次密码） -->
+      <!-- 首次微信登录：手机号 + 验证码（+ 已开通的密码验证） -->
       <template v-else-if="state === 'form'">
         <div class="qr-state-icon" :style="{ color }">▣</div>
         <h1>首次微信登录</h1>
@@ -190,10 +190,10 @@ async function cancel() {
           <p v-if="demoCode" class="qr-demo-code">演示验证码：<strong>{{ demoCode }}</strong>（{{ countdown || '已过期' }}）</p>
           <input v-model="shortCode" type="text" maxlength="5" placeholder="厂标识（可选，5 位）" />
           <input v-model="password" type="password" autocomplete="current-password"
-            :placeholder="passwordNeeded ? '厂管理员提供的密码（必填）' : '首次登录密码（普通员工必填，管理员可留空）'" />
+            :placeholder="passwordNeeded ? '账号密码（必填）' : '账号密码（如已开启密码验证）'" />
         </div>
         <p v-if="message" class="qr-msg">{{ message }}</p>
-        <p class="qr-note">普通员工首次微信登录需输入厂管理员提供的密码 + 本人手机验证码；成功后本机微信自动绑定，以后扫码即可直接登录。</p>
+        <p class="qr-note">首次微信登录需本人手机验证码；若账号已开启密码验证，还需输入账号密码。开通「微信设备快捷登录」并绑定本机后，以后扫码即可直接登录。</p>
         <button class="qr-primary" :style="{ background: color }" :disabled="busy" @click="submitFirstLogin">
           {{ busy ? '正在登录…' : '验证并登录' }}
         </button>

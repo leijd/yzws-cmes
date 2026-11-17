@@ -1,0 +1,70 @@
+- generic [ref=f3e463]:
+  - generic [ref=f3e465]:
+    - generic [ref=f3e466]: ‹ 返回
+    - generic [ref=f3e467]: 扫码派工/报工
+    - generic [ref=f3e468] [cursor=pointer]: 大大制衣厂 ▾
+  - generic [ref=f3e473]:
+    - generic [ref=f3e482]:
+      - generic [ref=f3e483]:
+        - generic [ref=f3e484]: GDD202611001-R10
+        - generic [ref=f3e485]: 按扎
+      - generic [ref=f3e486]:
+        - generic [ref=f3e487]: 项目号
+        - generic [ref=f3e488]: D-PJ-CP001-R10
+      - generic [ref=f3e489]:
+        - generic [ref=f3e490]: 品牌
+        - generic [ref=f3e491]: 附录D客户
+      - generic [ref=f3e492]:
+        - generic [ref=f3e493]: 款式
+        - generic [ref=f3e494]: 纯棉衬衫A（CP001）
+      - generic [ref=f3e495]:
+        - generic [ref=f3e496]: 扎号
+        - generic [ref=f3e497]: 5 / 整件
+      - generic [ref=f3e498]:
+        - generic [ref=f3e499]: 颜色/尺码
+        - generic [ref=f3e500]: 米 / M
+      - generic [ref=f3e501]:
+        - generic [ref=f3e502]: 本扎数量
+        - generic [ref=f3e503]: 30 件
+      - generic [ref=f3e504]:
+        - generic [ref=f3e505]: 裁床人
+        - generic [ref=f3e506]: —
+      - generic [ref=f3e507]:
+        - generic [ref=f3e508]: 床次
+        - generic [ref=f3e509]: BED-D
+      - generic [ref=f3e510] [cursor=pointer]: 重新扫码
+    - generic [ref=f3e511]:
+      - generic [ref=f3e512]: 选择工序
+      - generic [ref=f3e513]:
+        - generic [ref=f3e514]:
+          - generic [ref=f3e515]: 1. 裁剪
+          - generic [ref=f3e516]: 已报 120 / 计划 150
+        - generic [ref=f3e517]: ✓
+      - generic [ref=f3e519]:
+        - generic [ref=f3e520]: 2. 缝制一
+        - generic [ref=f3e521]: 已报 120 / 计划 150
+      - generic [ref=f3e523]:
+        - generic [ref=f3e524]: 3. 缝制二
+        - generic [ref=f3e525]: 已报 90 / 计划 150
+      - generic [ref=f3e527]:
+        - generic [ref=f3e528]: 4. 缝制三
+        - generic [ref=f3e529]: 已报 90 / 计划 150
+    - generic [ref=f3e530]:
+      - generic [ref=f3e531]: 报工数量 · 裁剪
+      - generic [ref=f3e532]:
+        - generic [ref=f3e533]: 合格数
+        - generic [ref=f3e535]:
+          - generic: "0"
+          - spinbutton [ref=f3e536]
+      - generic [ref=f3e537]:
+        - generic [ref=f3e538]: 次品数
+        - generic [ref=f3e540]:
+          - generic: "0"
+          - spinbutton [ref=f3e541]
+      - generic [ref=f3e542]:
+        - generic [ref=f3e543]: 备注
+        - generic [ref=f3e545]:
+          - generic: 选填
+          - textbox [ref=f3e546]
+      - generic [ref=f3e547]: 本工序剩余可报 30 件；同一扎同一工序只能报工一次。
+      - generic [ref=f3e548] [cursor=pointer]: 提交报工

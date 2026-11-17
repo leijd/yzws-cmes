@@ -1,6 +1,6 @@
 # e2e simulated frontend: sms-login -> trial-enter -> next-no -> create -> list verify -> dup/disable/binding
 $ErrorActionPreference = "Continue"
-$base = "http://127.0.0.1:18370/api/v1"
+$base = "http://127.0.0.1:18390/api/v1"
 $phone = "13079123109"
 $fail = 0
 function Step($name, $ok, $detail) {

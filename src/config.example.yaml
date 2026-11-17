@@ -5,7 +5,7 @@ mode: center
 public_base_url: ""
 
 server:
-  listen: ":18370"
+  listen: ":18390"
   read_header_timeout_ms: 10000
 
 node:
@@ -23,7 +23,7 @@ security:
 database:
   host: 127.0.0.1
   port: 5432
-  name: yzws-v1
+  name: yzws-v1-sec
   user: postgres
   password: "CHANGE_ME"
   sslmode: disable

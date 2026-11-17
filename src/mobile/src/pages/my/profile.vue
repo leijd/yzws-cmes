@@ -17,6 +17,23 @@
       </view>
 
       <view class="card">
+        <view class="section-title" style="margin-top: 0">登录验证</view>
+        <text class="muted">短信验证码为基础验证，始终开启且不可关闭；其他方式可自行开通或关闭。</text>
+        <view class="row between" style="margin-top: 16rpx">
+          <view class="col grow"><text class="title" style="font-size: 26rpx">短信验证码</text><text class="muted">登录时必选，固定开启</text></view>
+          <switch :checked="true" disabled color="#2563eb" />
+        </view>
+        <view class="row between" style="margin-top: 16rpx">
+          <view class="col grow"><text class="title" style="font-size: 26rpx">密码验证</text><text class="muted">开通后短信之外还需账号密码</text></view>
+          <switch :checked="authMethods.password" :disabled="authSaving" color="#2563eb" @change="toggleAuth('password', $event)" />
+        </view>
+        <view class="row between" style="margin-top: 16rpx">
+          <view class="col grow"><text class="title" style="font-size: 26rpx">微信设备快捷登录</text><text class="muted">关闭时自动解绑已绑定设备</text></view>
+          <switch :checked="authMethods.wechat" :disabled="authSaving" color="#2563eb" @change="toggleAuth('wechat', $event)" />
+        </view>
+      </view>
+
+      <view class="card">
         <view class="section-title" style="margin-top: 0">联系信息</view>
         <view class="field">
           <text class="field-label required">手机号</text>
@@ -140,7 +157,35 @@ async function save() {
   }
 }
 
-onLoad(load);
+/* 登录验证方式：短信恒开，密码/微信由本人开关 */
+const authMethods = ref({ sms: true, password: false, wechat: false });
+const authSaving = ref(false);
+async function loadAuthMethods() {
+  try {
+    const r = await request<{ methods: { sms: boolean; password: boolean; wechat: boolean } }>("/me/auth-methods", { silent: true });
+    authMethods.value = { ...r.methods, sms: true };
+  } catch { /* 无账号时忽略 */ }
+}
+async function toggleAuth(key: "password" | "wechat", ev: any) {
+  if (authSaving.value) return;
+  const value = !!ev?.detail?.value;
+  authSaving.value = true;
+  try {
+    const r = await request<{ methods: { sms: boolean; password: boolean; wechat: boolean } }>("/me/auth-methods", {
+      method: "PUT",
+      data: { [key]: value },
+    });
+    authMethods.value = { ...r.methods, sms: true };
+    uni.showToast({ title: value ? "已开通" : "已关闭", icon: "none" });
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "设置失败", icon: "none" });
+    await loadAuthMethods();
+  } finally {
+    authSaving.value = false;
+  }
+}
+
+onLoad(() => { void load(); void loadAuthMethods(); });
 </script>
 
 <style scoped>

@@ -1,0 +1,40 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e128]:
+    - generic [ref=e129]:
+      - link "← 返回门户" [ref=e130] [cursor=pointer]:
+        - /url: /portal
+      - heading "生产管理" [level=1] [ref=e131]
+      - paragraph [ref=e132]: Garment Production Management
+      - paragraph [ref=e133]: 订单、报工与工资一条线
+      - paragraph [ref=e134]: 贯通产品、工单、派工、报工、审批和工资，用一致的数据口径连接管理端与生产现场。
+      - paragraph [ref=e135]: 本厂内部账号登录
+    - generic [ref=e139]:
+      - generic [ref=e140]:
+        - generic [ref=e141]:
+          - heading "短信登录" [level=2] [ref=e142]
+          - button "← 账号登录" [ref=e143] [cursor=pointer]
+        - paragraph [ref=e144]:
+          - text: 已注册用户可用短信验证码直接登录，
+          - strong [ref=e145]: 验证码 3 分钟内有效
+          - text: 。
+        - textbox "请输入 11 位手机号" [ref=e147]
+        - generic [ref=e148]:
+          - textbox "6 位验证码" [ref=e149]
+          - button "获取验证码" [ref=e150] [cursor=pointer]
+        - button "获取验证码" [ref=e151] [cursor=pointer]
+      - complementary [ref=e153]:
+        - paragraph [ref=e154]: 其他登录方式：
+        - generic [ref=e155]:
+          - button "极速注册" [ref=e156] [cursor=pointer]
+          - button "短信登录" [ref=e161] [cursor=pointer]
+          - button "扫码登录" [ref=e166] [cursor=pointer]
+          - button "游客浏览" [ref=e170] [cursor=pointer]
+        - generic [ref=e175]:
+          - button "微" [ref=e176] [cursor=pointer]
+          - button "Q" [ref=e177] [cursor=pointer]
+          - button "博" [ref=e178] [cursor=pointer]
+        - link "制衣厂注册（平台确认后启用） →" [ref=e179] [cursor=pointer]:
+          - /url: /register
+        - link "免费体验一个月 →" [ref=e180] [cursor=pointer]:
+          - /url: /register?mode=trial
+  - alert

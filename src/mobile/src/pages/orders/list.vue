@@ -9,9 +9,9 @@
     </view>
 
     <view class="chips">
-      <view class="chip" :class="{ on: tab === 'projects' }" @click="tab = 'projects'">项目</view>
-      <view class="chip" :class="{ on: tab === 'workorders' }" @click="tab = 'workorders'">工单</view>
-      <view class="chip" :class="{ on: tab === 'cuttings' }" @click="tab = 'cuttings'; loadCuttings()">裁床</view>
+      <view v-if="canProjectRead" class="chip" :class="{ on: tab === 'projects' }" @click="tab = 'projects'">项目</view>
+      <view v-if="canWorkOrderRead" class="chip" :class="{ on: tab === 'workorders' }" @click="tab = 'workorders'">工单</view>
+      <view v-if="canCuttingRead" class="chip" :class="{ on: tab === 'cuttings' }" @click="tab = 'cuttings'; loadCuttings()">裁床</view>
     </view>
 
     <!-- 项目列表 -->
@@ -242,6 +242,7 @@
 import { ref, computed } from "vue";
 import { onLoad, onShow } from "@dcloudio/uni-app";
 import { request } from "../../utils/request";
+import { auth } from "../../store/auth";
 
 interface Project {
   id: string;
@@ -270,7 +271,18 @@ interface WorkOrder {
   version: number;
 }
 
-const tab = ref<"projects" | "workorders" | "cuttings">("projects");
+type OrdersTab = "projects" | "workorders" | "cuttings";
+const canProjectRead = computed(() => auth.hasPerm("project:read"));
+const canWorkOrderRead = computed(() => auth.hasPerm("work_order:read"));
+const canCuttingRead = computed(() => auth.hasPerm("cutting:read"));
+const availableTabs = computed<OrdersTab[]>(() => {
+  const tabs: OrdersTab[] = [];
+  if (canProjectRead.value) tabs.push("projects");
+  if (canWorkOrderRead.value) tabs.push("workorders");
+  if (canCuttingRead.value) tabs.push("cuttings");
+  return tabs;
+});
+const tab = ref<OrdersTab>("projects");
 
 /* 裁床 */
 interface CuttingItem {
@@ -661,13 +673,20 @@ function removeCutting(c: CuttingItem) {
   });
 }
 
-onLoad(() => {
-  loadProjects();
-  loadWorkOrders(true);
+onLoad(async () => {
+  /* 权限可能尚未加载完成，先补齐再决定展示哪些 tab */
+  if (auth.hasSession && !Object.keys(auth.permissions).length) await auth.fetchPermissions();
+  /* 默认 tab 无权限时切到第一个有权限的 tab */
+  if (availableTabs.value.length && !availableTabs.value.includes(tab.value)) {
+    tab.value = availableTabs.value[0];
+  }
+  if (canProjectRead.value) loadProjects();
+  if (canWorkOrderRead.value) loadWorkOrders(true);
+  if (canCuttingRead.value) loadCuttings();
   loadOptions();
 });
 onShow(() => {
-  if (tab.value === "workorders") loadWorkOrders(true);
+  if (tab.value === "workorders" && canWorkOrderRead.value) loadWorkOrders(true);
 });
 </script>
 

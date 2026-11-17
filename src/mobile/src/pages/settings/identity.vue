@@ -3,7 +3,10 @@
   <view class="page">
     <view class="row between" style="margin-bottom: 20rpx">
       <view class="title">用户角色权限</view>
-      <button class="btn btn-solid btn-sm" @click="openCreate">＋ 新建角色</button>
+      <view class="row" style="gap: 12rpx">
+        <button class="btn btn-outline btn-sm" @click="openLib">从平台库补充</button>
+        <button class="btn btn-solid btn-sm" @click="openCreate">＋ 新建角色</button>
+      </view>
     </view>
 
     <view v-if="loading && !items.length" class="empty">加载中…</view>
@@ -15,7 +18,7 @@
           <view class="row gap8">
             <text class="title" style="font-size: 28rpx">{{ r.name }}</text>
             <text v-if="r.is_system" class="tag tag-purple">内置</text>
-            <text v-if="r.source === 'template'" class="tag tag-blue">平台模板</text>
+            <text v-if="r.source === 'platform' || r.source === 'template'" class="tag tag-blue">平台模板</text>
           </view>
           <text class="muted">{{ r.code }} · {{ r.user_count }} 人使用{{ r.description ? " · " + r.description : "" }}</text>
         </view>
@@ -31,8 +34,8 @@
       <view class="sheet" @click.stop>
         <view class="title" style="margin-bottom: 24rpx">新建角色</view>
         <view class="field">
-          <text class="field-label required">角色编码</text>
-          <input class="input" v-model.trim="form.code" placeholder="如 group_leader" />
+          <text class="field-label">角色编码</text>
+          <text class="muted">由系统自动生成（custom_001 起），无需填写</text>
         </view>
         <view class="field">
           <text class="field-label required">角色名称</text>
@@ -44,6 +47,37 @@
         </view>
         <view v-if="formError" class="error-text">{{ formError }}</view>
         <button class="btn btn-solid btn-block" :disabled="saving" @click="saveCreate">{{ saving ? "创建中…" : "创建角色" }}</button>
+      </view>
+    </view>
+
+    <!-- 从平台库补充角色 -->
+    <view v-if="libSheet" class="sheet-mask" @click="libSheet = false">
+      <view class="sheet" @click.stop>
+        <view class="row between" style="margin-bottom: 12rpx">
+          <text class="title">从平台库补充角色</text>
+          <button class="btn btn-ghost btn-sm" @click="libSheet = false">关闭</button>
+        </view>
+        <text class="muted">只勾选本厂缺少的角色；已存在的角色保持勾选且不可取消，名称与权限不会被覆盖。</text>
+        <view v-if="libLoading" class="empty">加载中…</view>
+        <template v-else>
+          <view
+            v-for="t in libItems"
+            :key="t.id"
+            class="lib-row"
+            :class="{ disabled: t.exists }"
+            @click="toggleLib(t)"
+          >
+            <view class="lib-box" :class="{ on: t.exists || libSelected[t.id] }">{{ t.exists || libSelected[t.id] ? "✓" : "" }}</view>
+            <view class="col grow">
+              <text class="title" style="font-size: 26rpx">{{ t.name }}</text>
+              <text class="muted">{{ t.code }} · {{ t.permission_count }} 项权限{{ t.exists ? " · 已存在" : "" }}</text>
+            </view>
+          </view>
+          <view v-if="!libItems.length" class="empty">暂无可用角色</view>
+        </template>
+        <button class="btn btn-solid btn-block" :disabled="libSaving || !libMissingCount" @click="applyLib">
+          {{ libSaving ? "补充中…" : `补充勾选角色（${libMissingCount}）` }}
+        </button>
       </view>
     </view>
 
@@ -88,6 +122,7 @@ interface RoleItem {
   is_system: boolean; source: string; user_count: number; version: number;
 }
 interface PermItem { code: string; module: string; name: string; kind: string; admin_only: boolean }
+interface LibItem { id: string; code: string; name: string; description?: string; permission_count: number; exists: boolean }
 
 const items = ref<RoleItem[]>([]);
 const loading = ref(false);
@@ -95,7 +130,16 @@ const saving = ref(false);
 
 const createSheet = ref(false);
 const formError = ref("");
-const form = ref({ code: "", name: "", description: "" });
+/* 角色编码由服务端生成（custom_001…），表单只维护名称与描述 */
+const form = ref({ name: "", description: "" });
+
+/* 平台角色库：已存在的角色固定勾选且置灰，只能勾选本厂缺少的角色 */
+const libSheet = ref(false);
+const libLoading = ref(false);
+const libSaving = ref(false);
+const libItems = ref<LibItem[]>([]);
+const libSelected = ref<Record<string, boolean>>({});
+const libMissingCount = computed(() => libItems.value.filter((t) => !t.exists && libSelected.value[t.id]).length);
 
 const permSheet = ref(false);
 const permLoading = ref(false);
@@ -126,14 +170,56 @@ async function load() {
 }
 
 function openCreate() {
-  form.value = { code: "", name: "", description: "" };
+  form.value = { name: "", description: "" };
   formError.value = "";
   createSheet.value = true;
 }
 
+async function openLib() {
+  libSheet.value = true;
+  libLoading.value = true;
+  formError.value = "";
+  try {
+    const res = await request<{ items: LibItem[] }>("/role-templates", { silent: true });
+    libItems.value = res.items || [];
+    const sel: Record<string, boolean> = {};
+    for (const t of libItems.value) sel[t.id] = !t.exists;
+    libSelected.value = sel;
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "加载失败", icon: "none" });
+  } finally {
+    libLoading.value = false;
+  }
+}
+
+function toggleLib(t: LibItem) {
+  if (t.exists) return; // 已存在的角色不可取消勾选
+  libSelected.value = { ...libSelected.value, [t.id]: !libSelected.value[t.id] };
+}
+
+async function applyLib() {
+  const ids = libItems.value.filter((t) => !t.exists && libSelected.value[t.id]).map((t) => t.id);
+  if (!ids.length) {
+    uni.showToast({ title: "没有需要补充的角色", icon: "none" });
+    libSheet.value = false;
+    return;
+  }
+  libSaving.value = true;
+  try {
+    const res = await request<{ created_count: number }>("/role-templates/apply", { method: "POST", data: { template_ids: ids } });
+    uni.showToast({ title: `已补充 ${res.created_count} 个角色`, icon: "none" });
+    libSheet.value = false;
+    load();
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "补充失败", icon: "none" });
+  } finally {
+    libSaving.value = false;
+  }
+}
+
 async function saveCreate() {
   formError.value = "";
-  if (!form.value.code || !form.value.name) { formError.value = "角色编码与名称必填"; return; }
+  if (!form.value.name) { formError.value = "角色名称必填（编码自动生成）"; return; }
   saving.value = true;
   try {
     await request("/roles", { method: "POST", data: { ...form.value }, idempotency: true });
@@ -216,4 +302,9 @@ onLoad(load);
 .perm-group { margin-bottom: 24rpx; }
 .perm-module { display: block; font-size: 24rpx; font-weight: 700; color: #17255f; margin-bottom: 12rpx; }
 .error-text { color: #d92d20; font-size: 24rpx; margin-top: 12rpx; }
+.lib-row { display: flex; align-items: center; gap: 16rpx; padding: 20rpx 0; border-bottom: 1rpx solid #eef2f7; }
+.lib-row.disabled { opacity: 0.55; }
+.lib-box { width: 36rpx; height: 36rpx; flex: none; border-radius: 8rpx; border: 2rpx solid #c7d2e4; color: #fff; font-size: 24rpx; line-height: 32rpx; text-align: center; }
+.lib-box.on { background: #2563eb; border-color: #2563eb; }
+.lib-row.disabled .lib-box.on { background: #94a3b8; border-color: #94a3b8; }
 </style>

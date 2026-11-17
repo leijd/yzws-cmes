@@ -161,7 +161,7 @@ type fileDatabase struct {
 
 func defaults() Config {
 	return Config{
-		Mode: "center", Listen: ":18370", ReadHeaderTimeout: 10 * time.Second,
+		Mode: "center", Listen: ":18390", ReadHeaderTimeout: 10 * time.Second,
 		NodeID: "center-local", JWTSecret: "local-development-only-change-me",
 		BootstrapAdminPassword: "ChangeMe123!", BootstrapPlatformAdminPassword: "PlatformAdmin123!", AttachmentDir: "data/attachments",
 		AccessTokenTTL: 2 * time.Hour, OfflineSessionTTL: 7 * 24 * time.Hour,

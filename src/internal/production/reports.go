@@ -9,6 +9,7 @@ import (
 
 	"clothp/internal/auth"
 	"clothp/internal/httpapi"
+	"clothp/internal/orgapp"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -49,6 +50,22 @@ func registerReports(api *httpapi.API) {
 		}
 		if err != nil {
 			return err
+		}
+		/* 详情同样执行组织范围过滤（设计 5.7 第 5 条） */
+		access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+		if err != nil {
+			return err
+		}
+		if !access.All || access.Deny != nil {
+			var workshopID, lineID, teamID *string
+			employeeID, _ := item["employee_id"].(string)
+			if employeeID != "" {
+				_ = api.DB.QueryRow(r.Context(), `SELECT workshop_org_id,line_org_id,team_org_id FROM employee WHERE tenant_id=$1 AND id=$2`, p.TenantID, employeeID).Scan(&workshopID, &lineID, &teamID)
+			}
+			if !access.AllowEmployeeOrg(workshopID, lineID, teamID, employeeID) {
+				api.RecordDenied(r.Context(), p, "work_report", r.PathValue("id"), "超出组织数据范围查看报工")
+				return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "无权查看该报工记录")
+			}
 		}
 		return httpapi.JSON(w, 200, item)
 	})
@@ -127,6 +144,14 @@ func listReports(api *httpapi.API, w http.ResponseWriter, r *http.Request, p aut
 		args = append(args, employee)
 		where += fmt.Sprintf(" AND wr.employee_id=$%d", len(args))
 	}
+	/* 数据范围（设计 5.7）：按报工人员的组织归属过滤车间/产线/班组负责人可见范围 */
+	access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+	if err != nil {
+		return err
+	}
+	scopeCond, scopeArgs := access.OrgScopeSQL("e", len(args)+1)
+	args = append(args, scopeArgs...)
+	where += scopeCond
 	rows, err := api.DB.Query(r.Context(), `SELECT wr.id,wr.task_id,s.process_name,e.name,wr.good_qty,wr.defect_qty,wr.unit_price::text,wr.review_status,wr.report_kind,wr.occurred_at,COALESCE(pe.amount::text,''),wr.idempotency_key FROM work_report wr JOIN production_task t ON t.tenant_id=wr.tenant_id AND t.id=wr.task_id JOIN work_order_process_snapshot s ON s.tenant_id=t.tenant_id AND s.work_order_id=t.work_order_id AND s.product_process_id=t.product_process_id JOIN employee e ON e.tenant_id=wr.tenant_id AND e.id=wr.employee_id LEFT JOIN piecework_entry pe ON pe.tenant_id=wr.tenant_id AND pe.report_id=wr.id AND pe.entry_kind='confirmed' WHERE `+where+" ORDER BY wr.occurred_at DESC,wr.id LIMIT 200", args...)
 	if err != nil {
 		return err

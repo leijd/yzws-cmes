@@ -1,0 +1,41 @@
+- generic [ref=f1e2369]:
+  - generic [ref=f1e2371]:
+    - generic [ref=f1e2372]: ‹ 返回
+    - generic [ref=f1e2373]: 工单详情
+    - generic [ref=f1e2374] [cursor=pointer]: 大大制衣厂 ▾
+  - generic [ref=f1e2379]:
+    - generic [ref=f1e2380]:
+      - generic [ref=f1e2382]:
+        - generic [ref=f1e2383]:
+          - generic [ref=f1e2384]: GDD202611001-R10
+          - generic [ref=f1e2385]: 生产中
+        - generic [ref=f1e2387]: 产品 01a1e5ca-fdc9-79a7-9fa1-dec663d47817
+      - generic [ref=f1e2388]:
+        - generic [ref=f1e2389]: 已审核
+        - generic [ref=f1e2391]: 普通
+        - generic [ref=f1e2393]: A 派工受控
+    - generic [ref=f1e2395]:
+      - generic [ref=f1e2396]: 工单信息
+      - generic [ref=f1e2397]:
+        - generic [ref=f1e2398]: 计划数量
+        - generic [ref=f1e2399]: "150"
+      - generic [ref=f1e2400]:
+        - generic [ref=f1e2401]: 颜色
+        - generic [ref=f1e2402]: "--"
+      - generic [ref=f1e2403]:
+        - generic [ref=f1e2404]: 计划开始
+        - generic [ref=f1e2405]: 2026-11-17
+      - generic [ref=f1e2406]:
+        - generic [ref=f1e2407]: 计划完成
+        - generic [ref=f1e2408]: 2026-11-27
+      - generic [ref=f1e2409]:
+        - generic [ref=f1e2410]: 包装要求
+        - generic [ref=f1e2411]: "--"
+      - generic [ref=f1e2412]:
+        - generic [ref=f1e2413]: 特殊要求
+        - generic [ref=f1e2414]: "--"
+    - generic [ref=f1e2415]:
+      - generic [ref=f1e2416] [cursor=pointer]: 暂停
+      - generic [ref=f1e2417] [cursor=pointer]: 完工
+      - generic [ref=f1e2418] [cursor=pointer]: 取消
+    - generic [ref=f1e2419]: 查看本单任务与派工

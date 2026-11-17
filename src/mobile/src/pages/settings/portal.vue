@@ -18,17 +18,14 @@
       <view class="card">
         <view class="section-title" style="margin-top: 0">品牌</view>
         <view class="field">
-          <text class="field-label">系统名称（默认「一智算」）</text>
-          <input class="input" v-model.trim="form.system_name" placeholder="如 XX制衣 MES" />
-        </view>
-        <view class="field">
-          <text class="field-label">logo 网址（留空用已上传 logo 或平台默认）</text>
-          <input class="input" v-model.trim="form.logo_url" placeholder="https://... 或 /path" />
+          <text class="field-label">系统名称（留空显示本厂厂名）</text>
+          <input class="input" v-model.trim="form.system_name" placeholder="如 XX制衣生产管理" />
         </view>
         <view class="actions" style="margin-top: 12rpx">
           <button class="btn btn-outline btn-sm" @click="uploadLogo">上传 logo（PNG/JPG/GIF ≤500KB）</button>
-          <button v-if="content.has_uploaded_logo || form.logo_url" class="btn btn-danger btn-sm" @click="removeLogo">移除 logo</button>
+          <button v-if="content.has_uploaded_logo" class="btn btn-danger btn-sm" @click="removeLogo">移除 logo</button>
         </view>
+        <text class="muted" style="margin-top: 8rpx">logo 上传后存入本厂数据库，不依赖外部图片地址</text>
       </view>
 
       <view class="card">
@@ -93,7 +90,7 @@ const styleOptions = [
   { label: "清新", value: "fresh" },
 ];
 const form = ref({
-  logo_url: "", system_name: "", welcome_title: "", welcome_text: "",
+  system_name: "", welcome_title: "", welcome_text: "",
   style_code: "classic", sections: [] as PortalSection[],
 });
 
@@ -113,7 +110,6 @@ async function load() {
     const res = await request<PortalContent>("/tenant-portal/content", { silent: true });
     content.value = res;
     form.value = {
-      logo_url: res.logo_url || "",
       system_name: res.system_name || "",
       welcome_title: res.welcome_title || "",
       welcome_text: res.welcome_text || "",
@@ -134,7 +130,6 @@ async function save() {
     await request("/tenant-portal/content", {
       method: "PUT",
       data: {
-        logo_url: form.value.logo_url,
         system_name: form.value.system_name,
         welcome_title: form.value.welcome_title,
         welcome_text: form.value.welcome_text,
@@ -160,7 +155,7 @@ function resetDefault() {
       try {
         await request("/tenant-portal/content", {
           method: "PUT",
-          data: { reset_sections: true, reset_logo: true, logo_url: "", system_name: "", welcome_title: "", welcome_text: "", style_code: "classic" },
+          data: { reset_sections: true, reset_logo: true, system_name: "", welcome_title: "", welcome_text: "", style_code: "classic" },
         });
         uni.showToast({ title: "已恢复默认", icon: "none" });
         load();

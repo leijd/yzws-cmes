@@ -96,7 +96,7 @@ func defaultString(value, fallback string) string {
 }
 
 func registerMaterialReceipts(api *httpapi.API) {
-	api.Handle("GET /api/v1/material-receipts", "work_order:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("GET /api/v1/material-receipts", "inventory:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		rows, err := api.DB.Query(r.Context(), `SELECT r.id,r.receipt_no,r.receipt_date,r.status,r.version,pj.project_code,pj.id,pr.product_code,pr.name,
 			COALESCE(s.name,''),COALESCE(w.name,''),COALESCE(e.name,''),
 			(SELECT COUNT(*) FROM material_receipt_line l WHERE l.tenant_id=r.tenant_id AND l.receipt_id=r.id),
@@ -127,7 +127,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"items": items})
 	})
 
-	api.Handle("POST /api/v1/material-receipts", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("POST /api/v1/material-receipts", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in materialReceiptInput
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
@@ -169,7 +169,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 201, map[string]any{"id": id, "version": 1, "status": "draft"})
 	})
 
-	api.Handle("GET /api/v1/material-receipts/{id}", "work_order:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("GET /api/v1/material-receipts/{id}", "inventory:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var header map[string]any
 		if err := api.DB.QueryRow(r.Context(), `SELECT row_to_json(t) FROM (SELECT r.id,r.receipt_no,r.receipt_date,r.project_id,pj.project_code,pr.product_code,pr.name AS product_name,r.warehouse_id,w.name AS warehouse_name,r.supplier_id,COALESCE(s.name,'') AS supplier_name,r.receiver_employee_id,COALESCE(e.name,'') AS receiver_name,r.status,r.version FROM material_receipt r JOIN project pj ON pj.tenant_id=r.tenant_id AND pj.id=r.project_id JOIN product pr ON pr.tenant_id=pj.tenant_id AND pr.id=pj.product_id LEFT JOIN warehouse w ON w.tenant_id=r.tenant_id AND w.id=r.warehouse_id LEFT JOIN supplier s ON s.tenant_id=r.tenant_id AND s.id=r.supplier_id LEFT JOIN employee e ON e.tenant_id=r.tenant_id AND e.id=r.receiver_employee_id WHERE r.tenant_id=$1 AND r.id=$2) t`, p.TenantID, r.PathValue("id")).Scan(&header); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -198,7 +198,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"header": header, "lines": lines})
 	})
 
-	api.Handle("PATCH /api/v1/material-receipts/{id}", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("PATCH /api/v1/material-receipts/{id}", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in materialReceiptInput
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
@@ -243,7 +243,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"id": r.PathValue("id"), "version": version + 1})
 	})
 
-	api.Handle("DELETE /api/v1/material-receipts/{id}", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("DELETE /api/v1/material-receipts/{id}", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tx, err := api.DB.Begin(r.Context())
 		if err != nil {
 			return err
@@ -271,7 +271,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"deleted": true})
 	})
 
-	api.Handle("POST /api/v1/material-receipts/{id}/submit", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("POST /api/v1/material-receipts/{id}/submit", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
 			Version int64 `json:"version"`
 		}
@@ -330,7 +330,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"id": r.PathValue("id"), "status": "submitted", "version": version + 1})
 	})
 
-	api.Handle("POST /api/v1/material-receipts/{id}/reverse", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("POST /api/v1/material-receipts/{id}/reverse", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
 			Version int64  `json:"version"`
 			Reason  string `json:"reason"`
@@ -386,7 +386,7 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return httpapi.JSON(w, 200, map[string]any{"id": r.PathValue("id"), "status": "reversed", "version": in.Version + 1})
 	})
 
-	api.Handle("POST /api/v1/material-receipt-lines/{id}/iqc", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("POST /api/v1/material-receipt-lines/{id}/iqc", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
 			Result              string   `json:"result"`
 			InspectorEmployeeID string   `json:"inspector_employee_id"`

@@ -166,7 +166,7 @@ onUnload(() => { if (timer) clearInterval(timer); });
 .page { min-height: 100vh; background: #f5f7fa; padding: 24rpx 32rpx; box-sizing: border-box; }
 .card { background: #fff; border-radius: 16rpx; padding: 24rpx 32rpx; margin-bottom: 20rpx; }
 .card-title { font-size: 30rpx; font-weight: 600; color: #2d3748; margin-bottom: 12rpx; }
-.muted { display: block; font-size: 24rpx; color: #94a3b8; line-height: 1.7; margin-top: 8rpx; }
+.muted { display: block; font-size: 26rpx; color: #94a3b8; line-height: 1.7; margin-top: 8rpx; }
 .field { margin: 16rpx 0; }
 .field-label { display: block; font-size: 26rpx; color: #475569; margin-bottom: 10rpx; }
 .input { border: 1px solid #e2e8f0; border-radius: 10rpx; background: #fff; padding: 0 20rpx; height: 76rpx; font-size: 26rpx; }

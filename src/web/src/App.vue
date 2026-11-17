@@ -5,17 +5,24 @@ import { api } from './api'
 import { confirmLogout } from './session'
 import ToastHost from './components/ToastHost.vue'
 import GuideAssistant from './components/GuideAssistant.vue'
+import HelpBot from './components/HelpBot.vue'
 import ModalDialog from './components/ModalDialog.vue'
 import SensitiveRequestDetail from './components/SensitiveRequestDetail.vue'
 
 const route = useRoute()
 const collapsed = ref(false)
+/* 导航中的权限问答 Bot：按当前登录角色给出对应知识库解答 */
+const helpBotOpen = ref(false)
+const isPlatformAdmin = computed(() => !!route.meta.platform || route.path.startsWith('/platform'))
+/* 仅平台管理页（/platform/tenants 等）提供浮动 Bot 入口；平台门户、登录页均不展示 */
+const showPlatformHelp = computed(() => !!route.meta.platform && !route.meta.public)
 /* 路由尚未解析（matched 为空）时也按独立页处理，避免误判为业务页去请求 /me */
 const isLogin = computed(() => route.matched.length === 0 || !!route.meta.standalone)
 const permissions = ref<Record<string, boolean>>({})
+const canManageIdentity = computed(() => !!permissions.value['identity:write'])
 const currentUserName = ref('')
-/* 工作页面品牌：本厂配置的 logo 与系统名称（未配置时用平台默认） */
-const branding = ref<{ system_name?: string | null; logo_url?: string | null }>({})
+/* 工作页面品牌：本厂配置的 logo 与系统名称（未配置时显示本厂厂名） */
+const branding = ref<{ system_name?: string | null; tenant_name?: string | null; logo_url?: string | null }>({})
 const nav = [
   { path: '/workbench/A03', label: '工作台', icon: '⌂', group: '生产管理', permission: 'workbench:read' },
   { path: '/notifications/A04', label: '消息与会话', icon: '✉', group: '生产管理', permission: '' },
@@ -32,13 +39,15 @@ const nav = [
   { path: '/markers/C11', label: '唛架管理', icon: '▤', group: '基础资料', permission: 'marker:read' },
   { path: '/print/C10', label: '菲票打印', icon: '⎙', group: '生产管理', permission: 'print:read' },
   { path: '/labels/C12', label: '扎标签', icon: '▥', group: '生产管理', permission: 'work_order:read' },
-  { path: '/materials/receipts', label: '物料入库', icon: '▥', group: '生产管理', permission: 'work_order:read' },
-  { path: '/materials/master', label: '物料管理', icon: '▦', group: '基础资料', permission: 'masterdata:read' },
+  { path: '/materials/receipts', label: '物料入库', icon: '▥', group: '生产管理', permission: 'inventory:read' },
+  { path: '/materials/master', label: '物料管理', icon: '▦', group: '基础资料', permission: 'warehouse:read' },
   { path: '/rework/E03', label: '返工复检', icon: '⟳', group: '生产管理', permission: 'work_order:read' },
   { path: '/settings/workshops', label: '车间管理', icon: '⌂', group: '基础资料', permission: 'workshop:read' },
   { path: '/settings/lines', label: '产线管理', icon: '▤', group: '基础资料', permission: 'line:read' },
-  { path: '/settings/users', label: '人员与组织', icon: '♟', group: '基础资料', permission: 'identity:read' },
-  { path: '/masterdata/B06', label: '员工与账号', icon: '♙', group: '基础资料', permission: '' },
+  { path: '/settings/users', label: '人员与组织', icon: '♙', group: '基础资料', permission: 'identity:read' },
+  { path: '/settings/teams', label: '生产组管理', icon: '♟', group: '基础资料', permission: 'team:read' },
+  { path: '/masterdata/customers', label: '客户资料', icon: '◈', group: '基础资料', permission: 'masterdata:read' },
+  { path: '/masterdata/B06', label: '员工信息', icon: '♙', group: '基础资料', permission: '' },
   { path: '/settings/dictionaries', label: '字典维护', icon: '☰', group: '基础资料', permission: 'masterdata:read' },
   { path: '/tenant/profile', label: '本厂信息', icon: '⌂', group: '系统管理', permission: '' },
   { path: '/portal/settings', label: '门户内容', icon: '▤', group: '系统管理', permission: '' },
@@ -81,13 +90,38 @@ async function loadBranding() {
     return
   }
   try {
-    branding.value = await api<{ system_name?: string | null; logo_url?: string | null }>('/tenant/branding', {}, { silent: true })
+    branding.value = await api<{ system_name?: string | null; tenant_name?: string | null; logo_url?: string | null }>('/tenant/branding', {}, { silent: true })
   } catch {
     branding.value = {}
   }
 }
 
-watch(isLogin, () => { void loadPermissions(); void loadBranding() }, { immediate: true })
+watch(isLogin, () => { void loadPermissions(); void loadBranding(); void loadFactories() }, { immediate: true })
+
+/* ===== 多制衣厂切换：名下多家厂时品牌区显示下拉，选择后换新会话并重载页面 ===== */
+const factories = ref<{ code: string; name: string; current?: boolean; kind?: string }[]>([])
+const currentFactoryCode = ref('')
+const switchingFactory = ref(false)
+async function loadFactories() {
+  if (isLogin.value || !localStorage.getItem('clothp_access_token')) { factories.value = []; return }
+  try {
+    const r = await api<{ items: { code: string; name: string; current?: boolean; kind?: string }[] }>('/auth/my-factories', {}, { silent: true })
+    factories.value = r.items || []
+    currentFactoryCode.value = factories.value.find(f => f.current)?.code || ''
+  } catch { factories.value = [] }
+}
+const brandMenuOpen = ref(false)
+async function onFactoryChange(code: string) {
+  brandMenuOpen.value = false
+  if (!code || code === currentFactoryCode.value || switchingFactory.value) return
+  switchingFactory.value = true
+  try {
+    const r = await api<{ access_token: string }>('/auth/switch-tenant', { method: 'POST', body: JSON.stringify({ tenant_code: code, node_id: 'web-local' }) }, { silent: true })
+    localStorage.setItem('clothp_access_token', r.access_token)
+    localStorage.removeItem('clothp_platform_access_token')
+  } catch { /* 失败也重载，恢复原状 */ }
+  location.reload()
+}
 
 /* 门户设置页保存 logo/系统名称后即时刷新左侧品牌区 */
 function onBrandingUpdated() { void loadBranding() }
@@ -140,11 +174,22 @@ onBeforeUnmount(() => {
 <template>
   <router-view v-if="isLogin" />
   <div v-else class="app-shell" :class="{ collapsed }">
-    <aside class="sidebar">
-      <div class="brand">
+    <aside class="sidebar" @click="brandMenuOpen = false">
+      <div class="brand" :class="{ clickable: factories.length > 1 }"
+        @click.stop="factories.length > 1 && (brandMenuOpen = !brandMenuOpen)">
         <img v-if="branding.logo_url" class="brand-logo" :src="branding.logo_url" alt="本厂 logo">
-        <span v-else class="brand-mark">智</span>
-        <span v-if="!collapsed" class="brand-name">{{ branding.system_name || '一智算' }}</span>
+        <span v-else class="brand-mark">{{ (branding.tenant_name || '厂').slice(0, 1) }}</span>
+        <template v-if="!collapsed">
+          <span class="brand-name">{{ branding.system_name || branding.tenant_name || '生产管理' }}</span>
+          <!-- 名下多家制衣厂：厂名右侧下拉箭头，点击弹出列表切换；单厂保持纯展示 -->
+          <span v-if="factories.length > 1" class="brand-caret" :class="{ open: brandMenuOpen }">▾</span>
+          <div v-if="brandMenuOpen && factories.length > 1" class="brand-menu" @click.stop>
+            <button v-for="f in factories" :key="f.code" type="button" class="brand-menu-item"
+              :class="{ current: f.code === currentFactoryCode }" :disabled="switchingFactory" @click="onFactoryChange(f.code)">
+              {{ f.name }}<span v-if="f.code === currentFactoryCode"> · 当前</span>
+            </button>
+          </div>
+        </template>
       </div>
       <nav v-for="group in groups" :key="group">
         <div v-if="!collapsed" class="nav-group">{{ group }}</div>
@@ -152,6 +197,10 @@ onBeforeUnmount(() => {
           <span class="nav-icon">{{ item.icon }}</span><span v-if="!collapsed">{{ item.label }}</span>
         </RouterLink>
       </nav>
+      <!-- 导航中的问题助手入口：平台管理员与制衣厂管理员排查「没有权限」 -->
+      <button class="help-bot-entry" title="问题助手" @click="helpBotOpen = !helpBotOpen">
+        <span class="hb-entry-icon">🤖</span><span v-if="!collapsed">问题助手</span>
+      </button>
     </aside>
     <header class="topbar">
       <button class="icon-button" @click="collapsed = !collapsed" aria-label="折叠菜单">☰</button>
@@ -165,6 +214,9 @@ onBeforeUnmount(() => {
     <!-- 体验助手：悬浮开关 + 分步操作引导（动画箭头），按当前用户权限过滤步骤 -->
     <GuideAssistant :permissions="permissions" />
   </div>
+  <!-- 平台管理页为独立布局，单独提供右下角 Bot 入口；门户页/登录页不显示 -->
+  <button v-if="showPlatformHelp && isLogin" class="help-bot-fab" title="问题助手" @click="helpBotOpen = !helpBotOpen">🤖 问题助手</button>
+  <HelpBot :open="helpBotOpen && (showPlatformHelp || !isLogin)" :platform="isPlatformAdmin" :can-manage="canManageIdentity" @close="helpBotOpen = false" />
   <!-- 网页版提醒弹窗：点击顶栏「提醒」显示未读提醒列表，点详细查看请求信息 -->
   <ModalDialog v-if="reminderOpen" title="提醒消息" @close="reminderOpen = false">
     <div v-if="reminderError" class="notice error">{{ reminderError }}</div>
@@ -191,7 +243,20 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .brand-logo{width:34px;height:34px;border-radius:9px;object-fit:contain;flex:none;background:rgba(255,255,255,.14)}
-.brand-name{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brand{position:relative}
+.brand.clickable{cursor:pointer}
+.brand-name{max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.brand-caret{margin-left:.3rem;color:#9db4e8;font-size:12px;transition:transform .15s}
+.brand-caret.open{transform:rotate(180deg)}
+.brand-menu{position:absolute;top:calc(100% + 8px);left:0;min-width:180px;background:#fff;border:1px solid #e3e9f4;border-radius:12px;box-shadow:0 12px 32px rgba(2,12,40,.35);padding:6px;z-index:80}
+.brand-menu-item{display:block;width:100%;text-align:left;padding:9px 12px;border:0;background:transparent;border-radius:8px;font-size:13px;color:#24365e;cursor:pointer}
+.brand-menu-item:hover{background:#f2f6ff}
+.brand-menu-item.current{color:#2563eb;font-weight:600}
 .reminder-button{position:relative;border:1px solid #c7dcff;background:white;border-radius:8px;padding:6px 12px;color:#17255f;cursor:pointer;font-size:13px}
 .reminder-badge{display:inline-block;margin-left:6px;min-width:18px;padding:0 5px;border-radius:9px;background:#e11d48;color:#fff;font-size:11px;line-height:18px;text-align:center}
+.help-bot-entry{position:sticky;bottom:0;width:100%;margin-top:18px;display:flex;align-items:center;gap:10px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(37,99,235,.28);color:#e8f0ff;padding:10px 12px;font-size:13px;text-align:left}
+.help-bot-entry:hover{background:rgba(37,99,235,.55)}
+.hb-entry-icon{font-size:16px;flex:none}
+.help-bot-fab{position:fixed;right:24px;bottom:24px;z-index:95;border:0;border-radius:999px;padding:11px 18px;background:linear-gradient(120deg,#102a56,#2563eb);color:#fff;font-size:13px;font-weight:600;box-shadow:0 10px 26px rgba(23,37,95,.28)}
+.help-bot-fab:hover{filter:brightness(1.1)}
 </style>

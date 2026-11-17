@@ -74,36 +74,8 @@
     <view id="join" class="section">
       <text class="section-head grad">统一入口，各走各的路</text>
       <view class="join-box">
-        <view class="tabs">
-          <view
-            class="tab"
-            :class="{ active: joinTab === 'trial' }"
-            @click="joinTab = 'trial'"
-          >
-            <text class="tab-badge">新客户</text>
-            <text>免费体验</text>
-          </view>
-          <view
-            class="tab"
-            :class="{ active: joinTab === 'login' }"
-            @click="joinTab = 'login'"
-          >
-            <text class="tab-badge blue">注册客户</text>
-            <text>客户登录</text>
-          </view>
-        </view>
-
-        <!-- 免费体验 -->
+        <!-- 登录 / 注册 -->
         <view v-if="joinTab === 'trial'" class="panel">
-          <text class="panel-desc">
-            手机号验证通过即自动开通体验制衣厂（30 天）——手机号、账号、密码、密钥、类型与起止时间自动生成…到期再决定，不花冤枉钱。
-          </text>
-          <view class="emp-hint" @click="goEmployeeLogin">
-            <text class="emp-hint-text">👷 我是制衣厂员工，短信登录进入所属工厂 →</text>
-          </view>
-          <view v-if="trialSession" class="emp-hint" @click="resumeTrialSession">
-            <text class="emp-hint-text">↩ 继续体验「{{ trialSession.name }}」工作台 →</text>
-          </view>
           <view class="field">
             <text class="label">手机号</text>
             <input
@@ -135,14 +107,15 @@
           </view>
           <view v-if="trialError" class="error">{{ trialError }}</view>
           <button class="btn solid block" :disabled="submitting" @click="startTrial">
-            {{ submitting ? "开通中…" : "验证并进入一智算" }}
+            {{ submitting ? "登录中…" : "登录" }}
           </button>
           <view class="check-row">
             <text class="check">✓ 全功能开放</text>
             <text class="check">✓ 无需绑卡</text>
             <text class="check">✓ 专员一对一带教</text>
           </view>
-          <text class="panel-link" @click="goTrial">填写完整厂信息注册 / 已有体验账号 →</text>
+          <button class="btn outline block register-btn" @click="goApply()">注册</button>
+          <text class="account-link" @click="switchToAccountLogin">账号密码登录</text>
 
           <!-- 开通结果 -->
           <view v-if="trialResult" class="result-box">
@@ -152,11 +125,11 @@
             <!-- 检测到该手机号已是制衣厂员工：引导改用客户登录进厂，而不是开体验厂 -->
             <view v-if="trialResult.has_factory_account" class="factory-notice" @click="goEmployeeLogin">
               <text class="factory-notice-text">
-                检测到该手机号已是制衣厂员工{{ trialResult.factory_names?.length ? `（${trialResult.factory_names.join("、")}）` : "" }}，请从「注册客户·客户登录」短信登录直接进入所属工厂 →
+                检测到该手机号已是制衣厂员工{{ trialResult.factory_names?.length ? `（${trialResult.factory_names.join("、")}）` : "" }}，请用短信登录直接进入所属工厂 →
               </text>
             </view>
             <text v-if="!isApproved(trialResult)" class="result-tip">
-              平台审核通过后，回到本页点顶部「继续体验…」或从「客户登录」短信登录即可直接进入工作台
+              平台审核通过后，回到本页用手机号与验证码登录即可直接进入工作台
             </text>
             <text v-if="!isApproved(trialResult)" class="panel-link" @click="goPending">
               查看/修改注册信息 · 加急申请 →
@@ -177,7 +150,7 @@
               :class="{ active: loginMethod === 'account' }"
               @click="switchLoginMethod('account')"
             >账号密码</view>
-            <view class="method" @click="switchLoginMethod('register')">极速注册</view>
+            <view class="method" @click="goApply(loginPhone)">极速注册</view>
           </view>
 
           <!-- 短信登录（默认） -->
@@ -211,7 +184,7 @@
             <button class="btn solid block" :disabled="loginLoading" @click="doSmsLogin">
               {{ loginLoading ? "验证中…" : "登 录" }}
             </button>
-            <text class="panel-link" @click="joinTab = 'trial'">还没有账号？极速注册免费体验 →</text>
+            <text class="panel-link" @click="goApply(loginPhone)">还没有账号？极速注册免费体验 →</text>
           </template>
 
           <!-- 账号密码 -->
@@ -251,10 +224,10 @@
             </view>
           </view>
 
-          <!-- 普通员工首次短信登录需补初始密码 -->
+          <!-- 账号开通「密码验证」时：短信验证之外补录密码 -->
           <view v-if="loginMethod === 'sms' && loginNeedPassword" class="field password-block">
-            <text class="label">首次登录密码</text>
-            <input v-model="loginPassword" password placeholder="厂管理员提供的初始密码" />
+            <text class="label">密码验证</text>
+            <input v-model="loginPassword" password placeholder="请输入账号密码" />
             <button class="btn solid block" :disabled="loginLoading" @click="retryLoginWithPassword">
               {{ loginLoading ? "验证中…" : "使用密码进入" }}
             </button>
@@ -276,6 +249,19 @@
         <text class="footer-item">邮箱：business@yizhisuan.cn</text>
       </view>
       <text class="footer-copy">© {{ year }} 南宁一智万商科技有限责任公司</text>
+    </view>
+  </view>
+
+  <!-- 多家制衣厂：登录后弹窗选择进入哪一家（只有一家时不弹） -->
+  <view v-if="factoryModal" class="modal-mask" @click="factoryModal = false">
+    <view class="modal-card" @click.stop>
+      <text class="modal-title">选择要进入的制衣厂</text>
+      <text class="modal-sub">该手机号关联了 {{ loginChoices.length }} 家制衣厂</text>
+      <view v-for="t in loginChoices" :key="t.code" class="modal-choice" @click="chooseFactory(t)">
+        <text class="modal-choice-name">{{ t.name }}</text>
+        <text class="modal-choice-code">{{ t.code }}</text>
+      </view>
+      <button class="btn outline block" @click="factoryModal = false">取消</button>
     </view>
   </view>
 </template>
@@ -413,6 +399,7 @@ const loginLoading = ref(false);
 const enterBusy = ref(false);
 const loginTicket = ref("");
 const loginChoices = ref<LoginTenant[]>([]);
+const factoryModal = ref(false);
 const loginNeedPassword = ref(false);
 const loginPassword = ref("");
 const loginPendingCode = ref("");
@@ -564,8 +551,7 @@ async function routeToFactories(ticket: string, factories: FactoryRef[]) {
     uni.showToast({ title: "已识别为制衣厂员工，正在进入…", icon: "none" });
     await enterTenant(loginChoices.value[0]);
   } else {
-    uni.showToast({ title: "已识别为制衣厂员工，请选择要进入的工厂", icon: "none" });
-    setTimeout(() => scroll("#join"), 60);
+    factoryModal.value = true;
   }
 }
 
@@ -595,7 +581,7 @@ async function resumeTrialSession() {
       loginNeedPassword.value = true;
       loginPendingCode.value = s.tenant_code;
       scroll("#join");
-      uni.showToast({ title: "首次进入请输入厂管理员提供的初始密码", icon: "none" });
+      uni.showToast({ title: "该账号已开启密码验证，请输入账号密码", icon: "none" });
       return;
     }
     /* 令牌失效（被驳回/过期/服务端重启）：清掉本机凭证并提示重新验证手机号 */
@@ -642,13 +628,7 @@ function goEmployeeLogin() {
   scroll("#join");
 }
 
-function switchLoginMethod(method: "sms" | "account" | "register") {
-  if (method === "register") {
-    /* 极速注册即免费体验面板：仍在本页切换，不跳转 */
-    joinTab.value = "trial";
-    scroll("#join");
-    return;
-  }
+function switchLoginMethod(method: "sms" | "account") {
   loginMethod.value = method;
   loginError.value = "";
   loginChoices.value = [];
@@ -721,6 +701,8 @@ async function doSmsLogin() {
     }
     if (loginChoices.value.length === 1) {
       await enterTenant(loginChoices.value[0]);
+    } else {
+      factoryModal.value = true;
     }
   } catch (e) {
     loginError.value = (e as Error).message || "验证失败，请重试";
@@ -779,7 +761,7 @@ async function enterTenant(t: LoginTenant, pwd = "") {
 
 async function retryLoginWithPassword() {
   if (!loginPassword.value) {
-    loginError.value = "请输入初始密码";
+    loginError.value = "请输入账号密码";
     return;
   }
   const t = loginChoices.value.find((x) => x.code === loginPendingCode.value);
@@ -802,8 +784,20 @@ function goWorkbench() {
 function goPortalHome() {
   uni.navigateTo({ url: "/pages/portal/home" });
 }
-function goTrial() {
-  uni.navigateTo({ url: "/pages/portal/trial" });
+function goApply(phoneOverride?: string) {
+  /* 登录面板的「极速注册」入口带出该面板已填写的手机号 */
+  const target = (phoneOverride || phone.value || "").trim();
+  const q = target ? `?phone=${encodeURIComponent(target)}` : "";
+  uni.navigateTo({ url: `/pages/register/apply${q}` });
+}
+function switchToAccountLogin() {
+  joinTab.value = "login";
+  loginMethod.value = "account";
+  scroll("#join");
+}
+function chooseFactory(t: LoginTenant) {
+  factoryModal.value = false;
+  void enterTenant(t);
 }
 function goPending() {
   uni.navigateTo({ url: "/pages/portal/pending" });
@@ -830,6 +824,8 @@ onUnload(() => {
 .portal {
   min-height: 100vh;
   background: linear-gradient(150deg, #dcebff 0%, #e9f4ff 34%, #dff2fb 66%, #d6e9fd 100%);
+  /* 自定义导航：让出手机系统状态栏高度（App 端 uni-app 注入 --status-bar-height；H5 为 0 不受影响） */
+  padding-top: var(--status-bar-height, 0px);
   padding-bottom: 0;
   box-sizing: border-box;
 }
@@ -1432,4 +1428,14 @@ input {
   text-align: center;
   margin-top: 16rpx;
 }
+.btn.outline { background: #fff; color: #2563eb; border: 1rpx solid #c7dcff; }
+.register-btn { margin-top: 20rpx; }
+.account-link { display: block; text-align: center; color: #64748b; font-size: 24rpx; margin-top: 16rpx; }
+.modal-mask { position: fixed; inset: 0; z-index: 200; background: rgba(15,23,42,.55); display: flex; align-items: center; justify-content: center; padding: 40rpx; }
+.modal-card { width: 100%; max-width: 620rpx; background: #fff; border-radius: 20rpx; padding: 32rpx; box-sizing: border-box; }
+.modal-title { display: block; font-size: 30rpx; font-weight: 700; color: #17255f; }
+.modal-sub { display: block; font-size: 24rpx; color: #64748b; margin: 10rpx 0 20rpx; }
+.modal-choice { display: flex; align-items: center; justify-content: space-between; padding: 20rpx 16rpx; border: 1rpx solid #e2e8f0; border-radius: 12rpx; margin-bottom: 12rpx; }
+.modal-choice-name { font-size: 27rpx; color: #17255f; font-weight: 600; }
+.modal-choice-code { font-size: 22rpx; color: #94a3b8; }
 </style>

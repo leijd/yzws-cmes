@@ -9,6 +9,10 @@ import { api } from '../api'
 import { toastError, toastSuccess } from '../toast'
 import ModalDialog from '../components/ModalDialog.vue'
 import FilterSelect from '../components/FilterSelect.vue'
+import { dictOptions, type DictOption } from '../dictionaries'
+
+/* embedded=true 时作为「员工信息」模块的一个页签复用，隐藏独立页面大标题 */
+defineProps<{ embedded?: boolean }>()
 
 interface Person {
   id: string; employee_no: string; name: string; person_type: string
@@ -29,6 +33,7 @@ const workshops = ref<OrgOption[]>([])
 const lines = ref<OrgOption[]>([])
 const roles = ref<RoleOption[]>([])
 const processes = ref<ProcessOption[]>([])
+const positionOptions = ref<DictOption[]>([])
 
 const modalOpen = ref(false)
 const saving = ref(false)
@@ -65,14 +70,16 @@ async function load() {
 
 async function loadFilters() {
   try {
-    const [w, r, p] = await Promise.all([
+    const [w, r, p, pos] = await Promise.all([
       api<{ items: OrgOption[] }>('/workshops', {}, { silent: true }),
       api<{ items: RoleOption[] }>('/roles', {}, { silent: true }),
       api<{ items: ProcessOption[] }>('/process-definitions', {}, { silent: true }).catch(() => ({ items: [] as ProcessOption[] })),
+      dictOptions('position', 'name'),
     ])
     workshops.value = w.items || []
     roles.value = r.items || []
     processes.value = p.items || []
+    positionOptions.value = pos
   } catch { /* 下拉失败不阻断列表 */ }
 }
 
@@ -222,12 +229,82 @@ async function disablePerson(person: Person) {
   }
 }
 
-onMounted(() => { void load(); void loadFilters() })
+/* 登录验证方式：厂管理员可为单个员工、勾选的员工或全部员工开通/关闭（短信验证恒开不可关闭） */
+interface AuthMethodRow {
+  user_id: string; employee_no: string; name: string
+  methods: { sms: boolean; password: boolean; wechat: boolean }
+}
+const authRows = ref<AuthMethodRow[]>([])
+const selectedEmployeeNos = ref<string[]>([])
+const authDialog = ref(false)
+const authScope = ref<'single' | 'selected' | 'all'>('selected')
+const authTargetUserIds = ref<string[]>([])
+const authForm = reactive({ password: false, wechat: false })
+const authSaving = ref(false)
+const authByEmployeeNo = computed(() => new Map(authRows.value.map(row => [row.employee_no, row])))
+const accountEmployeeNos = computed(() => items.value.filter(p => authByEmployeeNo.value.has(p.employee_no)).map(p => p.employee_no))
+const allSelected = computed(() => accountEmployeeNos.value.length > 0 && accountEmployeeNos.value.every(no => selectedEmployeeNos.value.includes(no)))
+const selectedUserIds = computed(() => selectedEmployeeNos.value.map(no => authByEmployeeNo.value.get(no)?.user_id).filter((id): id is string => !!id))
+function authOf(p: Person) { return authByEmployeeNo.value.get(p.employee_no) }
+function methodText(row?: AuthMethodRow) {
+  if (!row) return '无账号'
+  const parts = ['短信']
+  if (row.methods.password) parts.push('密码')
+  if (row.methods.wechat) parts.push('微信')
+  return parts.join('+')
+}
+function toggleAll(ev: Event) {
+  selectedEmployeeNos.value = (ev.target as HTMLInputElement).checked ? [...accountEmployeeNos.value] : []
+}
+function toggleOne(no: string, ev: Event) {
+  const checked = (ev.target as HTMLInputElement).checked
+  selectedEmployeeNos.value = checked
+    ? [...new Set([...selectedEmployeeNos.value, no])]
+    : selectedEmployeeNos.value.filter(item => item !== no)
+}
+async function loadAuthRows() {
+  try { authRows.value = (await api<{ items: AuthMethodRow[] }>('/users/auth-methods', {}, { silent: true })).items || [] }
+  catch { authRows.value = [] }
+}
+function openAuthDialog(scope: 'single' | 'selected' | 'all', p?: Person) {
+  error.value = ''
+  if (scope === 'single') {
+    const row = p ? authOf(p) : undefined
+    if (!row) { error.value = '该员工尚未开通账号，无法设置验证方式'; return }
+    authTargetUserIds.value = [row.user_id]
+    authForm.password = row.methods.password
+    authForm.wechat = row.methods.wechat
+  } else if (scope === 'all') {
+    authTargetUserIds.value = authRows.value.map(row => row.user_id)
+    authForm.password = false; authForm.wechat = false
+  } else {
+    authTargetUserIds.value = [...selectedUserIds.value]
+    if (!authTargetUserIds.value.length) { error.value = '请先勾选员工'; return }
+    authForm.password = false; authForm.wechat = false
+  }
+  authScope.value = scope
+  authDialog.value = true
+}
+async function saveAuthDialog() {
+  authSaving.value = true; error.value = ''
+  try {
+    const body = authScope.value === 'all'
+      ? { scope: 'all', ...authForm }
+      : { scope: 'selected', user_ids: authTargetUserIds.value, ...authForm }
+    const r = await api<{ updated: number }>('/users/auth-methods', { method: 'PUT', body: JSON.stringify(body) })
+    authDialog.value = false
+    selectedEmployeeNos.value = []
+    toastSuccess(`已更新 ${r.updated} 个账号的登录验证方式`)
+    await loadAuthRows()
+  } catch (e) { error.value = (e as Error).message } finally { authSaving.value = false }
+}
+onMounted(() => { void load(); void loadFilters(); void loadAuthRows() })
 </script>
 
 <template>
   <div class="page-header">
-    <div><h1>人员与组织</h1><p>管理人员与工人建档、组织归属与换线；手机号默认脱敏展示</p></div>
+    <div v-if="!embedded"><h1>人员与组织</h1><p>管理人员与工人建档、组织归属与换线；手机号默认脱敏展示</p></div>
+    <div v-else class="text-muted">人员建档、组织归属、账号与登录验证方式维护</div>
     <div class="header-actions"><button class="button" @click="openCreate">+ 新增人员</button></div>
   </div>
 
@@ -249,19 +326,24 @@ onMounted(() => { void load(); void loadFilters() })
     ]" @update:model-value="load" />
     <input v-model.trim="filters.keyword" class="search-input" placeholder="工号/姓名（回车）" @keyup.enter="load">
     <button class="button secondary" @click="load">查询</button>
+    <span class="toolbar-spacer"></span>
+    <button class="button secondary" @click="openAuthDialog('selected')">验证方式（勾选 {{ selectedUserIds.length }} 人）</button>
+    <button class="button secondary" @click="openAuthDialog('all')">验证方式（全部员工）</button>
   </div>
 
   <div v-if="error" class="notice error">{{ error }}</div>
   <div class="table-wrap">
     <table>
       <thead><tr>
+        <th style="width:44px"><input type="checkbox" :checked="allSelected" @change="toggleAll"></th>
         <th>工号</th><th>姓名</th><th>手机号</th><th>类型</th><th>角色</th>
-        <th>车间</th><th>产线</th><th>班组</th><th>在职</th><th>账号</th><th>操作</th>
+        <th>车间</th><th>产线</th><th>班组</th><th>在职</th><th>账号</th><th>验证方式</th><th>操作</th>
       </tr></thead>
       <tbody>
-        <tr v-if="loading"><td colspan="11">加载中…</td></tr>
-        <tr v-else-if="!items.length"><td colspan="11">暂无人员</td></tr>
+        <tr v-if="loading"><td colspan="13">加载中…</td></tr>
+        <tr v-else-if="!items.length"><td colspan="13">暂无人员</td></tr>
         <tr v-for="p in items" :key="p.id">
+          <td><input v-if="authOf(p)" type="checkbox" :checked="selectedEmployeeNos.includes(p.employee_no)" @change="toggleOne(p.employee_no, $event)"><span v-else class="text-muted">—</span></td>
           <td><strong>{{ p.employee_no }}</strong></td>
           <td>{{ p.name }}</td>
           <td>{{ p.phone_masked || '—' }}</td>
@@ -272,7 +354,9 @@ onMounted(() => { void load(); void loadFilters() })
           <td>{{ p.team_name || '—' }}</td>
           <td>{{ p.status === 'active' ? '在职' : '离职' }}</td>
           <td><span class="status" :class="p.account_status === 'active' ? 'active' : 'pending'">{{ p.account_status === 'active' ? '正常' : (p.account_status || '无账号') }}</span></td>
+          <td>{{ methodText(authOf(p)) }}</td>
           <td class="row-actions">
+            <button class="button link" @click="openAuthDialog('single', p)">验证设置</button>
             <button class="button link" @click="openBind(p)">换线</button>
             <button class="button link" @click="resetPassword(p)">重置密码</button>
             <button v-if="p.status === 'active'" class="button link danger" @click="disablePerson(p)">停用</button>
@@ -296,7 +380,7 @@ onMounted(() => { void load(); void loadFilters() })
       <div class="field"><label class="required">姓名</label><input v-model.trim="form.name" maxlength="30"></div>
       <div class="field"><label>手机号</label><input v-model.trim="form.phone" maxlength="11" type="tel"></div>
       <div class="field"><label class="required">初始密码（至少 12 位，仅显示一次）</label><input v-model="form.password" maxlength="64"></div>
-      <div class="field"><label>岗位</label><input v-model.trim="form.position" maxlength="40"></div>
+      <div class="field"><label>岗位</label><FilterSelect v-model="form.position" :options="positionOptions" placeholder="从字典选择"/></div>
 
       <div class="field">
         <label>所属车间（可不选）</label>
@@ -401,10 +485,23 @@ onMounted(() => { void load(); void loadFilters() })
       <button class="button" @click="tempPassword = ''">我已保存</button>
     </div>
   </ModalDialog>
+
+  <!-- 登录验证方式：单个员工 / 勾选员工 / 全部员工 -->
+  <ModalDialog v-if="authDialog" title="设置登录验证方式" @close="authDialog = false">
+    <div class="notice">短信验证码为基础验证，始终开启且不可关闭；以下验证方式可开通或关闭。</div>
+    <p class="text-muted">设置范围：{{ authScope === 'all' ? '全部员工账号' : authScope === 'single' ? '单个员工' : `已勾选 ${authTargetUserIds.length} 个员工` }}（共 {{ authTargetUserIds.length }} 个账号）</p>
+    <div class="progress-list">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:20px"><div><strong>短信验证码</strong><p class="text-muted">登录时必选，固定开启</p></div><input type="checkbox" checked disabled></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:20px"><div><strong>密码验证</strong><p class="text-muted">开通后，短信验证之外还需输入账号密码</p></div><input v-model="authForm.password" type="checkbox"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:20px"><div><strong>微信设备快捷登录</strong><p class="text-muted">开通并绑定设备后可扫码快捷登录；关闭时自动解绑</p></div><input v-model="authForm.wechat" type="checkbox"></div>
+    </div>
+    <template #footer><button class="button secondary" @click="authDialog = false">取消</button><button class="button" :disabled="authSaving" @click="saveAuthDialog">保存设置</button></template>
+  </ModalDialog>
 </template>
 
 <style scoped>
 .toolbar{display:flex;gap:10px;align-items:center;margin:14px 0;flex-wrap:wrap}
+.toolbar-spacer{flex:1}
 .row-actions{white-space:nowrap}
 .row-actions .button.link{padding:2px 8px}
 .danger{color:#d92d20}

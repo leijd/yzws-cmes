@@ -44,8 +44,8 @@ type entity struct {
 var entities = map[string]entity{
 	"customers":  {table: "customer", permission: "masterdata", codeField: "code", required: []string{"code", "name"}, fields: map[string]string{"code": "code", "name": "name", "contact_name": "contact_name", "phone": "phone", "address": "address", "remark": "remark"}},
 	"suppliers":  {table: "supplier", permission: "masterdata", codeField: "code", required: []string{"code", "name"}, fields: map[string]string{"code": "code", "name": "name", "contact_name": "contact_name", "phone": "phone", "address": "address", "remark": "remark"}},
-	"materials":  {table: "material", permission: "masterdata", codeField: "code", required: []string{"code", "name", "unit"}, fields: map[string]string{"code": "code", "name": "name", "category": "category", "specification": "specification", "unit": "unit", "default_supplier_id": "default_supplier_id", "safety_stock": "safety_stock"}},
-	"warehouses": {table: "warehouse", permission: "masterdata", codeField: "code", required: []string{"code", "name", "warehouse_type"}, fields: map[string]string{"code": "code", "name": "name", "warehouse_type": "warehouse_type", "org_unit_id": "org_unit_id", "manager_employee_id": "manager_employee_id"}},
+	"materials":  {table: "material", permission: "warehouse", codeField: "code", required: []string{"code", "name", "unit"}, fields: map[string]string{"code": "code", "name": "name", "category": "category", "specification": "specification", "unit": "unit", "default_supplier_id": "default_supplier_id", "safety_stock": "safety_stock"}},
+	"warehouses": {table: "warehouse", permission: "warehouse", codeField: "code", required: []string{"code", "name", "warehouse_type"}, fields: map[string]string{"code": "code", "name": "name", "warehouse_type": "warehouse_type", "org_unit_id": "org_unit_id", "manager_employee_id": "manager_employee_id"}},
 	"org-units":  {table: "org_unit", permission: "masterdata", codeField: "code", required: []string{"code", "name", "org_type"}, fields: map[string]string{"code": "code", "name": "name", "org_type": "org_type", "parent_id": "parent_id", "manager_employee_id": "manager_employee_id"}},
 	"employees":  {table: "employee", permission: "masterdata", codeField: "employee_no", required: []string{"employee_no", "name"}, fields: map[string]string{"employee_no": "employee_no", "name": "name", "gender": "gender", "birth_date": "birth_date", "phone": "phone", "id_card_no": "id_card_no", "address": "address", "nation": "nation", "native_place": "native_place", "hire_date": "hire_date", "org_unit_id": "org_unit_id", "position": "position", "workshop": "workshop", "production_line": "production_line", "skill_grade": "skill_grade", "pay_mode": "pay_mode", "base_salary": "base_salary", "rate_level": "rate_level", "bank_card": "bank_card", "bank_name": "bank_name", "emergency_contact": "emergency_contact", "emergency_phone": "emergency_phone", "remark": "remark"}},
 }
@@ -457,6 +457,7 @@ func patchEmployee(api *httpapi.API, w http.ResponseWriter, r *http.Request, p a
 	canManage := p.Permissions["masterdata:write"]
 	canAdmin := p.Permissions["identity:write"]
 	if !canAdmin && !canManage && !self {
+		api.RecordDenied(r.Context(), p, "employee", employeeID, "无人员修改权限（越权修改他人档案）")
 		return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "没有执行此操作的权限")
 	}
 	allowed := map[string]string{}
@@ -854,6 +855,7 @@ func maskBankCard(value string) string {
 func listEmployees(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	selfOnly := !(p.Permissions["masterdata:read"] || p.Permissions["identity:read"] || p.Permissions["identity:write"])
 	if selfOnly && p.EmployeeID == "" {
+		api.RecordDenied(r.Context(), p, "employee", "*", "账号未绑定员工，尝试读取全厂人员")
 		return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "没有执行此操作的权限")
 	}
 	query := `SELECT e.id,e.employee_no,e.name,e.gender,e.position,e.workshop,e.production_line,e.hire_date,e.skill_grade,e.pay_mode,e.phone,e.status,e.version,
@@ -919,6 +921,7 @@ func listEmployees(api *httpapi.API, w http.ResponseWriter, r *http.Request, p a
 func getEmployee(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 	canSeeAll := p.Permissions["masterdata:read"] || p.Permissions["identity:read"] || p.Permissions["identity:write"]
 	if !canSeeAll && p.EmployeeID != r.PathValue("id") {
+		api.RecordDenied(r.Context(), p, "employee", r.PathValue("id"), "查看他人人员档案")
 		return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "没有执行此操作的权限")
 	}
 	var item map[string]any

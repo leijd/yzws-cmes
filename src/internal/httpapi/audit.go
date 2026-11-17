@@ -3,11 +3,26 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"log"
 
 	"clothp/internal/auth"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 )
+
+/* RecordDenied 越权尝试审计（设计 4.9）：统一写 audit_log(action='access_denied')。
+ * 审计本身失败不阻断业务响应，只记录服务日志，避免审计不可用导致正常请求失败。 */
+func (a *API) RecordDenied(ctx context.Context, p auth.Principal, ownerType, ownerID, reason string) {
+	if p.TenantID == "" {
+		return
+	}
+	_, err := a.DB.Exec(ctx, `INSERT INTO audit_log(tenant_id,id,request_id,actor_type,actor_id,action,owner_type,owner_id,reason,created_node,created_at)
+		VALUES($1,$2,$3,'user',$4,'access_denied',$5,$6,$7,$8,$9)`,
+		p.TenantID, "deny-"+platform.ID(), RequestID(ctx), p.UserID, ownerType, ownerID, reason, a.Config.NodeID, platform.Now())
+	if err != nil {
+		log.Printf("audit access_denied failed: tenant=%s owner=%s/%s err=%v", p.TenantID, ownerType, ownerID, err)
+	}
+}
 
 func Audit(ctx context.Context, tx pgx.Tx, p auth.Principal, nodeID, action, ownerType, ownerID string, before, after any, reason string) error {
 	var beforeJSON, afterJSON []byte

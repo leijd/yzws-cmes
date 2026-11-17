@@ -8,6 +8,8 @@
           {{ warningText[detail.warning_level] || detail.warning_level }}
         </text>
       </view>
+      <view v-if="detail.product_name" class="pname">{{ detail.product_name }}（{{ detail.product_code }}）</view>
+      <view v-if="detail.customer_name" class="customer">客户：{{ detail.customer_name }}</view>
       <view class="big-ratio">{{ ratioPercent(detail.progress_ratio) }}</view>
       <view class="progress-bar">
         <view class="progress-fill" :style="{ width: ratioPercent(detail.progress_ratio) }" />
@@ -58,10 +60,14 @@
     <view v-if="detail" class="card">
       <text class="card-title">关联工单（{{ workOrders.length }}）</text>
       <view v-if="!workOrders.length" class="none">暂无工单</view>
-      <view v-for="wo in workOrders" :key="wo.id" class="row between item">
-        <text class="wo-code">{{ wo.work_order_code }}</text>
+      <view v-for="wo in workOrders" :key="wo.id" class="row between item wo-item" @click="openWorkOrder(wo)">
+        <text class="wo-code">
+          {{ wo.work_order_code }}
+          <text class="wo-pct">{{ ratioPercent(wo.progress_ratio) }}</text>
+        </text>
         <text class="wo-meta">
           {{ woStatusText[wo.status] || wo.status }} · 计划 {{ wo.planned_product_qty }}
+          <text class="wo-arrow">›</text>
         </text>
       </view>
     </view>
@@ -74,6 +80,9 @@ import { onLoad } from "@dcloudio/uni-app";
 import { request } from "../../utils/request";
 
 interface ProgressDetail {
+  product_code?: string;
+  product_name?: string;
+  customer_name?: string;
   order_qty: number;
   cut_qty: number;
   wip_qty: number;
@@ -94,6 +103,8 @@ interface WorkOrder {
   work_order_code: string;
   status: string;
   planned_product_qty: number;
+  approved_good_qty?: number;
+  progress_ratio?: string | number;
   review_status: string;
 }
 
@@ -116,9 +127,15 @@ const detail = ref<ProgressDetail | null>(null);
 const workOrders = ref<WorkOrder[]>([]);
 const projectCode = ref("");
 
-function ratioPercent(ratio: string | null): string {
+function ratioPercent(ratio: string | number | null | undefined): string {
   const n = Number(ratio || 0);
   return `${Math.min(100, Math.max(0, n * 100)).toFixed(1)}%`;
+}
+
+function openWorkOrder(wo: WorkOrder) {
+  uni.navigateTo({
+    url: `/pages/progress/workorder?id=${wo.id}&code=${encodeURIComponent(wo.work_order_code)}`,
+  });
 }
 
 onLoad((options) => {
@@ -154,6 +171,16 @@ onLoad((options) => {
 }
 .head .code {
   color: #fff;
+}
+.pname {
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 28rpx;
+  margin-top: 10rpx;
+}
+.customer {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 24rpx;
+  margin-top: 6rpx;
 }
 .row {
   display: flex;
@@ -238,13 +265,27 @@ onLoad((options) => {
   font-size: 26rpx;
   padding: 16rpx 0;
 }
+.wo-item {
+  cursor: pointer;
+}
 .wo-code {
   font-size: 28rpx;
   color: #2b6cb0;
   font-weight: 600;
 }
+.wo-pct {
+  font-size: 24rpx;
+  color: #2c5282;
+  font-weight: 700;
+  margin-left: 12rpx;
+}
 .wo-meta {
   font-size: 24rpx;
   color: #718096;
+}
+.wo-arrow {
+  font-size: 32rpx;
+  color: #a0aec0;
+  margin-left: 8rpx;
 }
 </style>

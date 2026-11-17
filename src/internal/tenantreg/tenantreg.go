@@ -97,6 +97,29 @@ func verifyRegCode(phone, code string) error {
 	return nil
 }
 
+/* peekRegCode 只校验不使验证码失效：注册页查询已有申请后，仍可用同一验证码提交注册。 */
+func peekRegCode(phone, code string) error {
+	regMu.Lock()
+	defer regMu.Unlock()
+	challenge := regCodes[phone]
+	if challenge == nil {
+		return httpapi.Error(http.StatusBadRequest, "CODE_EXPIRED", "请先获取短信验证码")
+	}
+	if time.Now().After(challenge.expiresAt) {
+		delete(regCodes, phone)
+		return httpapi.Error(http.StatusBadRequest, "CODE_EXPIRED", "验证码已超过 3 分钟有效期，请重新获取")
+	}
+	if challenge.attempts >= regMaxAttempts {
+		delete(regCodes, phone)
+		return httpapi.Error(http.StatusTooManyRequests, "TOO_MANY_ATTEMPTS", "验证码错误次数过多，请重新获取")
+	}
+	if challenge.code != code {
+		challenge.attempts++
+		return httpapi.Error(http.StatusBadRequest, "INVALID_CODE", fmt.Sprintf("验证码不正确，还可尝试 %d 次", regMaxAttempts-challenge.attempts))
+	}
+	return nil
+}
+
 func Register(api *httpapi.API) {
 	registerPublic(api)
 	registerPlatform(api)
@@ -152,6 +175,7 @@ func registerPublic(api *httpapi.API) {
 	})
 
 	registerFactoryAndTrial(api)
+	registerRegistrationLookup(api)
 }
 
 // allocateTenantIdentity 生成全平台唯一的厂编码与 5 位短码（同时保证 {短码}admin 管理账号可用）。
@@ -632,7 +656,7 @@ type trialPageContent struct {
 
 func defaultTrialContent() trialPageContent {
 	return trialPageContent{
-		WelcomeTitle: "欢迎使用一智算制衣 MES",
+		WelcomeTitle: "欢迎使用制衣厂生产管理系统",
 		WelcomeText:  "免费体验已开通：这是一个真实的制衣厂数字化车间系统，订单、扫菲、计件工资一气呵成。您可以亲手把一个订单跑起来。",
 		IntroTitle:   "这些场景，您是不是也遇到过？",
 		PainPoints: []trialPainPoint{
@@ -640,7 +664,7 @@ func defaultTrialContent() trialPageContent {
 			{Title: "计件工资对不清", Desc: "菲票手抄、月底对不上数，工人有意见，老板心里没底。"},
 			{Title: "小厂留不住数据", Desc: "客户、单价、工艺标准都在老师傅脑子里，人走经验就走。"},
 		},
-		SolutionTitle: "一智算的解决方案",
+		SolutionTitle: "我们的解决方案",
 		SolutionText:  "订单工单全流程跟踪、扫菲计件实时汇总、工资自动核算——后台为您准备了完整的功能体验，点击下方“继续体验”，每使用一个功能就会为您点亮一项。",
 	}
 }

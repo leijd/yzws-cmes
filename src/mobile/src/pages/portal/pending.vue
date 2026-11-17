@@ -2,8 +2,8 @@
   <view class="page">
     <view class="card status-card">
       <view class="brand">
-        <view class="brand-mark">智</view>
-        <text class="brand-name">一智算 · 免费体验</text>
+        <view class="brand-mark">试</view>
+        <text class="brand-name">免费体验</text>
       </view>
       <text class="status-icon">{{ rejected ? "✕" : approved ? "✓" : "⏳" }}</text>
       <text class="status-title">{{ statusTitle }}</text>
@@ -13,7 +13,7 @@
         <view class="step done"><text class="step-dot">✓</text><text>提交体验注册申请</text></view>
         <view class="step" :class="{ now: !approved && !rejected }">
           <text class="step-dot">{{ rejected ? "✕" : approved ? "✓" : "⏳" }}</text>
-          <text>{{ rejected ? "平台管理员审核未通过" : `平台管理员审核${expedited ? "（已加急，优先处理）" : ""}` }}</text>
+          <text>{{ rejected ? "审核未通过" : `管理员审核${expedited ? "（已加急，优先处理）" : ""}` }}</text>
         </view>
         <view v-if="!rejected" class="step" :class="{ now: approved }"><text class="step-dot">3</text><text>审核通过 → 进入工作台</text></view>
       </view>
@@ -26,14 +26,14 @@
         <button v-if="!expedited" class="btn solid" :disabled="submitting" @click="expedite">
           {{ submitting ? "正在提交…" : "🔥 加急申请" }}
         </button>
-        <view v-else class="expedited">🔥 已加急，平台管理员将优先处理</view>
+        <view v-else class="expedited">🔥 已加急，管理员将优先处理</view>
         <button class="btn ghost" @click="infoOpen = !infoOpen">
           {{ infoOpen ? "收起注册信息" : "查看/修改注册信息" }}
         </button>
       </template>
 
       <text v-if="rejected" class="tip">注册申请被驳回后该体验厂不会启用，也不会出现在手机登录的制衣厂列表中；可修正资料后重新提交。</text>
-      <text v-else class="tip">审批通过后回到本页点击「开始体验」即可进入一智算工作台；本页可随时查看审批状态。</text>
+      <text v-else class="tip">审批通过后回到本页点击「开始体验」即可进入工作台；本页可随时查看审批状态。</text>
     </view>
 
     <!-- 注册信息表单 -->
@@ -87,13 +87,13 @@
         <button class="btn solid" :disabled="saving || !info.name" @click="saveInfo">
           {{ saving ? "正在保存…" : "保存修改" }}
         </button>
-        <text class="small">平台管理员审批时将看到最新内容；联系电话不可修改（以体验用户登录手机号为准）。</text>
+        <text class="small">管理员审批时将看到最新内容；联系电话不可修改（以体验用户登录手机号为准）。</text>
       </template>
     </view>
 
     <view v-if="!session" class="card">
       <text class="empty">暂无体验会话，请先完成体验注册</text>
-      <button class="btn ghost" @click="goPortal">返回平台门户</button>
+      <button class="btn ghost" @click="goPortal">返回门户</button>
     </view>
   </view>
 </template>
@@ -163,9 +163,9 @@ const statusTitle = computed(() =>
 );
 const statusDesc = computed(() => {
   const base = `体验制衣厂 ${session.value?.name || ""}（${session.value?.tenant_code || ""}）`;
-  if (rejected.value) return `${base}的注册申请已被平台管理员驳回，该厂不会启用，也不会出现在手机登录的制衣厂列表中。`;
+  if (rejected.value) return `${base}的注册申请已被管理员驳回，该厂不会启用，也不会出现在手机登录的制衣厂列表中。`;
   if (approved.value) return `${base}已通过审核，以手机号 ${maskedPhone.value} 作为该厂管理员账户开通，并开始计算 30 天体验期。`;
-  return `${base}已提交，平台管理员审核通过后，将以手机号 ${maskedPhone.value} 作为该厂管理员账户开通，并开始计算 30 天体验期。`;
+  return `${base}已提交，管理员审核通过后，将以手机号 ${maskedPhone.value} 作为该厂管理员账户开通，并开始计算 30 天体验期。`;
 });
 
 function onScaleChange(e: { detail: { value: number } }) {

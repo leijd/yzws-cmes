@@ -10,7 +10,7 @@ import (
 
 // registerInventory 提供物料库存汇总查询。库存流水只追加，汇总按物料+仓库实时计算。
 func registerInventory(api *httpapi.API) {
-	api.Handle("GET /api/v1/inventory/summary", "masterdata:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("GET /api/v1/inventory/summary", "inventory:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		inventoryType := r.URL.Query().Get("inventory_type")
 		if inventoryType == "" {
 			inventoryType = "material"

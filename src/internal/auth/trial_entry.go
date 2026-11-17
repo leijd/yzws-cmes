@@ -22,8 +22,8 @@ var (
 	ErrNoTrialTenant = errors.New("trial tenant not found")
 )
 
-// ErrPasswordRequired：该厂普通用户首次短信/微信登录，必须先输入厂管理员提供的密码。
-var ErrPasswordRequired = errors.New("factory password required for first login")
+// ErrPasswordRequired：账号开通了「密码验证」，短信/微信验证之外还需补密码；首次登录不再触发。
+var ErrPasswordRequired = errors.New("password verification required")
 
 const trialEntryTokenTTL = 30 * 24 * time.Hour
 
@@ -214,9 +214,8 @@ func (s *Service) LoginTrialUser(ctx context.Context, phone, tenantCode, passwor
 	if err != nil {
 		return nil, ErrNoTrialTenant
 	}
-	// 普通员工首次进入须提供厂管理员设置的密码（与收费厂短信登录同一规则）；
-	// 管理员或此前已登录过的员工，凭短信验证/进入令牌即可进入。
-	if !isAdmin && lastLogin == nil {
+	// 验证方式按账号配置：默认只需短信/进入令牌；开通「密码验证」后才额外校验密码。
+	if LoadAuthMethods(ctx, s.db, tenantID, userID).Password {
 		if strings.TrimSpace(password) == "" {
 			return nil, ErrPasswordRequired
 		}
@@ -255,10 +254,12 @@ func (s *Service) LoginByWechatDevice(ctx context.Context, deviceID, phone, tena
 	if err != nil {
 		return nil, ErrInvalidCredentials
 	}
+	methods := LoadAuthMethods(ctx, s.db, tenantID, userID)
 	switch {
-	case bound != "" && bound == deviceID:
-		// 已绑定：后续微信扫码直接登录，不再要求密码或短信验证码。
-	case !isAdmin:
+	case methods.Wechat && bound != "" && bound == deviceID:
+		// 已开通「微信设备快捷登录」且本机已绑定：扫码后直接登录。
+	case methods.Password:
+		// 未开通微信验证或首次绑定：短信校验之后再按「密码验证」开关决定是否补密码。
 		if strings.TrimSpace(password) == "" {
 			return nil, ErrPasswordRequired
 		}
@@ -266,9 +267,15 @@ func (s *Service) LoginByWechatDevice(ctx context.Context, deviceID, phone, tena
 			return nil, ErrInvalidCredentials
 		}
 	}
-	// 首次绑定/换绑：写入微信身份，并解除首次登录的强制改密限制。
-	if _, err := s.db.Exec(ctx, `UPDATE user_account SET wechat_unionid=$1,password_change_required=FALSE
-		WHERE tenant_id=$2 AND id=$3`, deviceID, tenantID, userID); err != nil {
+	/* 只有开通「微信设备快捷登录」才持久化设备身份；关闭时清空绑定，
+	 * 避免关闭该验证后仍可凭已绑定设备扫码免短信登录。 */
+	if methods.Wechat {
+		if _, err := s.db.Exec(ctx, `UPDATE user_account SET wechat_unionid=$1,password_change_required=FALSE
+			WHERE tenant_id=$2 AND id=$3`, deviceID, tenantID, userID); err != nil {
+			return nil, err
+		}
+	} else if _, err := s.db.Exec(ctx, `UPDATE user_account SET wechat_unionid='',password_change_required=FALSE
+		WHERE tenant_id=$1 AND id=$2`, tenantID, userID); err != nil {
 		return nil, err
 	}
 	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, strings.TrimSpace(phone), "mobile")

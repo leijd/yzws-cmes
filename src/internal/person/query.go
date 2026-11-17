@@ -12,12 +12,14 @@ import (
 	"clothp/internal/httpapi"
 	"clothp/internal/orgapp"
 	"clothp/internal/platform"
+	"clothp/internal/seccrypto"
 )
 
 /* registerQuery 人员列表（数据范围 + 筛选 + 默认脱敏）与重置密码（设计 5.4/6.4）。 */
 func registerQuery(api *httpapi.API) {
-	/* 人员列表：identity:read + 数据范围；手机号默认脱敏，敏感字段不进列表（设计 6.4） */
-	api.Handle("GET /api/v1/people", "identity:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	/* 人员列表（用户角色权限页与生产组管理页共用）：identity:read 或 team:read 任一 + 数据范围；
+	 * 手机号默认脱敏，敏感字段不进列表（设计 6.4） */
+	api.Handle("GET /api/v1/people", "identity:read,team:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		ctx := r.Context()
 		access, err := orgapp.ComputeAccess(ctx, api.DB, p)
 		if err != nil {
@@ -84,7 +86,7 @@ func registerQuery(api *httpapi.API) {
 				(SELECT w.name FROM org_unit w WHERE w.tenant_id=e.tenant_id AND w.id=e.workshop_org_id) AS workshop_name,
 				(SELECT l.name FROM org_unit l WHERE l.tenant_id=e.tenant_id AND l.id=e.line_org_id) AS line_name,
 				(SELECT t.name FROM org_unit t WHERE t.tenant_id=e.tenant_id AND t.id=e.team_org_id) AS team_name,
-				(SELECT STRING_AGG(r.name,'、') FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+				(SELECT STRING_AGG(DISTINCT r.name,'、') FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
 					JOIN user_account ua ON ua.tenant_id=ur.tenant_id AND ua.id=ur.user_id
 					WHERE ur.tenant_id=e.tenant_id AND ua.employee_id=e.id AND ur.valid_to IS NULL) AS role_names,
 				(SELECT u.status FROM user_account u WHERE u.tenant_id=e.tenant_id AND u.employee_id=e.id LIMIT 1) AS account_status
@@ -103,9 +105,19 @@ func registerQuery(api *httpapi.API) {
 				&workshopID, &lineID, &teamID, &workshopName, &lineName, &teamName, &roleNames, &accountStatus); err != nil {
 				return err
 			}
+			/* 密文库手机号先解密再脱敏（直接 maskPhone 密文会把 enc:v1 信封原样透传）。
+			 * 本人或已解锁窗口内返回脱敏明文口径与 /employees 一致；历史明文行透传。 */
+			plainPhone := strVal(phone)
+			if phone != nil && seccrypto.IsEncrypted(*phone) {
+				dec, decErr := api.Crypto.DecryptField(ctx, p.TenantID, "employee", id, "phone", *phone)
+				if decErr != nil {
+					return fmt.Errorf("解密员工手机号失败: %w", decErr)
+				}
+				plainPhone = dec
+			}
 			items = append(items, map[string]any{
 				"id": id, "employee_no": no, "name": name, "person_type": ptype,
-				"phone_masked": maskPhone(strVal(phone)), "status": status, "position": position, "remark": remark, "version": version,
+				"phone_masked": maskPhone(plainPhone), "status": status, "position": position, "remark": remark, "version": version,
 				"workshop_id": workshopID, "line_id": lineID, "team_id": teamID,
 				"workshop_name": workshopName, "line_name": lineName, "team_name": teamName,
 				"role_names": roleNames, "account_status": accountStatus,

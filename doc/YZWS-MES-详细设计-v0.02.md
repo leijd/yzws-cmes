@@ -755,13 +755,13 @@ trial_page_content  JSONB  { welcome_title, welcome_text,           // 欢迎词
 | 体验注册审批中页面 + **加急申请**：提交体验注册后进入 `/trial/pending`（审批状态时间线）；加急落 `tenant.expedite_requested_at`（同一厂一次），平台管理员「注册审批」列表显示 🔥加急图标并置顶，审批/驳回后清除 | `POST /public/trial-expedite`、`TrialPendingPage.vue`、`PlatformAdminPage.vue`（registrations.expedited） | **已实现** |
 | **申请延长体验**：体验厂管理员在体验主页提交延期申请（原因选填），平台管理员「体验延期」页签审批：批准时**填写/选择新的体验截止时间**（须晚于当前截止时间），通过后同步更新 `tenant_subscription.trial_ends_at`；驳回填写原因。体验主页实时展示申请进度与最新截止时间 | `trial_extension` 表（迁移 047）、`POST /public/trial-extend`、`GET /public/trial-extend/status`、`GET/POST /platform/trial-extensions*`、`TrialHomePage.vue` 延期卡片 | **已实现** |
 | 审批中可**查看/修改注册信息**：`/trial/pending` 展开注册信息表单（名称/地区/规模/联系人/地址/备注可改，**联系电话锁定为体验用户登录手机号**），保存后平台管理员审批时看到最新内容；审批后锁定。平台管理员「注册审批」列表明确显示**用户类型（体验用户/付费用户）**与加急图标 | `GET /public/trial-info`、`POST /public/trial-update`（仅 pending 可改，SQL 不含 contact_phone）、`TrialPendingPage.vue` 信息表单、`PlatformAdminPage.vue` | **已实现** |
-| **制衣厂门户（体验用户与注册用户共用）**：登录后统一进入 `/portal/home?tenant=厂编码`（复用体验主页布局）。顶部品牌显示**本厂 logo + 厂名**（无 logo 用平台默认），徽标按版本显示“免费体验版/正式版”；欢迎标题与欢迎语由**本厂管理员维护**（留空用平台默认：体验版“欢迎使用{厂名}·一智算制衣”，正式版“欢迎使用{厂名}生产管理系统”）。右侧悬浮按钮：体验用户「开始体验」、注册用户「进入工作」，点开同一 MES 工作台（按权限显示菜单）；概览卡片展示今日工单/在制订单/员工总数/累计工单 | `tenant_portal` 表（迁移 048）、`GET /public/tenant-portal`、`GET/PUT /tenant-portal/content`（本厂管理员或 settings 权限）、`TrialHomePage.vue`、`PortalSettingsPage.vue`（导航“门户内容”） | **已实现** |
+| **制衣厂门户（体验用户与注册用户共用）**：登录后统一进入 `/portal/home?tenant=厂编码`（复用体验主页布局）。顶部品牌显示**本厂 logo + 厂名**（无 logo 用本厂厂名首字），徽标按版本显示“免费体验版/正式版”；欢迎标题与欢迎语由**本厂管理员维护**（留空用默认“欢迎使用{厂名}生产管理系统”，体验版与正式版一致）。右侧悬浮按钮：体验用户「开始体验」、注册用户「进入工作」，点开同一 MES 工作台（按权限显示菜单）；概览卡片展示今日工单/在制订单/员工总数/累计工单 | `tenant_portal` 表（迁移 048）、`GET /public/tenant-portal`、`GET/PUT /tenant-portal/content`（本厂管理员或 settings 权限）、`TrialHomePage.vue`、`PortalSettingsPage.vue`（导航“门户内容”） | **已实现** |
 | 平台管理入口修复（`/platform/login` 由 redirect 改为 PlatformLoginPage） | `src/web/src/router.ts` | **已实现** |
 | Reconcile 解析修复（`ADD COLUMN IF NOT EXISTS` 列名误判为 `IF`） | `internal/database/reconcile.go` | **已实现** |
 | **v0.02 增补（2026-11-10 校对补充，超出原设计稿的部分）：** | | |
 | 门户切换制衣厂：登录时验证过的手机号（`auth_session.login_phone`，迁移 049）名下多厂，门户顶部下拉切换；切换后按该手机号在目标厂绑定的账号签发新会话 | `GET /auth/my-factories`、`POST /auth/switch-tenant`、`auth.Service.SwitchTenant/PhoneTenants/PrincipalPhones`、`TrialHomePage.vue`（厂下拉） | **已实现** |
-| 企业 logo 上传存库：PNG/GIF ≤500KB 直接存 `tenant_portal.logo_data`（迁移 050），经公开接口按厂编码输出，不依赖静态目录；与 logo 网址二选一，可删除恢复平台默认 | `POST/DELETE /tenant-portal/logo`、`GET /public/tenant-logo`、`PortalSettingsPage.vue` | **已实现** |
-| 门户系统名称自定义：`tenant_portal.system_name`（迁移 052），工作页面 logo 旁显示，留空用平台默认"一智算" | `GET /tenant/branding`、`PUT /tenant-portal/content`、`PortalSettingsPage.vue` | **已实现** |
+| 企业 logo 只存数据库：PNG/JPG/GIF ≤500KB 直接存 `tenant_portal.logo_data`（迁移 050），经公开接口按厂编码输出，不依赖静态目录；不再支持填写外链图片网址（`logo_url` 仅保留为历史列），可删除恢复平台默认 | `POST/DELETE /tenant-portal/logo`、`GET /public/tenant-logo`、`PortalSettingsPage.vue` | **已实现** |
+| 门户系统名称自定义：`tenant_portal.system_name`（迁移 052），工作页面 logo 旁显示，留空默认显示本厂厂名 | `GET /tenant/branding`、`PUT /tenant-portal/content`、`PortalSettingsPage.vue` | **已实现** |
 | 注册辅助联系方式（微信/QQ/支付宝，迁移 051）：注册表单、平台审批列表、审批中修改（trial-update）、本厂信息页全链路 | `internal/tenantreg/tenantreg.go`、`trial_extras.go`、`TenantRegisterPage.vue`、`TenantProfilePage.vue`、`PlatformAdminPage.vue` | **已实现** |
 | 旧数据租户补录注册手机号：厂管理员登录后补录本厂联系电话（不校验短信），补录前 phoneGate 路由守卫拦截业务页 | `POST /auth/complete-phone`、`CompletePhonePage.vue`、`phoneGate.ts` | **已实现** |
 | 扫码登录全链路（三模块：一智算/二撮合/三生万）：建票→扫码→确认/取消→PC 轮询→一次性 exchange 取会话；手机端微信身份绑定后一键确认 | `login_qr_routes.go`（create/scan/confirm/cancel/status/exchange）、`QrLoginPage.vue`、`qrLogin.ts`、`/q` 短链 | **已实现** |
@@ -796,7 +796,7 @@ trial_page_content  JSONB  { welcome_title, welcome_text,           // 欢迎词
 | `045_org_process_design.sql` | 2.5 / 2.6 | org_unit 扩展（workshop_nature 等 5 列）；line_resource；mgmt_level（存量厂预置 L1–L4）+ user_account.mgmt_level_id；user_profile_template；process_standard / _line / _confirm / _grant |
 | `046_platform_assistants.sql` | 6.2 | platform_admin.role/name + platform_admin_permission（平台辅助人员与权限点） |
 | `047_trial_expedite_extension.sql` | 6.2 | tenant.expedite_requested_at（加急标记）；trial_extension（体验延期申请） |
-| `048_tenant_portal.sql` | 6.2 | tenant_portal（门户内容：logo 网址/欢迎词，tenant_id 唯一） |
+| `048_tenant_portal.sql` | 6.2 | tenant_portal（门户内容：logo_url 历史列/欢迎词，tenant_id 唯一；logo 本体自 050 起存 logo_data） |
 | `049_auth_session_login_phone.sql` | 6.2 | auth_session.login_phone（登录时验证的手机号，门户切换制衣厂用） |
 | `050_tenant_portal_logo.sql` | 6.2 | tenant_portal.logo_data/logo_content_type（logo 图片存库） |
 | `051_tenant_contact_social.sql` | 2.4.1 | tenant.contact_wechat/contact_qq/contact_alipay（辅助联系方式） |

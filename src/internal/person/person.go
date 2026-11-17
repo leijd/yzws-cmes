@@ -70,6 +70,7 @@ func registerCreate(api *httpapi.API) {
 			Remark             string   `json:"remark"`
 			ManagerEmployeeID  string   `json:"manager_employee_id"`
 			AsLineManager      bool     `json:"as_line_manager"` // 同时登记为产线线长
+			MgmtLevelID        string   `json:"mgmt_level_id"`   // 管理级别 L1～L4（设计 4.17.1）
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
@@ -132,6 +133,16 @@ func registerCreate(api *httpapi.API) {
 			}
 			if !ok {
 				return httpapi.Error(http.StatusBadRequest, "ROLE_INVALID", "角色不存在或不属于本厂")
+			}
+		}
+		/* 管理级别必须属于本厂（设计 4.17.1：级别决定数据范围上限） */
+		if mgmtLevelID := strings.TrimSpace(in.MgmtLevelID); mgmtLevelID != "" {
+			var ok bool
+			if err := api.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mgmt_level WHERE tenant_id=$1 AND id=$2 AND status='active')`, p.TenantID, mgmtLevelID).Scan(&ok); err != nil {
+				return err
+			}
+			if !ok {
+				return httpapi.Error(http.StatusBadRequest, "MGMT_LEVEL_INVALID", "管理级别不存在或已停用")
 			}
 		}
 		verifier, err := auth.HashPassword(in.Password)
@@ -223,9 +234,9 @@ func registerCreate(api *httpapi.API) {
 				return nil
 			},
 			"user_account": func(ctx context.Context, tx *dualwrite.Tx) error {
-				return execTwo(ctx, tx, `INSERT INTO user_account(tenant_id,id,employee_id,login_name,password_verifier,status,client_scope,password_change_required,created_at,updated_at,created_by,created_node,updated_by,updated_node,version)
-					VALUES($1,$2,$3,$4,$5,'active',$6,TRUE,$7,$7,$8,$9,$8,$9,1)`,
-					p.TenantID, accountID, employeeID, employeeNo, verifier, clientScope, now, p.UserID, api.Config.NodeID)
+				return execTwo(ctx, tx, `INSERT INTO user_account(tenant_id,id,employee_id,login_name,password_verifier,status,client_scope,mgmt_level_id,password_change_required,created_at,updated_at,created_by,created_node,updated_by,updated_node,version)
+					VALUES($1,$2,$3,$4,$5,'active',$6,NULLIF($7,''),TRUE,$8,$8,$9,$10,$9,$10,1)`,
+					p.TenantID, accountID, employeeID, employeeNo, verifier, clientScope, in.MgmtLevelID, now, p.UserID, api.Config.NodeID)
 			},
 			"user_roles": func(ctx context.Context, tx *dualwrite.Tx) error {
 				for _, roleID := range in.RoleIDs {
@@ -264,7 +275,7 @@ func registerCreate(api *httpapi.API) {
 
 func registerOrgBinding(api *httpapi.API) {
 	/* 换线/调岗：先插入新 primary，再结束旧 primary，更新 employee 当前归属（设计 5.4 换线事务） */
-	api.Handle("PUT /api/v1/people/{id}/org-binding", "identity:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("PUT /api/v1/people/{id}/org-binding", "identity:write,team:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
 			WorkshopOrgID string `json:"workshop_org_id"`
 			LineOrgID     string `json:"line_org_id"`
@@ -319,17 +330,22 @@ func registerOrgBinding(api *httpapi.API) {
 		}
 		steps := orgBindingSteps(payload, map[string]func(context.Context, *dualwrite.Tx) error{
 			"switch_binding": func(ctx context.Context, tx *dualwrite.Tx) error {
-				/* 结束旧主归属 + 插入新主归属（历史切换保持原子：不重不漏） */
+				/* 结束旧主归属 + 插入新主归属（历史切换保持原子：不重不漏）。
+				 * 调出（车间/产线均空）：只结束旧归属、不插新行——binding 表的车间/产线列为
+				 * NOT NULL，"无归属"不形成历史行，由 employee 归属列清空表达。 */
 				if err := execTwo(ctx, tx, `UPDATE employee_org_binding SET valid_to=$3 WHERE tenant_id=$1 AND employee_id=$2 AND is_primary=TRUE AND valid_to IS NULL`,
 					p.TenantID, employeeID, effective); err != nil {
 					return err
 				}
+				if in.WorkshopOrgID == "" && in.LineOrgID == "" {
+					return nil
+				}
 				return execTwo(ctx, tx, `INSERT INTO employee_org_binding(tenant_id,id,employee_id,workshop_org_id,line_org_id,team_org_id,is_primary,valid_from,change_reason,created_at,created_by,created_node)
-					VALUES($1,$2,$3,$4,$5,NULLIF($6,''),TRUE,$7,NULLIF($8,''),$7,$9,$10)`,
+					VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),TRUE,$7,NULLIF($8,''),$7,$9,$10)`,
 					p.TenantID, newBindingID, employeeID, in.WorkshopOrgID, in.LineOrgID, in.TeamOrgID, effective, in.Reason, p.UserID, api.Config.NodeID)
 			},
 			"update_employee": func(ctx context.Context, tx *dualwrite.Tx) error {
-				return execTwo(ctx, tx, `UPDATE employee SET workshop_org_id=$3,line_org_id=$4,team_org_id=NULLIF($5,''),org_unit_id=NULLIF($6,''),version=version+1,updated_at=$7,updated_by=$8,updated_node=$9
+				return execTwo(ctx, tx, `UPDATE employee SET workshop_org_id=NULLIF($3,''),line_org_id=NULLIF($4,''),team_org_id=NULLIF($5,''),org_unit_id=NULLIF($6,''),version=version+1,updated_at=$7,updated_by=$8,updated_node=$9
 					WHERE tenant_id=$1 AND id=$2`,
 					p.TenantID, employeeID, in.WorkshopOrgID, in.LineOrgID, in.TeamOrgID, orgUnitID, now, p.UserID, api.Config.NodeID)
 			},
@@ -338,6 +354,49 @@ func registerOrgBinding(api *httpapi.API) {
 			return err
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"binding_id": newBindingID, "effective_at": effective})
+	})
+	/* 调整管理级别（设计 4.17.1）：级别与角色取交集决定数据范围，调整后即时生效。 */
+	api.Handle("PUT /api/v1/people/{id}/mgmt-level", "identity:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			MgmtLevelID string `json:"mgmt_level_id"`
+			Reason      string `json:"reason"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		ctx := r.Context()
+		employeeID := r.PathValue("id")
+		levelID := strings.TrimSpace(in.MgmtLevelID)
+		if levelID != "" {
+			var ok bool
+			if err := api.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM mgmt_level WHERE tenant_id=$1 AND id=$2 AND status='active')`, p.TenantID, levelID).Scan(&ok); err != nil {
+				return err
+			}
+			if !ok {
+				return httpapi.Error(http.StatusBadRequest, "MGMT_LEVEL_INVALID", "管理级别不存在或已停用")
+			}
+		}
+		var before *string
+		if err := api.DB.QueryRow(ctx, `SELECT mgmt_level_id FROM user_account WHERE tenant_id=$1 AND employee_id=$2 LIMIT 1`, p.TenantID, employeeID).Scan(&before); err != nil {
+			return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "该人员没有登录账号")
+		}
+		tx, err := api.DB.Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `UPDATE user_account SET mgmt_level_id=NULLIF($3,''),version=version+1,updated_at=$4,updated_by=$5,updated_node=$6
+			WHERE tenant_id=$1 AND employee_id=$2`, p.TenantID, employeeID, levelID, platform.Now(), p.UserID, api.Config.NodeID); err != nil {
+			return err
+		}
+		if err := httpapi.Audit(ctx, tx, p, api.Config.NodeID, "change_mgmt_level", "employee", employeeID,
+			map[string]any{"mgmt_level_id": before}, map[string]any{"mgmt_level_id": levelID}, in.Reason); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"saved": true})
 	})
 }
 

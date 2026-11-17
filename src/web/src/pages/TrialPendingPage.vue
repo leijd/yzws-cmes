@@ -95,7 +95,7 @@ onMounted(loadInfo)
   <div class="tp-page">
     <NetworkBackground theme="aurora" />
     <div class="tp-card">
-      <div class="tp-brand"><span class="tp-mark">智</span><strong>一智算 · 免费体验</strong></div>
+      <div class="tp-brand"><span class="tp-mark">试</span><strong>免费体验</strong></div>
       <div class="tp-status-icon"><span class="tp-clock">⏳</span></div>
       <h1>体验注册已提交，正在审批</h1>
       <p class="tp-desc">
@@ -145,7 +145,7 @@ onMounted(loadInfo)
           </div>
         </template>
       </div>
-      <p class="tp-tip">审批通过后，回到体验主页点击右侧「开始体验」即可进入一智算工作台；本页可随时查看审批状态。</p>
+      <p class="tp-tip">审批通过后，回到体验主页点击右侧「开始体验」即可进入工作台；本页可随时查看审批状态。</p>
     </div>
   </div>
 </template>

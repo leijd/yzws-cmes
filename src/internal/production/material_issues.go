@@ -2,9 +2,11 @@ package production
 
 import (
 	"net/http"
+	"strings"
 
 	"clothp/internal/auth"
 	"clothp/internal/httpapi"
+	"clothp/internal/orgapp"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -23,18 +25,35 @@ type materialIssueInput struct {
 }
 
 func registerMaterialIssues(api *httpapi.API) {
-	api.Handle("GET /api/v1/material-issues", "masterdata:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("GET /api/v1/material-issues", "inventory:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		return listMaterialIssues(api, w, r, p)
 	})
-	api.Handle("POST /api/v1/material-issues", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("POST /api/v1/material-issues", "inventory:issue", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		return createMaterialIssue(api, w, r, p)
 	})
-	api.Handle("POST /api/v1/material-issues/{id}/reverse", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	api.Handle("POST /api/v1/material-issues/{id}/reverse", "inventory:issue", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		return reverseMaterialIssue(api, w, r, p)
 	})
 }
 
 func listMaterialIssues(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+	/* 数据范围（设计 5.7）：仓库范围按 warehouse_id 过滤，同时尊重人员组织范围 */
+	access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+	if err != nil {
+		return err
+	}
+	args := []any{p.TenantID}
+	where := "mi.tenant_id=$1"
+	whCond, whArgs := access.WarehouseScopeSQL("mi.warehouse_id", len(args)+1)
+	args = append(args, whArgs...)
+	where += whCond
+	orgCond, orgArgs := access.OrgScopeSQL("e", len(args)+1)
+	args = append(args, orgArgs...)
+	if len(orgArgs) > 0 {
+		/* 领料可能没有经办员工：无经办人时保留（仓库范围已过滤），有经办人时按组织范围判断 */
+		inner := strings.TrimSuffix(strings.TrimPrefix(orgCond, " AND ("), ")")
+		where += " AND (mi.operator_employee_id IS NULL OR (" + inner + "))"
+	}
 	rows, err := api.DB.Query(r.Context(), `SELECT mi.id,mi.issue_no,mi.issue_date,mi.work_order_id,w.work_order_code,mi.project_id,p.project_code,
 		mi.warehouse_id,wh.code,wh.name,mi.material_id,m.code,m.name,m.unit,mi.qty::text,mi.unit,COALESCE(mi.purpose,''),
 		COALESCE(e.name,''),mi.status,mi.version
@@ -44,7 +63,7 @@ func listMaterialIssues(api *httpapi.API, w http.ResponseWriter, r *http.Request
 		JOIN warehouse wh ON wh.tenant_id=mi.tenant_id AND wh.id=mi.warehouse_id
 		JOIN material m ON m.tenant_id=mi.tenant_id AND m.id=mi.material_id
 		LEFT JOIN employee e ON e.tenant_id=mi.tenant_id AND e.id=mi.operator_employee_id
-		WHERE mi.tenant_id=$1 ORDER BY mi.issue_date DESC,mi.id DESC LIMIT 200`, p.TenantID)
+		WHERE `+where+` ORDER BY mi.issue_date DESC,mi.id DESC LIMIT 200`, args...)
 	if err != nil {
 		return err
 	}

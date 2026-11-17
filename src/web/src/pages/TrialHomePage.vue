@@ -3,7 +3,6 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import NetworkBackground from '../components/NetworkBackground.vue'
 import BgAnimToggle from '../components/BgAnimToggle.vue'
-import { QR_APP_NAMES, type QrApp } from '../qrLogin'
 import { api } from '../api'
 import { toastError, toastSuccess } from '../toast'
 import { syncNeedPhone } from '../phoneGate'
@@ -21,7 +20,6 @@ const viaGuest = computed(() => route.query.via === 'guest'
   || session?.via === 'guest' || session?.phone === '游客用户')
 const viaAccount = computed(() => !viaQr.value && !viaGuest.value
   && (route.query.via === 'account' || session?.via === 'account' || !!session?.displayName))
-const qrAppName = computed(() => QR_APP_NAMES[String(route.query.app || 'zhisuan') as QrApp] || '一智算')
 const accountName = ref('')
 /* 收费厂门户优先显示登录账号名；体验门户显示体验会话名称 */
 const displayName = computed(() => portal.value?.edition === 'paid'
@@ -41,7 +39,7 @@ interface PortalInfo {
 }
 const portal = ref<PortalInfo | null>(null)
 const isPaid = computed(() => portal.value?.edition === 'paid')
-const portalName = computed(() => portal.value?.name || displayName.value || '一智算制衣')
+const portalName = computed(() => portal.value?.name || '制衣厂')
 const portalLogo = computed(() => portal.value?.content?.logo_url || '')
 const heroTitle = computed(() => portal.value?.content?.welcome_title || content.value.welcome_title)
 const heroText = computed(() => portal.value?.content?.welcome_text || welcomeDesc.value)
@@ -85,9 +83,10 @@ async function loadFactories() {
   } catch { /* 请求失败时保留上次列表，避免顶层切换菜单因网络抖动消失 */ }
 }
 
-function onFactoryChange(event: Event) {
-  const select = event.target as HTMLSelectElement
-  void switchFactory(select.value)
+const brandMenuOpen = ref(false)
+function onFactoryChange(code: string) {
+  brandMenuOpen.value = false
+  void switchFactory(code)
 }
 
 async function switchFactory(code: string) {
@@ -141,11 +140,11 @@ interface TrialContent {
   solution_text: string
 }
 const content = ref<TrialContent>({
-  welcome_title: '欢迎使用一智算制衣 MES',
+  welcome_title: '欢迎使用本厂生产管理系统',
   welcome_text: '免费体验已开通：这是一个真实的制衣厂数字化车间系统，订单、扫菲、计件工资一气呵成。',
   intro_title: '这些场景，您是不是也遇到过？',
   pain_points: [],
-  solution_title: '一智算的解决方案',
+  solution_title: '我们的解决方案',
   solution_text: '',
 })
 
@@ -162,12 +161,12 @@ const litCount = computed(() => features.value.filter(f => f.lit === 1).length)
 const progressPct = computed(() => features.value.length ? Math.round(litCount.value / features.value.length * 100) : 0)
 const progressStage = computed(() => {
   if (!features.value.length) return ''
-  if (progressPct.value >= 80) return '体验已接近完整，可以联系平台转正式订阅了'
+  if (progressPct.value >= 80) return '体验已接近完整，可以联系管理员转正式订阅了'
   if (progressPct.value >= 40) return '核心功能已上手，试试把真实订单录进来感受完整流程'
   return '刚起步：从「功能体验」区挑一项开始，每用一项就点亮一项'
 })
 const welcomeDesc = computed(() => {
-  if (viaQr.value) return `已通过扫码确认登录「${qrAppName.value}」，已为您开启免费体验。`
+  if (viaQr.value) return '已通过扫码确认登录，已为您开启免费体验。'
   if (viaGuest.value) return '当前以游客身份浏览演示主页，游客不计入登录状态。开通体验厂后可保留体验进度。'
   return content.value.welcome_text
 })
@@ -219,7 +218,7 @@ async function lightFeature(f: TrialFeature) {
 
 /* ===== 开始体验：进入该体验厂的 MES 工作台（以命中账号的身份与权限进入） ===== */
 const entering = ref(false)
-/* 普通员工（如厂长）首次进入：需输入厂管理员提供的初始密码 */
+/* 默认只需手机验证码/进入令牌；账号开通「密码验证」时才补录密码 */
 const trialPassword = ref('')
 const needTrialPassword = ref(false)
 const entryStatus = computed(() => session?.status || '')
@@ -268,7 +267,7 @@ async function startExperience() {
     switch (error.code) {
       case 'TRIAL_PENDING':
         if (session) saveTrialSession({ ...session, status: 'pending' })
-        show('体验制衣厂正在等待平台管理员审批…')
+        show('体验制衣厂正在等待管理员审批…')
         setTimeout(() => { void router.push('/trial/pending') }, 600)
         break
       case 'NO_TRIAL_TENANT':
@@ -276,16 +275,16 @@ async function startExperience() {
         setTimeout(() => { void router.push(registerLink.value) }, 900)
         break
       case 'TRIAL_EXPIRED':
-        show('体验期已结束，请联系平台转为正式订阅后再进入工作台。')
+        show('体验期已结束，请联系管理员转为正式订阅后再进入工作台。')
         break
       case 'PASSWORD_REQUIRED':
-        /* 普通员工首次进入：在页面底部密码条补录厂管理员提供的初始密码后重试 */
+        /* 该账号开通了密码验证：在页面底部密码条补录密码后重试 */
         needTrialPassword.value = true
-        show(error.message || '首次进入需输入厂管理员提供的初始密码')
+        show(error.message || '该账号已开启密码验证，请输入密码')
         break
       case 'INVALID_PASSWORD':
         needTrialPassword.value = true
-        show(error.message || '首次登录密码不正确，请向厂管理员确认后重试')
+        show(error.message || '密码不正确，请向厂管理员确认后重试')
         break
       case 'INVALID_ENTRY_TOKEN':
       case 'INVALID_TICKET':
@@ -312,7 +311,7 @@ const formatDate = (micros?: number | null) => micros ? new Date(micros / 1000).
 const extensionText = computed(() => {
   const r = extension.value
   if (!r) return ''
-  if (r.status === 'pending') return '延期申请审核中，请等待平台管理员处理'
+  if (r.status === 'pending') return '延期申请审核中，请等待管理员处理'
   if (r.status === 'approved') return `延期已批准：体验期延长至 ${formatDate(r.new_trial_ends_at)}`
   if (r.status === 'rejected') return `延期申请未通过${r.review_reason ? '：' + r.review_reason : ''}`
   return ''
@@ -375,12 +374,12 @@ function logout() {
 }
 
 const loginSource = computed(() => {
-  if (viaQr.value) return `扫码登录 · ${qrAppName.value}`
+  if (viaQr.value) return '扫码登录'
   if (viaGuest.value) return '游客浏览 · 不保存登录态'
   if (viaAccount.value) return `账号登录 · ${displayName.value}`
   return tenantCode.value ? `体验厂 ${tenantCode.value}` : '演示环境'
 })
-const heroName = computed(() => viaQr.value ? qrAppName.value : '一智算')
+const year = new Date().getFullYear()
 
 const stats = computed(() => [
   { label: '体验剩余', value: String(remainingDays.value), unit: '天' },
@@ -398,12 +397,20 @@ function openModule(name: string) {
   <!-- 体验用户有体验会话；登记用户（收费厂）用 ?tenant=厂编码 进入，无体验会话 -->
   <div v-if="session || tenantCode" class="trial-home">
     <header class="th-nav">
-      <div class="th-nav-inner">
-        <!-- 顶部品牌：各家制衣厂用自己的 logo 与厂名；没有 logo 时用平台默认 logo -->
-        <div class="th-brand">
+      <div class="th-nav-inner" @click="brandMenuOpen = false">
+        <!-- 顶部品牌：各家制衣厂用自己的 logo 与厂名；没有 logo 时用平台默认 logo。
+             名下多家制衣厂时厂名右侧显示下拉箭头，点击弹出列表切换当前门户。 -->
+        <div class="th-brand" :class="{ clickable: factories.length > 1 }" @click.stop="factories.length > 1 && (brandMenuOpen = !brandMenuOpen)">
           <img v-if="portalLogo" :src="portalLogo" alt="logo" class="th-brand-logo">
-          <span v-else class="th-brand-mark">智</span>
-          <span>{{ portalName }}<small>{{ editionLabel }}</small></span>
+          <span v-else class="th-brand-mark">{{ (portalName || '厂').slice(0, 1) }}</span>
+          <span class="th-brand-text">{{ portalName }}<small>{{ editionLabel }}</small></span>
+          <span v-if="factories.length > 1" class="th-brand-caret" :class="{ open: brandMenuOpen }">▾</span>
+          <div v-if="brandMenuOpen && factories.length > 1" class="th-brand-menu" @click.stop>
+            <button v-for="f in factories" :key="f.code" type="button" class="th-brand-menu-item"
+              :class="{ current: f.code === tenantCode }" :disabled="switchingFactory" @click="onFactoryChange(f.code)">
+              {{ f.name }}<span v-if="f.code === tenantCode"> · 当前</span>
+            </button>
+          </div>
         </div>
         <nav class="th-links">
           <a href="#welcome">欢迎</a>
@@ -411,16 +418,8 @@ function openModule(name: string) {
           <a href="#solution">解决方案</a>
           <a href="#modules">功能体验</a>
         </nav>
-        <!-- 顶层菜单：一个手机号登记了多家制衣厂时，可直接切换当前门户 -->
-        <div v-if="isPaid && factories.length > 1" class="th-factory">
-          <span class="th-factory-label">当前制衣厂</span>
-          <select :value="tenantCode" :disabled="switchingFactory" aria-label="切换制衣厂" @change="onFactoryChange">
-            <option v-for="f in factories" :key="f.code" :value="f.code">{{ f.name }}（{{ f.code }}）</option>
-          </select>
-        </div>
         <div class="th-user">
           <span class="th-phone">{{ displayName }}</span>
-          <span v-if="tenantCode" class="th-tenant-badge">{{ tenantCode }}</span>
           <button type="button" @click="logout">{{ isPaid || loggedIn ? '退出登录' : '退出体验' }}</button>
         </div>
       </div>
@@ -488,7 +487,7 @@ function openModule(name: string) {
         </button>
       </div>
       <p v-if="tenantCode && !isPaid" class="th-cred-tip">
-        <template v-if="entryStatus === 'pending'">体验制衣厂「{{ session?.trialName || tenantCode }}」已提交，等待平台管理员审核；通过后将以手机号 <strong>{{ session?.adminLogin || maskPhone(session?.phone || '') }}</strong> 作为该厂管理员账户。</template>
+        <template v-if="entryStatus === 'pending'">体验制衣厂「{{ session?.trialName || tenantCode }}」已提交，等待审核；通过后将以手机号 <strong>{{ session?.adminLogin || maskPhone(session?.phone || '') }}</strong> 作为该厂管理员账户。</template>
         <template v-else>体验厂管理员账户 <strong>{{ session?.adminLogin || maskPhone(session?.phone || '') }}</strong><template v-if="session?.adminPassword">，初始密码 <strong>{{ session.adminPassword }}</strong>（供本厂其他员工首次短信/微信登录使用）</template>。管理员本人使用手机号/微信登录，点击右侧“开始体验”即可进入工作台。</template>
       </p>
       <!-- 申请延长体验：体验厂管理员提交，平台管理员审批并确定新的体验截止时间 -->
@@ -496,7 +495,7 @@ function openModule(name: string) {
         <div class="th-extend-info">
           <strong>需要更多体验时间？</strong>
           <span v-if="extensionText">{{ extensionText }}</span>
-          <span v-else>体验期 {{ formatDate(trialEndsAt) }} 结束，可向平台管理员申请延长（由平台审批并确定新的截止时间）。</span>
+          <span v-else>体验期 {{ formatDate(trialEndsAt) }} 结束，可申请延长（由管理员审批并确定新的截止时间）。</span>
         </div>
         <button v-if="extension?.status !== 'pending' && extension?.status !== 'approved'" type="button"
           class="th-btn soft" @click="extendOpen = !extendOpen">申请延长体验</button>
@@ -528,26 +527,26 @@ function openModule(name: string) {
       <div class="th-tip">
         <div>
           <h3>免费体验说明</h3>
-          <p>体验厂为真实制衣厂记录（类型为体验用户，30 天有效）：手机号验证即自动开通，含管理员账号与本厂独立数据密钥；功能与页面与正式制衣厂相同，到期后可联系平台转正式订阅。</p>
+          <p>体验厂为真实制衣厂记录（类型为体验用户，30 天有效）：手机号验证即自动开通，含管理员账号与本厂独立数据密钥；功能与页面与正式制衣厂相同，到期后可申请转为正式版。</p>
         </div>
         <button type="button" class="th-btn solid" @click="continueTrial">继续体验 ↓</button>
       </div>
     </section>
 
-    <footer class="th-footer">© 南宁一智万商科技有限责任公司 · 一智算{{ isPaid ? '制衣 MES' : '免费体验' }}</footer>
+    <footer class="th-footer">© {{ year }} {{ portalName }} · 本厂内部工作门户</footer>
     <!-- 页面右侧中部悬浮：体验用户=开始体验 / 注册用户=进入工作，打开同一个工作台 -->
     <button type="button" class="th-start-fab" :disabled="entering" @click="onPrimaryEntry">
       <span class="th-start-fab-icon" aria-hidden="true">▶</span>
       <span class="th-start-fab-text">
         <strong>{{ entering ? '正在进入…' : entryLabel }}</strong>
-        <small>{{ isPaid ? '进入一智算工作台' : '进入一智算工作台（体验）' }}</small>
+        <small>{{ isPaid ? '打开本厂工作台' : '打开功能体验区' }}</small>
       </span>
     </button>
-    <!-- 普通员工（如厂长）首次进入体验厂：补录厂管理员提供的初始密码后进入本人工作页面 -->
-    <div v-if="needTrialPassword" class="th-password-bar" role="dialog" aria-label="首次登录密码">
-      <p class="th-password-tip">该手机号是本厂员工账号（如厂长），首次进入需输入厂管理员提供的初始密码，之后只需手机验证码。</p>
+    <!-- 账号开通「密码验证」时：短信验证之外补录密码后进入本人工作页面 -->
+    <div v-if="needTrialPassword" class="th-password-bar" role="dialog" aria-label="密码验证">
+      <p class="th-password-tip">该账号已开启密码验证，请在手机验证码之外输入账号密码；关闭密码验证后只需手机验证码。</p>
       <div class="th-password-row">
-        <input v-model="trialPassword" type="password" autocomplete="off" placeholder="初始密码（厂管理员提供）"
+        <input v-model="trialPassword" type="password" autocomplete="off" placeholder="账号密码"
           @keyup.enter="startExperience" />
         <button type="button" class="th-btn solid" :disabled="entering" @click="startExperience">
           {{ entering ? '正在进入…' : '进入工作台' }}
@@ -565,7 +564,14 @@ function openModule(name: string) {
 /* 导航 */
 .th-nav{position:sticky;top:0;z-index:50;background:rgba(255,255,255,.82);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.9)}
 .th-nav-inner{max-width:1200px;margin:0 auto;height:66px;padding:0 24px;display:flex;align-items:center;gap:28px}
-.th-brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:19px}
+.th-brand{display:flex;align-items:center;gap:10px;font-weight:800;font-size:19px;position:relative}
+.th-brand.clickable{cursor:pointer}
+.th-brand-caret{margin-left:.3rem;color:#7b8ab0;font-size:14px;transition:transform .15s}
+.th-brand-caret.open{transform:rotate(180deg)}
+.th-brand-menu{position:absolute;top:calc(100% + 8px);left:0;min-width:200px;background:#fff;border:1px solid #e3e9f4;border-radius:12px;box-shadow:0 12px 32px rgba(23,37,95,.14);padding:6px;z-index:60}
+.th-brand-menu-item{display:block;width:100%;text-align:left;padding:10px 12px;border:0;background:transparent;border-radius:8px;font-size:14px;color:#24365e;cursor:pointer}
+.th-brand-menu-item:hover{background:#f2f6ff}
+.th-brand-menu-item.current{color:#2563eb;font-weight:600}
 .th-brand small{display:block;font-size:11px;font-weight:500;color:#7b8ab0}
 .th-brand-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:10px;color:#fff;font-size:15px;
   background:linear-gradient(135deg,#2563eb,#06b6d4);box-shadow:0 4px 12px rgba(37,99,235,.3)}
@@ -632,7 +638,7 @@ function openModule(name: string) {
 .th-pain p{font-size:13.5px;line-height:1.8;color:#6b5a5a;margin:0}
 /* 解决方案与三种选择 */
 .th-solution{max-width:1200px;margin:0 auto;padding:48px 24px 16px}
-.th-solution-text{max-width:760px;margin:0 auto;font-size:15px;line-height:1.9;color:#41537e}
+.th-solution-text{max-width:none;margin:0 auto;font-size:15px;line-height:1.9;color:#41537e}
 .th-choices{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:30px}
 .th-choice{display:flex;flex-direction:column;gap:8px;align-items:flex-start;text-align:left;border:1px solid #dbe7fb;background:#fff;
   border-radius:16px;padding:22px 24px;cursor:pointer;font-family:inherit;transition:transform .18s,box-shadow .18s;

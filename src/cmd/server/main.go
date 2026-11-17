@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -16,20 +18,24 @@ import (
 	"clothp/internal/datatool"
 	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
+	"clothp/internal/masterdata"
 	"clothp/internal/orgapp"
 	"clothp/internal/person"
-	"clothp/internal/seccrypto"
-	"clothp/internal/masterdata"
+	"clothp/internal/plainbackup"
 	"clothp/internal/platformadmin"
 	"clothp/internal/production"
+	"clothp/internal/seccrypto"
+	"clothp/internal/tech"
 	"clothp/internal/tenantreg"
 )
 
 func main() {
 	configPath := flag.String("config", "", "指定配置文件路径（该文件中的配置优先于环境变量；也可用 CLOTHP_CONFIG 环境变量指定）")
-	datatoolCmd := flag.String("datatool", "", "数据互转工具：convert=全量转换；repair-phone-hash=修复手机号盲索引；repair-permission-divergence=修复两库权限点/授权主键分叉；align-subscription-keys=对齐订阅表业务键分叉；rewrap-local-master=用新口令重包租户密钥（读 CLOTHP_NEW_JWT_SECRET）；执行后退出，需配置 databases.secure")
+	datatoolCmd := flag.String("datatool", "", "运维工具：convert=全量互转；repair-phone-hash=修复手机号盲索引；repair-permission-divergence=修复两库权限点/授权主键分叉；align-subscription-keys=对齐订阅表业务键分叉；rewrap-local-master=用新口令重包租户密钥（读 CLOTHP_NEW_JWT_SECRET）；verify-backup=校验明文备份包；restore-plain=导入明文备份包；执行后退出")
 	datatoolDirection := flag.String("direction", "plain2secure", "convert 方向：plain2secure（明文→密文）| secure2plain（密文→明文）")
-	datatoolDryRun := flag.Bool("dry-run", true, "convert/repair-phone-hash 仅预检不落库；确认行数后用 -dry-run=false 执行")
+	datatoolDryRun := flag.Bool("dry-run", true, "convert/repair-phone-hash/restore-plain 仅预检不落库；确认行数后用 -dry-run=false 执行")
+	datatoolBackupDir := flag.String("backup-dir", "", "verify-backup/restore-plain 使用的明文备份包目录（含 manifest.json）")
+	datatoolBackupTenant := flag.String("backup-tenant", "", "restore-plain 导入的租户 ID；留空则用备份包记录的租户")
 	flag.Parse()
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -47,8 +53,8 @@ func main() {
 	}
 	db := store.ReadPool()
 
-	/* 密钥提供方与业务加密服务（设计 3.2）：提供方不可用只告警不回退，
-	 * 涉及密文的读写由 seccrypto.Service 返回 KEY_UNAVAILABLE。local 仅用于解包旧记录迁移。 */
+	/* 密钥提供方与业务加密服务（设计 3.2）：非 local 提供方启动自检失败即拒绝启动，
+	 * 避免以不可用密钥对外提供密文服务；local 仅用于迁移/开发兼容。 */
 	provider, err := seccrypto.NewProvider(seccrypto.KMSProviderConfig{
 		Provider:  cfg.Crypto.KMSProvider,
 		JWTSecret: cfg.JWTSecret,
@@ -78,6 +84,18 @@ func main() {
 	 * 非 local 提供方（softhsm2/cloud_kms）接入后，新密钥走当前提供方，local 仅承担历史解密。 */
 	localProvider := seccrypto.NewLocalProvider(cfg.JWTSecret)
 	cryptoSvc := seccrypto.NewService(provider, localProvider, dualwrite.NewDBKeyStore(store), 5*time.Minute)
+	/* 密钥提供方启动自检（设计 3.2）：非 local 提供方不可用时直接阻断启动，避免全量密文不可读；
+	 * local 仅历史解密，自检失败只告警。 */
+	if provider != nil {
+		if checker, ok := provider.(interface{ HealthCheck(context.Context) error }); ok {
+			if err := checker.HealthCheck(ctx); err != nil {
+				if cfg.Crypto.KMSProvider != "local" && cfg.Crypto.KMSProvider != "" {
+					log.Fatalf("密钥提供方 %s 自检失败，拒绝启动：%v", cfg.Crypto.KMSProvider, err)
+				}
+				log.Printf("crypto provider health check failed: %v", err)
+			}
+		}
+	}
 
 	/* 数据互转工具（设计 3.8）：历史数据回补/反向迁移；执行后退出，不启动 HTTP 服务 */
 	if *datatoolCmd == "convert" {
@@ -125,6 +143,35 @@ func main() {
 		}
 		return
 	}
+	/* 离线校验明文备份包（设计 3.9.4 verify-backup）：不连业务库也可执行，退出码 1 表示校验失败 */
+	if *datatoolCmd == "verify-backup" {
+		if *datatoolBackupDir == "" {
+			log.Fatal("verify-backup: -backup-dir 必填")
+		}
+		result, err := plainbackup.VerifyDir(ctx, *datatoolBackupDir)
+		if err != nil {
+			log.Fatal(err)
+		}
+		body, _ := json.MarshalIndent(result, "", "  ")
+		fmt.Println(string(body))
+		if !result.OK {
+			os.Exit(1)
+		}
+		return
+	}
+	/* 明文备份恢复（设计 3.9.4 restore-plain）：先整包校验，再按租户范围导入，可重复执行 */
+	if *datatoolCmd == "restore-plain" {
+		if *datatoolBackupDir == "" {
+			log.Fatal("restore-plain: -backup-dir 必填")
+		}
+		summary, err := plainbackup.Restore(ctx, store, *datatoolBackupDir, *datatoolBackupTenant, *datatoolDryRun)
+		if err != nil {
+			log.Fatal(err)
+		}
+		body, _ := json.MarshalIndent(summary, "", "  ")
+		fmt.Println(string(body))
+		return
+	}
 
 	/* 双写 2PC 协调器、崩溃恢复与明文→密文增量补偿循环（设计 3.3/3.8）；单库模式下 writer 仅单写明文库 */
 	writer := dualwrite.NewWriter(store, cfg.NodeID)
@@ -156,6 +203,7 @@ func main() {
 	tenantreg.Register(api)
 	orgapp.Register(api)
 	person.Register(api)
+	tech.Register(api)
 
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
 	go func() {

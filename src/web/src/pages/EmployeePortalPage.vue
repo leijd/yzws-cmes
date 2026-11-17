@@ -10,6 +10,7 @@ import NetworkBackground from '../components/NetworkBackground.vue'
 const loading = ref(true)
 const error = ref('')
 const userName = ref('')
+const tenantName = ref('')
 const entries = ref<{ key: string; label: string; route: string; icon: string }[]>([])
 
 /* 固定入口（设计 6.6 表）：由后端权限集合驱动，隐藏无权限入口仅用于展示 */
@@ -35,6 +36,11 @@ async function load() {
       api<{ actions: Record<string, boolean> }>('/me/permissions', {}, { silent: true }),
     ])
     userName.value = me.user.employee_name || me.user.login_name
+    /* 品牌显示本厂厂名，不出现平台产品名 */
+    try {
+      const brand = await api<{ tenant_name?: string }>('/tenant/branding', {}, { silent: true })
+      tenantName.value = brand.tenant_name || ''
+    } catch { /* 品牌加载失败只用中性标题 */ }
     /* 固定模板：全部入口按权限展示（工人无 PC 权限时仅保留手机入口） */
     entries.value = ALL_ENTRIES.filter(e => !e.permission || perms.actions[e.permission])
   } catch (e) {
@@ -59,7 +65,7 @@ onMounted(load)
   <div class="ep-page">
     <NetworkBackground theme="aurora" />
     <div class="ep-card">
-      <div class="ep-brand"><span class="ep-mark">智</span><strong>一智算 · 员工门户</strong></div>
+      <div class="ep-brand"><span class="ep-mark">{{ (tenantName || '厂').slice(0, 1) }}</span><strong>{{ tenantName ? tenantName + ' · ' : '' }}员工门户</strong></div>
       <h1>{{ greeting }}，{{ userName || '同事' }}</h1>
       <p class="ep-desc">以下为您的固定工作入口，按岗位权限显示；点击即可进入对应功能。</p>
       <div v-if="loading" class="ep-tip">正在加载…</div>

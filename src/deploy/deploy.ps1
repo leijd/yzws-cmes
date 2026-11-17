@@ -16,7 +16,7 @@ param(
   [string]$ServerHost   = '106.52.168.135',   # 云服务器地址
   [string]$ServerUser   = 'root',             # SSH 用户
   [int]   $SshPort      = 22,
-  [int]   $BackendPort  = 18370,              # 后端监听端口（部署时写入服务器 config.yaml 的 server.listen）
+  [int]   $BackendPort  = 18390,              # 后端监听端口（部署时写入服务器 config.yaml 的 server.listen）
   [string]$FrontendDir  = '/opt/clothp/web',  # 服务器上前端静态文件目录（Caddy FRONTEND_ROOT 指向这里）
   [string]$BackendDir   = '/opt/clothp/server', # 服务器上后端目录（二进制 + config.yaml）
   [string]$ServiceName  = 'clothp',           # systemd 服务名

@@ -11,6 +11,8 @@ export const router = createRouter({
     { path: '/portal/home', component: () => import('./pages/TrialHomePage.vue'), meta: { public: true, standalone: true } },
     { path: '/trial/pending', component: () => import('./pages/TrialPendingPage.vue'), meta: { public: true, standalone: true } },
     { path: '/login', component: () => import('./pages/LoginPage.vue'), meta: { public: true, standalone: true } },
+    /* 手机端登录入口：复用登录页短信模式（设计 6.1），避免维护第二套登录表单 */
+    { path: '/mobile/login', redirect: { path: '/login', query: { mode: 'sms' } } },
     { path: '/register', component: () => import('./pages/TenantRegisterPage.vue'), meta: { public: true, standalone: true } },
     { path: '/login/matcher', component: () => import('./pages/MatcherLoginPage.vue'), meta: { public: true, standalone: true } },
     { path: '/login/sansheng', component: () => import('./pages/SanshengLoginPage.vue'), meta: { public: true, standalone: true } },
@@ -29,6 +31,7 @@ export const router = createRouter({
     { path: '/workbench/A03', component: () => import('./pages/DashboardPage.vue') },
     { path: '/settings/dictionaries', component: () => import('./pages/DictionaryPage.vue') },
     { path: '/masterdata/B06', component: () => import('./pages/MasterdataPage.vue') },
+    { path: '/masterdata/customers', component: () => import('./pages/CustomersPage.vue') },
     { path: '/products/B01', component: () => import('./pages/ProductsPage.vue') },
     { path: '/markers/C11', component: () => import('./pages/MarkerPage.vue') },
     { path: '/print/C10', component: () => import('./pages/PrintCenterPage.vue') },
@@ -46,10 +49,13 @@ export const router = createRouter({
     { path: '/identity/G05', component: () => import('./pages/IdentityPage.vue') },
     /* 租户管理员：敏感信息查看授权申请审批 */
     { path: '/identity/sensitive-requests', component: () => import('./pages/SensitiveViewRequestsPage.vue') },
-    /* 车间/产线/人员管理（设计 6.2-6.4） */
+    /* 车间/产线/人员管理（设计 6.2-6.4）：/settings/users 为人员与组织（UserListPage），生产组管理独立路径 */
     { path: '/settings/workshops', component: () => import('./pages/WorkshopListPage.vue') },
     { path: '/settings/lines', component: () => import('./pages/LineListPage.vue') },
     { path: '/settings/users', component: () => import('./pages/UserListPage.vue') },
+    { path: '/settings/teams', component: () => import('./pages/ProductionTeamPage.vue') },
+    /* 本厂信息（设计 6.7）：门户与管理页入口共用 */
+    { path: '/tenant/profile', component: () => import('./pages/TenantProfilePage.vue') },
     /* 员工门户与手机岗位首页（设计 6.5/6.6） */
     { path: '/portal/employee', component: () => import('./pages/EmployeePortalPage.vue'), meta: { standalone: true } },
     { path: '/mobile/home', component: () => import('./pages/MobileJobHome.vue'), meta: { standalone: true } },
@@ -78,4 +84,16 @@ router.beforeEach((to) => {
   if (needPhoneGate() && !to.meta.platform && !to.path.startsWith('/login') && !PHONE_GATE_FREE.has(to.path)) {
     return '/complete-phone'
   }
+})
+
+/* 浏览器标签标题：制衣厂门户与工作页面用中性名称，只有平台/营销页面显示产品名 */
+router.afterEach((to) => {
+  const path = to.path
+  let title = '生产管理系统'
+  if (path === '/portal' || path === '/portal-v1') title = '一智万商 · 企业 AI 经营平台'
+  else if (path.startsWith('/platform')) title = '平台控制面'
+  else if (path === '/login/matcher') title = '二撮合 · 登录'
+  else if (path === '/login/sansheng') title = '三生万 · 登录'
+  else if (path === '/qr-login' || path === '/q') title = '扫码登录'
+  document.title = title
 })

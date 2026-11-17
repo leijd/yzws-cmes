@@ -11,6 +11,7 @@ import (
 
 	"clothp/internal/auth"
 	"clothp/internal/httpapi"
+	"clothp/internal/orgapp"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -40,6 +41,22 @@ func registerProgress(api *httpapi.API) {
 			args = append(args, "%"+code+"%")
 			where += fmt.Sprintf(" AND pj.project_code ILIKE $%d", len(args))
 		}
+		if productName := strings.TrimSpace(r.URL.Query().Get("product_name")); productName != "" {
+			args = append(args, "%"+productName+"%")
+			where += fmt.Sprintf(" AND pr.name ILIKE $%d", len(args))
+		}
+		if workOrderCode := strings.TrimSpace(r.URL.Query().Get("work_order_code")); workOrderCode != "" {
+			args = append(args, "%"+workOrderCode+"%")
+			where += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM work_order wo WHERE wo.tenant_id=s.tenant_id AND wo.project_id=s.project_id AND wo.work_order_code ILIKE $%d)", len(args))
+		}
+		/* 数据范围（设计 5.7）：进度投影按车间/产线列过滤 */
+		access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+		if err != nil {
+			return err
+		}
+		scopeCond, scopeArgs := access.OrgColumnsScopeSQL("s.workshop_org_unit_id", "s.line_org_unit_id", len(args)+1)
+		args = append(args, scopeArgs...)
+		where += scopeCond
 		rows, err := api.DB.Query(r.Context(), fmt.Sprintf(`SELECT pj.id,pj.project_code,pr.product_code,pr.name,COALESCE(c.name,''),s.order_qty,s.cut_qty,s.wip_qty,s.received_qty,s.shipped_qty,s.progress_ratio::text,COALESCE(s.current_node_text,''),COALESCE(ws.name,''),COALESCE(ls.name,''),COALESCE(s.planned_delivery_date,''),s.remaining_days,s.avg_receipt_qty_4d::text,s.estimated_days::text,COALESCE(s.warning_level,''),COALESCE(s.business_status,''),s.data_version FROM style_progress_projection s JOIN project pj ON pj.tenant_id=s.tenant_id AND pj.id=s.project_id JOIN product pr ON pr.tenant_id=pj.tenant_id AND pr.id=pj.product_id LEFT JOIN customer c ON c.tenant_id=pj.tenant_id AND c.id=pj.customer_id LEFT JOIN org_unit ws ON ws.tenant_id=s.tenant_id AND ws.id=s.workshop_org_unit_id LEFT JOIN org_unit ls ON ls.tenant_id=s.tenant_id AND ls.id=s.line_org_unit_id WHERE %s ORDER BY pj.project_code`, where), args...)
 		if err != nil {
 			return err
@@ -74,7 +91,11 @@ func registerProgress(api *httpapi.API) {
 		if err != nil {
 			return err
 		}
-		rows, err := api.DB.Query(r.Context(), `SELECT id,work_order_code,status,planned_product_qty,review_status FROM work_order WHERE tenant_id=$1 AND project_id=$2 ORDER BY work_order_code`, p.TenantID, r.PathValue("projectId"))
+		rows, err := api.DB.Query(r.Context(), `SELECT w.id,w.work_order_code,w.status,w.planned_product_qty,w.review_status,
+		/* 工单进度与产品进度统一使用「已审核成品入库数」口径（与 style_progress_projection 一致）。
+		 * 旧实现按生产报工(production_task.approved_good_qty)统计，若工单未派工/报工但有成品入库，就会显示 0%。 */
+		COALESCE((SELECT SUM(rl.qty) FROM finished_receipt rc JOIN finished_receipt_line rl ON rl.tenant_id=rc.tenant_id AND rl.receipt_id=rc.id WHERE rc.tenant_id=w.tenant_id AND rc.work_order_id=w.id AND rc.status='approved'),0)
+		FROM work_order w WHERE w.tenant_id=$1 AND w.project_id=$2 ORDER BY w.work_order_code`, p.TenantID, r.PathValue("projectId"))
 		if err != nil {
 			return err
 		}
@@ -82,16 +103,23 @@ func registerProgress(api *httpapi.API) {
 		orders := []map[string]any{}
 		for rows.Next() {
 			var id, code, woStatus, review string
-			var planned int64
-			if err := rows.Scan(&id, &code, &woStatus, &planned, &review); err != nil {
+			var planned, finished int64
+			if err := rows.Scan(&id, &code, &woStatus, &planned, &review, &finished); err != nil {
 				return err
 			}
-			orders = append(orders, map[string]any{"id": id, "work_order_code": code, "status": woStatus, "planned_product_qty": planned, "review_status": review})
+			woRatio := 0.0
+			if planned > 0 {
+				woRatio = float64(finished) / float64(planned)
+			}
+			orders = append(orders, map[string]any{"id": id, "work_order_code": code, "status": woStatus, "planned_product_qty": planned, "review_status": review, "approved_good_qty": finished, "progress_ratio": woRatio})
 		}
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		return httpapi.JSON(w, 200, map[string]any{"project_id": r.PathValue("projectId"), "order_qty": orderQty, "cut_qty": cutQty, "wip_qty": wip, "received_qty": received, "shipped_qty": shipped, "progress_ratio": ratio, "current_node": currentNode, "planned_delivery_date": delivery, "remaining_days": remaining, "avg_receipt_qty_4d": avg, "estimated_days": estimated, "warning_level": warning, "business_status": status, "data_version": dataVersion, "work_orders": orders})
+		/* 补充项目维度标识（产品号/产品名/客户名），供树形表格展开行与移动端详情展示 */
+		var productCode, productName, customerName string
+		_ = api.DB.QueryRow(r.Context(), `SELECT pr.product_code,pr.name,COALESCE(c.name,'') FROM project pj JOIN product pr ON pr.tenant_id=pj.tenant_id AND pr.id=pj.product_id LEFT JOIN customer c ON c.tenant_id=pj.tenant_id AND c.id=pj.customer_id WHERE pj.tenant_id=$1 AND pj.id=$2`, p.TenantID, r.PathValue("projectId")).Scan(&productCode, &productName, &customerName)
+		return httpapi.JSON(w, 200, map[string]any{"project_id": r.PathValue("projectId"), "product_code": productCode, "product_name": productName, "customer_name": customerName, "order_qty": orderQty, "cut_qty": cutQty, "wip_qty": wip, "received_qty": received, "shipped_qty": shipped, "progress_ratio": ratio, "current_node": currentNode, "planned_delivery_date": delivery, "remaining_days": remaining, "avg_receipt_qty_4d": avg, "estimated_days": estimated, "warning_level": warning, "business_status": status, "data_version": dataVersion, "work_orders": orders})
 	})
 
 	api.Handle("GET /api/v1/progress/work-orders/{id}/processes", "progress:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {

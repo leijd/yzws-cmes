@@ -7,8 +7,8 @@ import PageState from '../components/PageState.vue'
 import FilterSelect from '../components/FilterSelect.vue'
 
 const { has } = usePermissions()
-const canWrite = computed(() => has('masterdata:write'))
-const canIssue = computed(() => has('work_order:write'))
+const canWrite = computed(() => has('warehouse:write'))
+const canIssue = computed(() => has('inventory:issue'))
 const tab = ref<'materials' | 'suppliers' | 'warehouses' | 'stock' | 'issues'>('materials')
 const loading = ref(false)
 const saving = ref(false)

@@ -76,7 +76,7 @@ onMounted(load)
   <div class="cp-page">
     <NetworkBackground theme="aurora" />
     <div class="cp-card">
-      <div class="cp-brand"><span class="cp-mark">智</span><strong>一智算 · 完善资料</strong></div>
+      <div class="cp-brand"><span class="cp-mark">厂</span><strong>完善资料</strong></div>
       <h1>完善注册手机号</h1>
       <p class="cp-desc">
         <strong>{{ tenantName }}</strong><span v-if="tenantCode" class="cp-code">{{ tenantCode }}</span>

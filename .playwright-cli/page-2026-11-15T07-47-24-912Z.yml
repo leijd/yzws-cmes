@@ -1,0 +1,192 @@
+- generic [ref=f4e6]:
+  - generic [ref=f4e8]:
+    - generic [ref=f4e9]: 员工信息
+    - generic [ref=f4e10] [cursor=pointer]: 鼎顺服贸 ▾
+  - generic [ref=f4e15]:
+    - generic [ref=f4e16]:
+      - generic [ref=f4e17]: 员工信息
+      - generic [ref=f4e18] [cursor=pointer]: ＋ 新建员工
+    - generic [ref=f4e19]:
+      - generic [ref=f4e21]:
+        - generic: 姓名/工号搜索
+        - textbox [ref=f4e22]
+      - generic [ref=f4e23] [cursor=pointer]: 查询
+    - generic [ref=f4e24]:
+      - generic [ref=f4e25]: 全部
+      - generic [ref=f4e26]: 在职
+      - generic [ref=f4e27]: 停用
+    - generic [ref=f4e28]:
+      - generic [ref=f4e30]:
+        - generic [ref=f4e31]:
+          - generic [ref=f4e32]: 体验用户
+          - generic [ref=f4e33]: 在职
+          - generic [ref=f4e35]: 已开通账号
+        - generic [ref=f4e37]: 工号 TYC0D-000001 · 系统管理员
+        - generic [ref=f4e38]: 性别未设 · 计薪未设
+      - generic [ref=f4e39]: 未分配车间 · 133****1235
+      - generic [ref=f4e41]: 租户管理员
+      - generic [ref=f4e44]:
+        - generic [ref=f4e45] [cursor=pointer]: 编辑
+        - generic [ref=f4e46] [cursor=pointer]: 角色/状态
+        - generic [ref=f4e47] [cursor=pointer]: 验证方式
+        - generic [ref=f4e48] [cursor=pointer]: 重置密码
+        - generic [ref=f4e49] [cursor=pointer]: 停用
+        - generic [ref=f4e50] [cursor=pointer]: 删除
+    - generic [ref=f4e51]:
+      - generic [ref=f4e53]:
+        - generic [ref=f4e54]:
+          - generic [ref=f4e55]: 李涛
+          - generic [ref=f4e56]: 在职
+          - generic [ref=f4e58]: 已开通账号
+        - generic [ref=f4e60]: 工号 TYC0D-00002 · 未设置岗位
+        - generic [ref=f4e61]: 男 · 计薪未设
+      - generic [ref=f4e62]: 未分配车间 · 13300199999
+      - generic [ref=f4e64]: 厂长
+      - generic [ref=f4e67]:
+        - generic [ref=f4e68] [cursor=pointer]: 编辑
+        - generic [ref=f4e69] [cursor=pointer]: 角色/状态
+        - generic [ref=f4e70] [cursor=pointer]: 验证方式
+        - generic [ref=f4e71] [cursor=pointer]: 重置密码
+        - generic [ref=f4e72] [cursor=pointer]: 停用
+        - generic [ref=f4e73] [cursor=pointer]: 删除
+    - generic [ref=f4e74]:
+      - generic [ref=f4e76]:
+        - generic [ref=f4e77]:
+          - generic [ref=f4e78]: 李小蔓
+          - generic [ref=f4e79]: 在职
+          - generic [ref=f4e81]: 已开通账号
+        - generic [ref=f4e83]: 工号 TYC0D-00003 · 质检
+        - generic [ref=f4e84]: 女 · 计件 · 2026-11-19 入职
+      - generic [ref=f4e85]: 未分配车间 · 133****9998
+      - generic [ref=f4e87]: 仓管/质检
+      - generic [ref=f4e90]:
+        - generic [ref=f4e91] [cursor=pointer]: 编辑
+        - generic [ref=f4e92] [cursor=pointer]: 角色/状态
+        - generic [ref=f4e93] [cursor=pointer]: 验证方式
+        - generic [ref=f4e94] [cursor=pointer]: 重置密码
+        - generic [ref=f4e95] [cursor=pointer]: 停用
+        - generic [ref=f4e96] [cursor=pointer]: 删除
+    - generic [ref=f4e97]:
+      - generic [ref=f4e99]:
+        - generic [ref=f4e100]:
+          - generic [ref=f4e101]: 跨厂测试员工
+          - generic [ref=f4e102]: 在职
+          - generic [ref=f4e104]: 已开通账号
+        - generic [ref=f4e106]: 工号 TYC0D-990001 · 未设置岗位
+        - generic [ref=f4e107]: 性别未设 · 计薪未设
+      - generic [ref=f4e108]: 未分配车间 · 133****9999
+      - generic [ref=f4e110]:
+        - generic [ref=f4e111] [cursor=pointer]: 编辑
+        - generic [ref=f4e112] [cursor=pointer]: 角色/状态
+        - generic [ref=f4e113] [cursor=pointer]: 验证方式
+        - generic [ref=f4e114] [cursor=pointer]: 重置密码
+        - generic [ref=f4e115] [cursor=pointer]: 停用
+        - generic [ref=f4e116] [cursor=pointer]: 删除
+    - generic [ref=f4e118]:
+      - generic [ref=f4e119]: 编辑员工
+      - generic [ref=f4e120]:
+        - generic [ref=f4e121]: 敏感信息（手机号/证件/银行卡/住址等）已锁定。
+        - generic [ref=f4e122]: 解锁查看
+      - generic [ref=f4e124]:
+        - generic [ref=f4e125]:
+          - generic [ref=f4e126]: 工号 *
+          - textbox [ref=f4e129]: TYC0D-00003
+        - generic [ref=f4e130]:
+          - generic [ref=f4e131]: 姓名 *
+          - textbox [ref=f4e134]: 李小蔓
+      - generic [ref=f4e135]:
+        - generic [ref=f4e136]:
+          - generic [ref=f4e137]: 性别
+          - generic [ref=f4e138] [cursor=pointer]: 女
+        - generic [ref=f4e141]:
+          - generic [ref=f4e142]: 出生日期
+          - generic [ref=f4e143]: "***"
+      - generic [ref=f4e144]:
+        - generic [ref=f4e145]:
+          - generic [ref=f4e146]: 年龄（自动计算）
+          - generic [ref=f4e147]: —
+        - generic [ref=f4e148]:
+          - generic [ref=f4e149]: 联系电话
+          - generic [ref=f4e151]:
+            - generic: 11 位手机号
+            - spinbutton [disabled] [ref=f4e152]
+      - generic [ref=f4e153]:
+        - generic [ref=f4e154]:
+          - generic [ref=f4e155]: 身份证号
+          - generic [ref=f4e157]:
+            - generic: 18 位
+            - textbox [disabled] [ref=f4e158]
+        - generic [ref=f4e159]:
+          - generic [ref=f4e160]: 民族
+          - textbox [disabled] [ref=f4e163]: 汉
+      - generic [ref=f4e164]:
+        - generic [ref=f4e165]:
+          - generic [ref=f4e166]: 籍贯
+          - generic [ref=f4e168]:
+            - generic: 如 广西贵港
+            - textbox [disabled] [ref=f4e169]
+        - generic [ref=f4e170]:
+          - generic [ref=f4e171]: 入职日期
+          - generic [ref=f4e172] [cursor=pointer]: 2026-11-19
+      - generic [ref=f4e175]:
+        - generic [ref=f4e176]:
+          - generic [ref=f4e177]: 岗位
+          - textbox [ref=f4e180]: 质检
+        - generic [ref=f4e181]:
+          - generic [ref=f4e182]: 技能评级
+          - generic [ref=f4e183] [cursor=pointer]: B 合格
+      - generic [ref=f4e186]:
+        - generic [ref=f4e187]:
+          - generic [ref=f4e188]: 责任车间
+          - generic [ref=f4e189] [cursor=pointer]: 请选择
+        - generic [ref=f4e192]:
+          - generic [ref=f4e193]: 生产线
+          - generic [ref=f4e194]: 先选车间
+      - generic [ref=f4e197]:
+        - generic [ref=f4e198]:
+          - generic [ref=f4e199]: 工资模式
+          - generic [ref=f4e200]:
+            - generic [ref=f4e201]: 计件
+            - generic [ref=f4e202]: 月薪
+        - generic [ref=f4e203]:
+          - generic [ref=f4e204]: 基础底薪(元)
+          - spinbutton [ref=f4e207]: "0"
+      - generic [ref=f4e208]:
+        - generic [ref=f4e209]:
+          - generic [ref=f4e210]: 单价档位
+          - generic [ref=f4e211] [cursor=pointer]: 中档（系数 1.0）
+        - generic [ref=f4e214]:
+          - generic [ref=f4e215]: 银行卡号
+          - generic [ref=f4e217]:
+            - generic: 可选
+            - spinbutton [disabled] [ref=f4e218]
+      - generic [ref=f4e219]:
+        - generic [ref=f4e220]:
+          - generic [ref=f4e221]: 开户银行
+          - generic [ref=f4e223]:
+            - generic: 可选
+            - textbox [disabled] [ref=f4e224]
+        - generic [ref=f4e225]:
+          - generic [ref=f4e226]: 紧急联系人
+          - generic [ref=f4e228]:
+            - generic: 可选
+            - textbox [disabled] [ref=f4e229]
+      - generic [ref=f4e230]:
+        - generic [ref=f4e231]: 紧急联系电话
+        - generic [ref=f4e233]:
+          - generic: 可选
+          - spinbutton [disabled] [ref=f4e234]
+      - generic [ref=f4e235]:
+        - generic [ref=f4e236]: 现住址
+        - generic [ref=f4e238]:
+          - generic [ref=f4e239]: 可选
+          - textbox [disabled] [ref=f4e240]
+      - generic [ref=f4e241]:
+        - generic [ref=f4e242]: 工序专长（多选）
+        - generic [ref=f4e243]: 工序库为空或无读取权限，可后补
+      - generic [ref=f4e244]:
+        - generic [ref=f4e245]: 备注
+        - generic [ref=f4e247]:
+          - generic [ref=f4e248]: 如 熟练工，6年夹克经验
+          - textbox [ref=f4e249]
+      - generic [ref=f4e250] [cursor=pointer]: 保存

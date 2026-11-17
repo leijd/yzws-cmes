@@ -97,8 +97,18 @@ func (a *API) Handle(pattern, permission string, handler HandlerFunc) {
 				err = Error(http.StatusForbidden, "PASSWORD_CHANGE_REQUIRED", "请先设置新密码再进入业务系统")
 			}
 		}
-		if err == nil && permission != "" && !principal.Permissions[permission] {
-			err = Error(http.StatusForbidden, "FORBIDDEN", "没有执行此操作的权限")
+		/* permission 支持逗号分隔的多个权限点，任一满足即放行（空串表示无需权限） */
+		if err == nil && permission != "" {
+			allowed := false
+			for _, code := range strings.Split(permission, ",") {
+				if principal.Permissions[strings.TrimSpace(code)] {
+					allowed = true
+					break
+				}
+			}
+			if !allowed {
+				err = Error(http.StatusForbidden, "FORBIDDEN", "没有执行此操作的权限")
+			}
 		}
 		if err == nil {
 			err = handler(w, r, principal)
@@ -251,6 +261,10 @@ func JSON(w http.ResponseWriter, status int, value any) error {
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, auth.ErrUnauthenticated) {
 		err = Error(http.StatusUnauthorized, "UNAUTHENTICATED", "登录状态已失效，请重新登录")
+	}
+	/* 终端范围校验失败（设计 4.7）：工人手机会话访问 PC API 等一律 403 */
+	if errors.Is(err, auth.ErrClientForbidden) {
+		err = Error(http.StatusForbidden, "CLIENT_FORBIDDEN", "该账号不允许在此终端访问")
 	}
 	/* 请求超时：ctx 取消传到数据库/外部调用后原样返回，映射为明确可重试的 504 */
 	if errors.Is(err, context.DeadlineExceeded) {

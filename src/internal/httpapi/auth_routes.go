@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -75,11 +76,27 @@ func (a *API) RegisterAuthRoutes() {
 		return JSON(w, http.StatusOK, map[string]any{"revoked": true})
 	})
 	a.Handle("GET /api/v1/me", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		var employeeName *string
+		var employeeName, personType *string
 		if p.EmployeeID != "" {
-			_ = a.DB.QueryRow(r.Context(), "SELECT name FROM employee WHERE tenant_id=$1 AND id=$2", p.TenantID, p.EmployeeID).Scan(&employeeName)
+			/* person_type 一并返回：手机岗位首页据此选择固定入口模板，避免再拉全厂人员列表 */
+			_ = a.DB.QueryRow(r.Context(), "SELECT name,person_type FROM employee WHERE tenant_id=$1 AND id=$2", p.TenantID, p.EmployeeID).Scan(&employeeName, &personType)
 		}
-		return JSON(w, http.StatusOK, map[string]any{"user": map[string]any{"id": p.UserID, "tenant_id": p.TenantID, "employee_id": p.EmployeeID, "login_name": p.LoginName, "employee_name": employeeName}, "offline_policy": map[string]any{"read_only_after_expiry": true}})
+		/* 岗位模板按角色编码选择（设计 6.6）：person_type 只有 manager/worker，
+		 * 组长/仓管/总检等岗位需用有效角色区分，故一并返回。 */
+		roleCodes := []string{}
+		rows, err := a.DB.Query(r.Context(), `SELECT DISTINCT r.code FROM user_role ur JOIN role r ON r.tenant_id=ur.tenant_id AND r.id=ur.role_id
+			WHERE ur.tenant_id=$1 AND ur.user_id=$2 AND ur.valid_from<=$3 AND (ur.valid_to IS NULL OR ur.valid_to>$3)
+			ORDER BY r.code`, p.TenantID, p.UserID, platform.Now())
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var code string
+				if rows.Scan(&code) == nil {
+					roleCodes = append(roleCodes, code)
+				}
+			}
+		}
+		return JSON(w, http.StatusOK, map[string]any{"user": map[string]any{"id": p.UserID, "tenant_id": p.TenantID, "employee_id": p.EmployeeID, "login_name": p.LoginName, "employee_name": employeeName, "person_type": personType, "role_codes": roleCodes, "client_type": p.ClientType, "client_scope": p.ClientScope}, "offline_policy": map[string]any{"read_only_after_expiry": true}})
 	})
 	a.Handle("POST /api/v1/auth/password/change", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var input struct {
@@ -119,8 +136,25 @@ func (a *API) RegisterAuthRoutes() {
 				return err
 			}
 			for _, f := range factories {
-				items = append(items, map[string]any{"code": f.Code, "name": f.Name, "short_code": f.ShortCode,
+				items = append(items, map[string]any{"kind": "factory", "code": f.Code, "name": f.Name, "short_code": f.ShortCode,
 					"login_name": f.LoginName, "user_name": f.UserName, "current": f.Code == currentCode})
+			}
+			/* 追加体验厂：同一手机号可在多家体验厂登记员工，登录后门户/工作页可切换到任意一家；
+			 * 排除与收费厂重复的编码（同一厂不会同时是两种 kind，防御历史脏数据）。 */
+			hits, terr := matchTrialTenants(r.Context(), a, phones[0])
+			if terr != nil {
+				return terr
+			}
+			seen := map[string]bool{}
+			for _, it := range items {
+				seen[fmt.Sprint(it["code"])] = true
+			}
+			for _, h := range hits {
+				if seen[h.code] {
+					continue
+				}
+				items = append(items, map[string]any{"kind": "trial", "code": h.code, "name": h.name,
+					"short_code": h.shortCode, "admin_login_name": h.adminLogin, "current": h.code == currentCode})
 			}
 		}
 		return JSON(w, http.StatusOK, map[string]any{"items": items})

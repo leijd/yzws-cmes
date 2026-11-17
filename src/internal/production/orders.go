@@ -382,7 +382,9 @@ func listWorkOrders(api *httpapi.API, w http.ResponseWriter, r *http.Request, p 
 	args = append(args, limit+1)
 	rows, err := api.DB.Query(r.Context(), fmt.Sprintf(`SELECT w.id,w.work_order_code,p.name,w.planned_product_qty,w.status,w.priority,w.product_version,w.version,COALESCE(w.review_status,''),
 		COALESCE((SELECT SUM(t.planned_qty) FROM production_task t WHERE t.tenant_id=w.tenant_id AND t.work_order_id=w.id AND t.parent_task_id IS NULL),0),
-		COALESCE((SELECT MIN(t.approved_good_qty) FROM production_task t WHERE t.tenant_id=w.tenant_id AND t.work_order_id=w.id AND t.parent_task_id IS NOT NULL),0),
+		/* 工单完成件数统一使用「已审核成品入库数」口径，与项目/产品进度一致。
+		 * 旧实现按生产报工统计，未派工/报工但已入库的工单会被算成零。 */
+		COALESCE((SELECT SUM(rl.qty) FROM finished_receipt rc JOIN finished_receipt_line rl ON rl.tenant_id=rc.tenant_id AND rl.receipt_id=rc.id WHERE rc.tenant_id=w.tenant_id AND rc.work_order_id=w.id AND rc.status='approved'),0),
 		COALESCE(p.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p.tenant_id AND l.owner_type='product' AND l.owner_id=p.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id
 		FROM work_order w JOIN product p ON p.tenant_id=w.tenant_id AND p.id=w.product_id WHERE %s ORDER BY w.id LIMIT $%d`, where, len(args)), args...)
 	if err != nil {

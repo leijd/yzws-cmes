@@ -15,7 +15,7 @@
 		{
 			"path": "pages/portal/factory",
 			"style": {
-				"navigationBarTitleText": "制衣厂门户"
+				"navigationBarTitleText": "一智万商 · 企业 AI 经营平台"
 			}
 		},
 		{
@@ -40,6 +40,12 @@
 			"path": "pages/register/register",
 			"style": {
 				"navigationBarTitleText": "申请入驻"
+			}
+		},
+		{
+			"path": "pages/register/apply",
+			"style": {
+				"navigationBarTitleText": "制衣厂注册"
 			}
 		},
 		{
@@ -129,6 +135,12 @@
 		},
 		{
 			"path": "pages/progress/detail",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
+			"path": "pages/progress/workorder",
 			"style": {
 				"navigationStyle": "custom"
 			}
@@ -254,6 +266,12 @@
 			}
 		},
 		{
+			"path": "pages/settings/team-assign",
+			"style": {
+				"navigationStyle": "custom"
+			}
+		},
+		{
 			"path": "pages/settings/employees",
 			"style": {
 				"navigationStyle": "custom"
@@ -343,7 +361,7 @@
 	},
 	"globalStyle": {
 		"navigationBarTextStyle": "black",
-		"navigationBarTitleText": "ClothP MES",
+		"navigationBarTitleText": "生产管理系统",
 		"navigationBarBackgroundColor": "#F8F8F8",
 		"backgroundColor": "#F8F8F8"
 	}

@@ -1,0 +1,50 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e128]:
+    - generic [ref=e129]:
+      - link "← 返回门户" [ref=e130] [cursor=pointer]:
+        - /url: /portal
+      - heading "生产管理" [level=1] [ref=e131]
+      - paragraph [ref=e132]: Garment Production Management
+      - paragraph [ref=e133]: 订单、报工与工资一条线
+      - paragraph [ref=e134]: 贯通产品、工单、派工、报工、审批和工资，用一致的数据口径连接管理端与生产现场。
+      - paragraph [ref=e135]: 本厂内部账号登录
+    - generic [ref=e139]:
+      - generic [ref=e140]:
+        - heading "账号登录" [level=2] [ref=e181]
+        - generic [ref=e182]:
+          - textbox "账号 / 手机号" [ref=e183]
+          - button "历史账号" [ref=e184] [cursor=pointer]: ▾
+        - generic [ref=e185]:
+          - textbox "密码" [ref=e186]
+          - button "显示密码" [ref=e187] [cursor=pointer]
+        - generic [ref=e190]:
+          - generic [ref=e191] [cursor=pointer]:
+            - checkbox "保存密码" [ref=e192]
+            - text: 保存密码
+          - generic [ref=e193] [cursor=pointer]:
+            - checkbox "自动登录" [ref=e194]
+            - text: 自动登录
+        - button "登 录" [ref=e195] [cursor=pointer]
+        - paragraph [ref=e196]: 保存密码仅适用于本人专用设备
+        - generic [ref=e197]:
+          - button "忘记账号/密码?" [ref=e198] [cursor=pointer]
+          - button "设置 ▾" [ref=e200] [cursor=pointer]
+          - button "脱机" [ref=e201] [cursor=pointer]
+        - link "平台管理入口 →" [ref=e202] [cursor=pointer]:
+          - /url: /platform/login
+      - complementary [ref=e153]:
+        - paragraph [ref=e154]: 其他登录方式：
+        - generic [ref=e155]:
+          - button "极速注册" [ref=e156] [cursor=pointer]
+          - button "短信登录" [ref=e161] [cursor=pointer]
+          - button "扫码登录" [ref=e166] [cursor=pointer]
+          - button "游客浏览" [ref=e170] [cursor=pointer]
+        - generic [ref=e175]:
+          - button "微" [ref=e176] [cursor=pointer]
+          - button "Q" [ref=e177] [cursor=pointer]
+          - button "博" [ref=e178] [cursor=pointer]
+        - link "制衣厂注册（平台确认后启用） →" [ref=e179] [cursor=pointer]:
+          - /url: /register
+        - link "免费体验一个月 →" [ref=e180] [cursor=pointer]:
+          - /url: /register?mode=trial
+  - alert

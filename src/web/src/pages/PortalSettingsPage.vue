@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * 门户设置：本厂管理员维护制衣厂门户页的 logo 与欢迎标题/欢迎语。
- * logo 支持直接上传 PNG/GIF（≤500KB，存库后经公开接口输出），也可沿用图片网址；
- * 留空/移除即使用平台默认内容。
+ * logo 只通过上传写入数据库（PNG/JPG/GIF，≤500KB），由公开接口输出，不再支持图片网址；
+ * 移除即使用平台默认内容。
  */
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
@@ -15,7 +15,7 @@ interface PortalSection { key: string; title: string; description: string; enabl
 
 const portal = ref<any>(null)
 const form = reactive({
-  logo_url: '', system_name: '', welcome_title: '', welcome_text: '',
+  system_name: '', welcome_title: '', welcome_text: '',
   style_code: 'classic', sections: [] as PortalSection[],
 })
 const logoPreview = ref('')
@@ -37,7 +37,6 @@ async function load() {
   try {
     const r = await api<any>('/tenant-portal/content', {}, { silent: true })
     portal.value = r
-    form.logo_url = r.logo_url || ''
     form.system_name = r.system_name || ''
     form.welcome_title = r.welcome_title || ''
     form.welcome_text = r.welcome_text || ''
@@ -45,7 +44,7 @@ async function load() {
     form.sections = (r.sections || []).map((s: any) => ({
       key: s.key, title: s.title || '', description: s.description || '', enabled: s.enabled !== false,
     }))
-    logoPreview.value = r.logo_preview_url || r.logo_url || ''
+    logoPreview.value = r.logo_preview_url || ''
   } catch (e) {
     error.value = (e as Error).message || '加载失败'
   } finally {
@@ -59,7 +58,7 @@ async function save(reset = false) {
   notice.value = ''
   try {
     const body = reset
-      ? { logo_url: '', system_name: '', welcome_title: '', welcome_text: '', reset_logo: true, reset_sections: true, reason: '恢复平台默认门户内容' }
+      ? { system_name: '', welcome_title: '', welcome_text: '', reset_logo: true, reset_sections: true, reason: '恢复平台默认门户内容' }
       : { ...form, reset_logo: false, reset_sections: false, reason: '本厂管理员修改门户内容' }
     const r = await api<{ message: string }>('/tenant-portal/content', { method: 'PUT', body: JSON.stringify(body) })
     notice.value = r.message || '已保存'
@@ -104,7 +103,6 @@ async function onLogoPicked(event: Event) {
       body: file,
     })
     logoPreview.value = r.logo_url
-    form.logo_url = ''
     notice.value = r.message || '企业 logo 已上传'
     await load()
     window.dispatchEvent(new Event('clothp-branding-updated'))
@@ -123,7 +121,6 @@ async function removeLogo() {
   try {
     const r = await api<{ message: string }>('/tenant-portal/logo', { method: 'DELETE' })
     logoPreview.value = ''
-    form.logo_url = ''
     notice.value = r.message || '企业 logo 已移除'
     await load()
     window.dispatchEvent(new Event('clothp-branding-updated'))
@@ -185,7 +182,7 @@ onMounted(load)
       </div>
       <div class="field" style="margin-top:16px;max-width:420px">
         <label>制衣厂系统名称</label>
-        <input v-model.trim="form.system_name" maxlength="30" :placeholder="`留空默认「${portal?.default_system_name || '一智算'}」`">
+        <input v-model.trim="form.system_name" maxlength="30" :placeholder="`留空默认「${portal?.default_system_name || '本厂厂名'}」`">
       </div>
       <p class="text-muted" style="margin:8px 0 0">该名称显示在工作页面 logo 的旁边；修改后点下方「保存门户内容」生效。</p>
     </div>
@@ -202,10 +199,6 @@ onMounted(load)
       </p>
       <div class="form-grid">
         <div class="field">
-          <label>logo 图片网址（可选）</label>
-          <input v-model.trim="form.logo_url" placeholder="https://… 或 /uploads/logo.png（留空用平台默认 logo）" maxlength="500">
-        </div>
-        <div class="field">
           <label>欢迎标题</label>
           <input v-model.trim="form.welcome_title" :placeholder="portal?.default_title || ''" maxlength="60">
         </div>
@@ -215,7 +208,7 @@ onMounted(load)
         </div>
       </div>
       <p class="text-muted" style="margin:10px 0 0">
-        提示：填写图片网址后以网址为准；使用「上传 logo」则以上传的文件为准，并可点「移除本厂 logo」恢复平台默认。
+        提示：logo 只能通过上方「上传 logo」保存到数据库，不再支持填写图片网址；点「移除本厂 logo」可恢复平台默认。
       </p>
       <div style="display:flex;gap:10px;margin-top:14px">
         <button class="button" :disabled="saving || loading" @click="save(false)">{{ saving ? '保存中…' : '保存门户内容' }}</button>

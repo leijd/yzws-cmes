@@ -25,7 +25,7 @@
         "distribute" : {
             /* android打包配置 */
             "android" : {
-                /* 后端走 http://106.52.168.135:18370（IP 无法签发 HTTPS 证书），
+                /* APK 后端走 http://106.52.168.135:18390（见 src/config.ts；IP 无法签发 HTTPS 证书），
                  * Android 9+ 默认禁止明文 HTTP，必须显式放行，否则所有接口报网络错误 */
                 "usesCleartextTraffic" : true,
                 "packagename" : "cn.yizhisuan.clothp",

@@ -6,6 +6,7 @@ import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 import DatePicker from '../components/DatePicker.vue'
 import FilterSelect from '../components/FilterSelect.vue'
+import UserListPage from './UserListPage.vue'
 import { dictOptions, type DictOption } from '../dictionaries'
 
 const { has, ready } = usePermissions()
@@ -15,9 +16,8 @@ const canAccountRead = computed(() => has('identity:read'))
 const canAccountWrite = computed(() => has('identity:write'))
 const canCreateEmployee = computed(() => canWrite.value || canAccountWrite.value)
 
-const tab = ref<'employees' | 'customers'>('employees')
+const tab = ref<'employees' | 'people'>('employees')
 const employees = ref<any[]>([])
-const customers = ref<any[]>([])
 const roles = ref<any[]>([])
 const processes = ref<any[]>([])
 const loading = ref(false)
@@ -247,10 +247,11 @@ watch(showReveal, open => {
 onBeforeUnmount(() => { if (requestPoll) clearInterval(requestPoll) })
 
 async function load() {
+  /* 「人员与组织」页签复用 UserListPage，由其自行加载数据 */
+  if (tab.value === 'people') { loading.value = false; return }
   loading.value = true; error.value = ''
   try {
     if (tab.value === 'employees') employees.value = (await api<{ items: any[] }>('/employees')).items
-    else customers.value = (await api<{ items: any[] }>('/customers')).items
   } catch (e) { error.value = (e as Error).message } finally { loading.value = false }
 }
 async function loadSelfProfile() {
@@ -440,20 +441,6 @@ async function changePassword() {
   } catch (e) { error.value = (e as Error).message } finally { saving.value = false }
 }
 
-const customerForm = reactive({ code: '', name: '', contact_name: '', phone: '', address: '', remark: '' })
-const showCustomer = ref(false)
-function openCustomer() { Object.assign(customerForm, { code: '', name: '', contact_name: '', phone: '', address: '', remark: '' }); error.value = ''; showCustomer.value = true }
-async function saveCustomer() {
-  if (!customerForm.name.trim()) { error.value = '客户名称必填'; return }
-  saving.value = true; error.value = ''
-  try {
-    await api('/customers', { method: 'POST', body: JSON.stringify(customerForm) })
-    showCustomer.value = false
-    notice.value = '客户已创建'
-    await load()
-  } catch (e) { error.value = (e as Error).message } finally { saving.value = false }
-}
-
 onMounted(async () => {
   try {
     const me = await api<{ user: { employee_id?: string } }>('/me')
@@ -472,15 +459,17 @@ watch(ready, loaded => {
 </script>
 
 <template>
-  <div class="page-header"><div><h1>员工与账号</h1><p>员工档案与登录账号一体化维护</p></div><div class="header-actions"><button class="button secondary" @click="openPassword">修改密码</button><button v-if="!isSelfView && (tab === 'employees' ? canCreateEmployee : canWrite)" class="button" @click="tab === 'employees' ? openCreate() : openCustomer()">+ 新增{{ tab === 'employees' ? '员工' : '客户' }}</button></div></div>
+  <div class="page-header"><div><h1>员工信息</h1><p>员工档案、登录账号与人员组织统一维护</p></div><div class="header-actions"><button class="button secondary" @click="openPassword">修改密码</button><button v-if="!isSelfView && tab === 'employees' && canCreateEmployee" class="button" @click="openCreate()">+ 新增员工</button></div></div>
   <div v-if="error" class="notice error">{{ error }}</div><div v-if="notice" class="notice success">{{ notice }}</div>
-  <section v-if="!isSelfView" class="panel"><div class="tabs"><button v-if="canManage" :class="{ active: tab === 'employees' }" @click="changeTab('employees')">员工与账号</button><button v-if="canManage" :class="{ active: tab === 'customers' }" @click="changeTab('customers')">客户资料</button></div>
+  <section v-if="!isSelfView" class="panel"><div class="tabs"><button v-if="canManage" :class="{ active: tab === 'employees' }" @click="changeTab('employees')">员工信息</button><button v-if="canManage || canAccountRead" :class="{ active: tab === 'people' }" @click="changeTab('people')">人员与组织</button></div>
+    <UserListPage v-if="tab === 'people'" embedded />
+    <template v-else>
     <div class="toolbar"><input class="search-input" placeholder="搜索编码或名称"><span class="spacer"></span><button class="button secondary" @click="load">刷新</button></div>
     <PageState :loading="loading" />
     <div v-if="!loading && tab === 'employees' && employees.length" class="table-wrap"><table><thead><tr><th>工号</th><th>姓名</th><th>岗位</th><th>车间/产线</th><th>账号</th><th v-if="canAccountRead">角色</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in employees" :key="item.id"><td><strong>{{ item.code }}</strong></td><td>{{ item.name }}</td><td>{{ item.position || '—' }}</td><td>{{ [item.workshop, item.production_line].filter(Boolean).join(' / ') || '—' }}</td><td><span v-if="item.account">{{ item.account.login_name }}（{{ item.account.status === 'active' ? '启用' : '停用' }}）</span><span v-else class="status pending">未开通</span></td><td v-if="canAccountRead">{{ item.account?.roles?.join('、') || '—' }}</td><td><span class="status" :class="item.status">{{ item.status === 'active' ? '在职' : '离职' }}</span></td><td><button class="button link" @click="openEdit(item)">{{ item.id === myEmployeeId ? '编辑我的资料' : (canEditEmployee ? '编辑' : '查看') }}</button></td></tr></tbody></table></div>
     <PageState v-if="!loading && tab === 'employees'" :empty="!employees.length" />
-    <div v-if="!loading && tab === 'customers' && customers.length" class="table-wrap"><table><thead><tr><th>客户编码</th><th>名称</th><th>状态</th><th>版本</th></tr></thead><tbody><tr v-for="item in customers" :key="item.id"><td>{{ item.code }}</td><td>{{ item.name }}</td><td><span class="status" :class="item.status">{{ statusText[item.status] || item.status }}</span></td><td>v{{ item.version }}</td></tr></tbody></table></div>
-    <PageState v-if="!loading && tab === 'customers'" :empty="!customers.length" />
+
+    </template>
   </section>
 
   <section v-if="isSelfView" class="panel">
@@ -630,19 +619,6 @@ watch(ready, loaded => {
       <button class="button secondary" @click="showReveal = false">取消</button>
       <button class="button" :disabled="!revealSecret.trim()" @click="confirmReveal">解锁查看</button>
     </template>
-  </ModalDialog>
-
-  <ModalDialog v-if="showCustomer" :title="'新增客户'" @close="showCustomer = false">
-    <div v-if="error" class="notice error">{{ error }}</div>
-    <div class="form-grid">
-      <div class="field"><label>客户编码</label><input v-model.trim="customerForm.code" placeholder="留空自动生成（如 KH-00001）"></div>
-      <div class="field"><label class="required">客户名称</label><input v-model.trim="customerForm.name"></div>
-      <div class="field"><label>联系人</label><input v-model.trim="customerForm.contact_name"></div>
-      <div class="field"><label>联系电话</label><input v-model.trim="customerForm.phone"></div>
-      <div class="field full"><label>地址</label><input v-model.trim="customerForm.address"></div>
-      <div class="field full"><label>备注</label><textarea v-model="customerForm.remark" rows="2"></textarea></div>
-    </div>
-    <template #footer><button class="button secondary" @click="showCustomer = false">取消</button><button class="button" :disabled="saving || !customerForm.name" @click="saveCustomer">保存</button></template>
   </ModalDialog>
 
   <ModalDialog v-if="showPassword" :title="'修改密码'" @close="showPassword = false">

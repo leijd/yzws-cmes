@@ -23,7 +23,7 @@
 
 	# ---- 后端 API：/api/* 全部反代（QR 登录等均为普通 HTTP，无需特殊配置）----
 	handle /api/* {
-		reverse_proxy 127.0.0.1:{$BACKEND_PORT:18370}
+		reverse_proxy 127.0.0.1:{$BACKEND_PORT:18390}
 	}
 
 	# ---- 前端 SPA：静态文件 + 路由回退 index.html ----

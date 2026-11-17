@@ -1,6 +1,6 @@
 <template>
   <view class="splash">
-    <text class="logo">ClothP MES</text>
+    <text class="logo">生产管理</text>
   </view>
 </template>
 

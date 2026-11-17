@@ -74,10 +74,13 @@
       </view>
     </view>
 
-    <!-- 人员弹层 -->
+    <!-- 人员弹层（查看 + 调出 + 调入） -->
     <view v-if="memberPanel" class="sheet-mask" @click="memberPanel = false">
       <view class="sheet" @click.stop>
-        <view class="title" style="margin-bottom: 24rpx">本线人员</view>
+        <view class="row between" style="margin-bottom: 24rpx">
+          <view class="title">本线人员（{{ members.length }}）</view>
+          <button v-if="currentLine && currentLine.status === 'active'" class="btn btn-solid btn-sm" @click="openAssign">调入</button>
+        </view>
         <view v-if="membersLoading" class="empty">加载中…</view>
         <view v-else-if="!members.length" class="empty">暂无人员</view>
         <view v-for="m in members" :key="m.id" class="list-row">
@@ -86,7 +89,43 @@
             <text class="muted">工号 {{ m.employee_no }} · {{ m.position || "未设置岗位" }}</text>
           </view>
           <text class="tag" :class="m.status === 'active' ? 'tag-green' : 'tag-gray'">{{ m.status === "active" ? "在职" : "停用" }}</text>
+          <button class="btn btn-outline btn-sm" style="color: #d92d20" @click="removeMember(m)">调出</button>
         </view>
+      </view>
+    </view>
+
+    <!-- 调入弹层：全厂在职、不在本线的人员多选 -->
+    <view v-if="assignPanel" class="sheet-mask" @click="assignPanel = false">
+      <view class="sheet" @click.stop>
+        <view class="row between" style="margin-bottom: 24rpx">
+          <view class="title">调入「{{ currentLine?.name || "" }}」</view>
+          <view v-if="assignPicked.length" class="tag tag-green">已选 {{ assignPicked.length }}</view>
+        </view>
+        <view class="muted" style="font-size: 24rpx; margin-bottom: 16rpx">勾选不在本线的在职人员，确定后调入本线</view>
+        <view v-if="assignLoading" class="empty">加载中…</view>
+        <view v-else-if="!assignCandidates.length" class="empty">没有可调入的人员（全厂在职人员均已在本线）</view>
+        <view
+          v-for="c in assignCandidates"
+          :key="c.id"
+          class="card person"
+          :class="{ picked: assignPicked.includes(c.id) }"
+          style="margin-bottom: 12rpx"
+          @click="toggleAssign(c.id)"
+        >
+          <view style="flex: 1; min-width: 0">
+            <view style="font-size: 28rpx">
+              <text style="font-weight: 600">{{ c.name }}</text>
+              <text class="muted" style="margin-left: 12rpx">{{ c.employee_no }}</text>
+            </view>
+            <view class="muted" style="font-size: 24rpx; margin-top: 4rpx">
+              当前：{{ c.workshop_name || "—" }} / {{ c.line_name || "—" }}
+            </view>
+          </view>
+          <view class="check">{{ assignPicked.includes(c.id) ? "✓" : "" }}</view>
+        </view>
+        <button class="btn btn-solid btn-block" :disabled="!assignPicked.length || assigning" @click="doAssign">
+          {{ assigning ? "调入中…" : assignPicked.length ? `确定调入 ${assignPicked.length} 人` : "先勾选要调入的人员" }}
+        </button>
       </view>
     </view>
   </view>
@@ -121,6 +160,17 @@ interface Member {
   name: string;
   position?: string;
   status: string;
+  version: number;
+}
+
+interface PersonCandidate {
+  id: string;
+  employee_no: string;
+  name: string;
+  version: number;
+  line_id?: string | null;
+  workshop_name?: string | null;
+  line_name?: string | null;
 }
 
 const items = ref<Line[]>([]);
@@ -156,6 +206,14 @@ const form = ref({
 const memberPanel = ref(false);
 const membersLoading = ref(false);
 const members = ref<Member[]>([]);
+const currentLine = ref<Line | null>(null);
+
+/* 调入 */
+const assignPanel = ref(false);
+const assignLoading = ref(false);
+const assigning = ref(false);
+const assignCandidates = ref<PersonCandidate[]>([]);
+const assignPicked = ref<string[]>([]);
 
 const workshopName = ref("");
 
@@ -288,6 +346,7 @@ function disable(l: Line) {
 }
 
 async function viewMembers(l: Line) {
+  currentLine.value = l;
   memberPanel.value = true;
   membersLoading.value = true;
   try {
@@ -298,6 +357,92 @@ async function viewMembers(l: Line) {
   } finally {
     membersLoading.value = false;
   }
+}
+
+/* 调出：结束当前主归属并清空员工归属 */
+async function removeMember(m: Member) {
+  uni.showModal({
+    title: "调出人员",
+    content: `确定把「${m.name}」调出「${currentLine.value?.name || "本线"}」？`,
+    success: async (res) => {
+      if (!res.confirm) return;
+      try {
+        await request(`/people/${encodeURIComponent(m.id)}/org-binding`, {
+          method: "PUT",
+          data: {
+            workshop_org_id: "",
+            line_org_id: "",
+            team_org_id: "",
+            reason: `调出产线「${currentLine.value?.name || ""}」（移动端）`,
+            version: m.version,
+          },
+        });
+        uni.showToast({ title: `已调出 ${m.name}`, icon: "success" });
+        if (currentLine.value) await viewMembers(currentLine.value);
+        reload();
+      } catch (e) {
+        uni.showToast({ title: (e as Error).message || "调出失败", icon: "none" });
+      }
+    },
+  });
+}
+
+/* 调入：加载全厂在职人员，排除已在本线者，多选批量加入 */
+async function openAssign() {
+  const l = currentLine.value;
+  if (!l) return;
+  assignPanel.value = true;
+  assignLoading.value = true;
+  assignPicked.value = [];
+  try {
+    const res = await request<{ items: PersonCandidate[] }>("/people?status=active", { silent: true });
+    /* 排除已归属本线的人员；其余（含无归属、其他产线）均可调入 */
+    assignCandidates.value = (res.items || []).filter((p) => p.line_id !== l.id);
+  } catch (e) {
+    uni.showToast({ title: (e as Error).message || "加载失败", icon: "none" });
+    assignCandidates.value = [];
+  } finally {
+    assignLoading.value = false;
+  }
+}
+
+function toggleAssign(id: string) {
+  assignPicked.value = assignPicked.value.includes(id)
+    ? assignPicked.value.filter((x) => x !== id)
+    : [...assignPicked.value, id];
+}
+
+async function doAssign() {
+  const l = currentLine.value;
+  if (!l || !assignPicked.value.length) return;
+  assigning.value = true;
+  const targets = assignCandidates.value.filter((c) => assignPicked.value.includes(c.id));
+  const failures: string[] = [];
+  for (const p of targets) {
+    try {
+      await request(`/people/${encodeURIComponent(p.id)}/org-binding`, {
+        method: "PUT",
+        data: {
+          workshop_org_id: l.workshop_id,
+          line_org_id: l.id,
+          team_org_id: "",
+          reason: `调入产线「${l.name}」（移动端）`,
+          version: p.version,
+        },
+      });
+    } catch {
+      failures.push(p.name);
+    }
+  }
+  assigning.value = false;
+  if (failures.length) {
+    uni.showToast({ title: `成功 ${targets.length - failures.length} 人，失败 ${failures.length} 人`, icon: "none" });
+  } else {
+    uni.showToast({ title: `已调入 ${targets.length} 人`, icon: "success" });
+    assignPanel.value = false;
+  }
+  await viewMembers(l);
+  reload();
 }
 
 onLoad((query) => {
@@ -333,4 +478,12 @@ onLoad((query) => {
   font-size: 24rpx;
   margin-top: 12rpx;
 }
+.list-row { display: flex; align-items: center; gap: 16rpx; padding: 20rpx 0; border-bottom: 1rpx solid #eef1f5; }
+.grow { flex: 1; min-width: 0; }
+.muted { color: #8a94a6; font-size: 26rpx; display: block; }
+.card { background: #fff; border-radius: 16rpx; padding: 20rpx 24rpx; }
+.person { display: flex; align-items: center; gap: 16rpx; cursor: pointer; }
+.person.picked { border: 2rpx solid #2f7cf6; }
+.check { width: 44rpx; height: 44rpx; border-radius: 50%; border: 2rpx solid #c4ccd8; color: #fff; font-size: 28rpx; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.person.picked .check { background: #2f7cf6; border-color: #2f7cf6; }
 </style>

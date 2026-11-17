@@ -15,10 +15,16 @@ import (
 	"time"
 
 	"clothp/internal/auth"
+	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 )
+
+/* canDualWrite 门户写入是否可走 2PC 双写（双库模式）；单库模式回退 api.DB 旧行为。 */
+func canDualWrite(api *httpapi.API) bool {
+	return api.Writer != nil && api.Store != nil && api.Store.Plain != nil && api.Store.Secure != nil
+}
 
 /**
  * 制衣厂门户（体验用户与注册用户共用同一个页面，仅按钮文案与默认内容不同）：
@@ -31,7 +37,7 @@ import (
 
 const (
 	portalDefaultPaidTitle = "欢迎使用{tenant}生产管理系统"
-	portalDefaultPaidText  = "这里是一智算制衣 MES 的工作入口：订单、排产、扫菲报工、计件工资一条线走完，随时掌握车间实时进度。"
+	portalDefaultPaidText  = "这里是本厂生产管理系统的工作入口：订单、排产、扫菲报工、计件工资一条线走完，随时掌握车间实时进度。"
 	portalDefaultTrialText = "免费体验版已开通：这是一个真实的制衣厂数字化车间，订单、扫码、计件工资一网即成。您可以亲手把一个订单跑起来。"
 	/* logo 文件大小上限：500KB */
 	tenantLogoMaxBytes = 500 * 1024
@@ -139,10 +145,10 @@ func registerTenantPortal(api *httpapi.API) {
 		if customerType == "trial" {
 			edition = "trial"
 		}
-		var logoURL, welcomeTitle, welcomeText, logoType *string
+		var welcomeTitle, welcomeText, logoType *string
 		var portalVersion int64
-		_ = api.DB.QueryRow(r.Context(), `SELECT logo_url,welcome_title,welcome_text,logo_content_type,version FROM tenant_portal WHERE tenant_id=$1`, tenantID).
-			Scan(&logoURL, &welcomeTitle, &welcomeText, &logoType, &portalVersion)
+		_ = api.DB.QueryRow(r.Context(), `SELECT welcome_title,welcome_text,logo_content_type,version FROM tenant_portal WHERE tenant_id=$1`, tenantID).
+			Scan(&welcomeTitle, &welcomeText, &logoType, &portalVersion)
 		var trialEnds *int64
 		_ = api.DB.QueryRow(r.Context(), `SELECT trial_ends_at FROM tenant_subscription WHERE tenant_id=$1 AND customer_type='trial'`, tenantID).
 			Scan(&trialEnds)
@@ -161,7 +167,6 @@ func registerTenantPortal(api *httpapi.API) {
 		effTitle := strings.ReplaceAll(portalDefaultPaidTitle, "{tenant}", name)
 		effText := portalDefaultPaidText
 		if edition == "trial" {
-			effTitle = "欢迎使用" + name + " · 一智算制衣"
 			effText = portalDefaultTrialText
 		}
 		content := map[string]any{
@@ -178,11 +183,10 @@ func registerTenantPortal(api *httpapi.API) {
 			content["welcome_text"] = strings.TrimSpace(*welcomeText)
 			content["customized"] = true
 		}
-		/* 上传的企业 logo 优先；未上传时使用图片网址；都没有则前端显示平台默认 logo */
+		/* logo 只以数据库中的二进制为准：上传过才给库内输出地址，
+		 * 未上传则留空，由前端显示平台默认 logo。历史遗留的 logo_url 外链不再返回。 */
 		if logoType != nil && strings.TrimSpace(*logoType) != "" {
 			content["logo_url"] = tenantLogoURL(code, portalVersion)
-		} else if logoURL != nil {
-			content["logo_url"] = strings.TrimSpace(*logoURL)
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{
 			"code": code, "name": name, "short_code": shortCode, "edition": edition,
@@ -212,26 +216,25 @@ func registerTenantPortal(api *httpapi.API) {
 		defaultText := portalDefaultPaidText
 		if customerType == "trial" {
 			edition = "trial"
-			defaultTitle = "欢迎使用" + name + " · 一智算制衣"
 			defaultText = portalDefaultTrialText
 		}
-		var logoURL, systemName, welcomeTitle, welcomeText, logoType, styleCode *string
+		var systemName, welcomeTitle, welcomeText, logoType, styleCode *string
 		var sections []byte
 		var version int64
-		err = api.DB.QueryRow(r.Context(), `SELECT logo_url,system_name,welcome_title,welcome_text,logo_content_type,style_code,sections,version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).
-			Scan(&logoURL, &systemName, &welcomeTitle, &welcomeText, &logoType, &styleCode, &sections, &version)
+		err = api.DB.QueryRow(r.Context(), `SELECT system_name,welcome_title,welcome_text,logo_content_type,style_code,sections,version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).
+			Scan(&systemName, &welcomeTitle, &welcomeText, &logoType, &styleCode, &sections, &version)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
 		hasUploadedLogo := logoType != nil && strings.TrimSpace(*logoType) != ""
-		logoPreviewURL := deref(logoURL)
+		logoPreviewURL := ""
 		if hasUploadedLogo {
 			logoPreviewURL = tenantLogoURL(code, version)
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{
 			"tenant_name": name, "edition": edition,
-			"logo_url": deref(logoURL), "logo_preview_url": logoPreviewURL, "has_uploaded_logo": hasUploadedLogo,
-			"system_name": deref(systemName), "default_system_name": "一智算",
+			"logo_url": logoPreviewURL, "logo_preview_url": logoPreviewURL, "has_uploaded_logo": hasUploadedLogo,
+			"system_name": deref(systemName), "default_system_name": name,
 			"welcome_title": deref(welcomeTitle), "welcome_text": deref(welcomeText),
 			"default_title": defaultTitle, "default_text": defaultText, "version": version,
 			"style_code": deref(styleCode), "sections": parsePortalSections(sections),
@@ -267,27 +270,76 @@ func registerTenantPortal(api *httpapi.API) {
 		})
 	})
 
+	/* 厂二维码（设计 4.2）：内容格式 YZWS:<租户码>:<随机串>，扫码页 /s/{tenant}/{code} 据此进入本厂门户 */
+	api.Handle("GET /api/v1/tenant/qr-code", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var code string
+		var content *string
+		if err := api.DB.QueryRow(r.Context(), `SELECT code,qr_code_content FROM tenant WHERE id=$1`, p.TenantID).Scan(&code, &content); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"content": deref(content), "tenant_code": code,
+			"portal_path": "/s/" + code + "/" + code})
+	})
+	/* 重置二维码：仅本厂管理员；旧码立即失效，需重新打印张贴 */
+	api.Handle("POST /api/v1/tenant/qr-code/reset", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		isAdmin, err := isTenantAdmin(r, api, p)
+		if err != nil {
+			return err
+		}
+		if !isAdmin && !p.Permissions["settings:write"] {
+			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "仅本厂管理员可重置厂二维码")
+		}
+		var code string
+		if err := api.DB.QueryRow(r.Context(), `SELECT code FROM tenant WHERE id=$1`, p.TenantID).Scan(&code); err != nil {
+			return err
+		}
+		content := "YZWS:" + code + ":" + platform.ID()
+		if _, err := api.DB.Exec(r.Context(), `UPDATE tenant SET qr_code_content=$2,updated_at=$3,version=version+1 WHERE id=$1`,
+			p.TenantID, content, platform.Now()); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"content": content, "portal_path": "/s/" + code + "/" + code})
+	})
+	/* 扫码校验（公开）：返回租户码与门户路径，供扫码页跳转；无效码统一 404 不泄露租户信息 */
+	api.Public("POST /api/v1/public/tenant-qr/verify", func(w http.ResponseWriter, r *http.Request) error {
+		var in struct {
+			Content string `json:"content"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		content := strings.TrimSpace(in.Content)
+		if content == "" {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "二维码内容不能为空")
+		}
+		var code string
+		if err := api.DB.QueryRow(r.Context(), `SELECT code FROM tenant WHERE qr_code_content=$1 AND status='active' AND registration_status='approved'`, content).Scan(&code); err != nil {
+			return httpapi.Error(http.StatusNotFound, "QR_CODE_INVALID", "二维码无效或已重置，请向厂管理员索取新码")
+		}
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"tenant_code": code, "portal_path": "/s/" + code + "/" + code})
+	})
+
 	/* 工作页面品牌：本厂 logo + 制衣厂系统名称（未配置时前端显示平台默认） */
 	api.Handle("GET /api/v1/tenant/branding", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var code, tenantName string
 		if err := api.DB.QueryRow(r.Context(), `SELECT code,name FROM tenant WHERE id=$1`, p.TenantID).Scan(&code, &tenantName); err != nil {
 			return err
 		}
-		var logoURL, systemName, logoType *string
+		var systemName, logoType *string
 		var version int64
-		_ = api.DB.QueryRow(r.Context(), `SELECT logo_url,system_name,logo_content_type,version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).
-			Scan(&logoURL, &systemName, &logoType, &version)
-		logo := deref(logoURL)
+		_ = api.DB.QueryRow(r.Context(), `SELECT system_name,logo_content_type,version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).
+			Scan(&systemName, &logoType, &version)
+		logo := ""
 		if logoType != nil && strings.TrimSpace(*logoType) != "" {
 			logo = tenantLogoURL(code, version)
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{
 			"tenant_name": tenantName, "system_name": deref(systemName), "logo_url": logo,
-			"default_system_name": "一智算",
+			"default_system_name": tenantName,
 		})
 	})
 
-	/* 本厂管理员：保存门户内容（logo 网址 + 欢迎标题/欢迎语；留空表示恢复平台默认） */
+	/* 本厂管理员：保存门户内容（系统名称 + 欢迎标题/欢迎语；logo 只能通过上传接口入库） */
 	api.Handle("PUT /api/v1/tenant-portal/content", "", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		isAdmin, err := isTenantAdmin(r, api, p)
 		if err != nil {
@@ -320,11 +372,14 @@ func registerTenantPortal(api *httpapi.API) {
 		systemName := strings.TrimSpace(in.SystemName)
 		title := strings.TrimSpace(in.WelcomeTitle)
 		text := strings.TrimSpace(in.WelcomeText)
-		if len(logoURL) > 500 || len(systemName) > 30 || len(title) > 60 || len(text) > 400 {
-			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "内容过长（系统名称 ≤30、logo 网址 ≤500、标题 ≤60、欢迎语 ≤400）")
+		/* logo 统一存数据库（tenant_portal.logo_data）：只允许通过上传接口写入。
+		 * 前端回显的库内输出地址、空值一概忽略；外部图片网址直接拒绝，
+		 * 避免 logo 依赖第三方图片、出现裂图或随外链失效。 */
+		if logoURL != "" && !strings.HasPrefix(logoURL, "/api/v1/public/tenant-logo") {
+			return httpapi.Error(http.StatusBadRequest, "EXTERNAL_LOGO_NOT_ALLOWED", "logo 请通过上传保存到数据库，不支持填写外部图片网址")
 		}
-		if logoURL != "" && !strings.HasPrefix(logoURL, "http://") && !strings.HasPrefix(logoURL, "https://") && !strings.HasPrefix(logoURL, "/") {
-			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "logo 地址需以 http(s):// 或 / 开头")
+		if len(systemName) > 30 || len(title) > 60 || len(text) > 400 {
+			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "内容过长（系统名称 ≤30、标题 ≤60、欢迎语 ≤400）")
 		}
 		styleCode := strings.TrimSpace(in.StyleCode)
 		if styleCode != "" && styleCode != "classic" && styleCode != "dark" && styleCode != "fresh" {
@@ -348,21 +403,40 @@ func registerTenantPortal(api *httpapi.API) {
 			}
 			sectionsJSON, _ = json.Marshal(normalized)
 		}
-		/* 填写图片网址即改用以网址为准；留空且未要求恢复默认时，保留已上传的 logo 文件 */
-		if _, err := api.DB.Exec(r.Context(), `INSERT INTO tenant_portal(tenant_id,logo_url,system_name,welcome_title,welcome_text,style_code,sections,updated_at,updated_by,version)
-			VALUES($1,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($9,''),$10,$6,$7,1)
-			ON CONFLICT(tenant_id) DO UPDATE SET logo_url=EXCLUDED.logo_url,
-			logo_data=CASE WHEN $8 OR NULLIF($2,'') IS NOT NULL THEN NULL ELSE tenant_portal.logo_data END,
-			logo_content_type=CASE WHEN $8 OR NULLIF($2,'') IS NOT NULL THEN NULL ELSE tenant_portal.logo_content_type END,
+		/* logo_url 永远是 NULL（不再落外链），logo 本体只在上传时写入 logo_data；
+		 * 只有显式 reset_logo 才清空库内 logo，保存其它字段不影响已上传的图片。 */
+		contentSQL := `INSERT INTO tenant_portal(tenant_id,logo_url,system_name,welcome_title,welcome_text,style_code,sections,updated_at,updated_by,version)
+			VALUES($1,NULL,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),COALESCE(NULLIF($8,''),'classic'),$9,$5,$6,1)
+			ON CONFLICT(tenant_id) DO UPDATE SET logo_url=NULL,
+			logo_data=CASE WHEN $7 THEN NULL ELSE tenant_portal.logo_data END,
+			logo_content_type=CASE WHEN $7 THEN NULL ELSE tenant_portal.logo_content_type END,
 			system_name=EXCLUDED.system_name,
 			welcome_title=EXCLUDED.welcome_title,
 			welcome_text=EXCLUDED.welcome_text,
 			style_code=COALESCE(EXCLUDED.style_code, tenant_portal.style_code),
-			sections=CASE WHEN $11 THEN NULL ELSE COALESCE($10::JSONB, tenant_portal.sections) END,
-			updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_portal.version+1`,
-			p.TenantID, logoURL, systemName, title, text, platform.Now(), p.UserID, in.ResetLogo,
-			styleCode, sectionsJSON, in.ResetSections); err != nil {
-			return err
+			sections=CASE WHEN $10 THEN NULL ELSE COALESCE($9::JSONB, tenant_portal.sections) END,
+			updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_portal.version+1`
+		if canDualWrite(api) {
+			tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			tx.MarkAggregate("tenant_portal", p.TenantID)
+			if err := dualwrite.ExecBoth(r.Context(), tx, contentSQL,
+				p.TenantID, systemName, title, text, platform.Now(), p.UserID, in.ResetLogo,
+				styleCode, sectionsJSON, in.ResetSections); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+		} else {
+			if _, err := api.DB.Exec(r.Context(), contentSQL,
+				p.TenantID, systemName, title, text, platform.Now(), p.UserID, in.ResetLogo,
+				styleCode, sectionsJSON, in.ResetSections); err != nil {
+				return err
+			}
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"message": "门户内容已保存，门户页下次打开即生效"})
 	})
@@ -410,15 +484,38 @@ func registerTenantPortal(api *httpapi.API) {
 		if err := api.DB.QueryRow(r.Context(), `SELECT code FROM tenant WHERE id=$1`, p.TenantID).Scan(&code); err != nil {
 			return err
 		}
-		var version int64
-		err = api.DB.QueryRow(r.Context(), `INSERT INTO tenant_portal(tenant_id,logo_url,logo_data,logo_content_type,updated_at,updated_by,version)
+		logoSQL := `INSERT INTO tenant_portal(tenant_id,logo_url,logo_data,logo_content_type,updated_at,updated_by,version)
 			VALUES($1,NULL,$2,$3,$4,$5,1)
 			ON CONFLICT(tenant_id) DO UPDATE SET logo_url=NULL,logo_data=EXCLUDED.logo_data,
 			logo_content_type=EXCLUDED.logo_content_type,updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,
-			version=tenant_portal.version+1
-			RETURNING version`, p.TenantID, data, contentType, platform.Now(), p.UserID).Scan(&version)
-		if err != nil {
-			return err
+			version=tenant_portal.version+1`
+		var version int64
+		if canDualWrite(api) {
+			tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			tx.MarkAggregate("tenant_portal", p.TenantID)
+			if err := dualwrite.ExecBoth(r.Context(), tx, logoSQL, p.TenantID, data, contentType, platform.Now(), p.UserID); err != nil {
+				return err
+			}
+			qtx := tx.Secure()
+			if qtx == nil {
+				qtx = tx.Plain()
+			}
+			if err := qtx.QueryRow(r.Context(), `SELECT version FROM tenant_portal WHERE tenant_id=$1`, p.TenantID).Scan(&version); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+		} else {
+			err = api.DB.QueryRow(r.Context(), logoSQL+`
+				RETURNING version`, p.TenantID, data, contentType, platform.Now(), p.UserID).Scan(&version)
+			if err != nil {
+				return err
+			}
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{
 			"logo_url": tenantLogoURL(code, version), "content_type": contentType, "size": len(data),
@@ -435,12 +532,27 @@ func registerTenantPortal(api *httpapi.API) {
 		if !isAdmin && !p.Permissions["settings:write"] {
 			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "仅本厂管理员可移除企业 logo")
 		}
-		if _, err := api.DB.Exec(r.Context(), `INSERT INTO tenant_portal(tenant_id,logo_url,logo_data,logo_content_type,updated_at,updated_by,version)
+		removeSQL := `INSERT INTO tenant_portal(tenant_id,logo_url,logo_data,logo_content_type,updated_at,updated_by,version)
 			VALUES($1,NULL,NULL,NULL,$2,$3,1)
 			ON CONFLICT(tenant_id) DO UPDATE SET logo_url=NULL,logo_data=NULL,logo_content_type=NULL,
-			updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_portal.version+1`,
-			p.TenantID, platform.Now(), p.UserID); err != nil {
-			return err
+			updated_at=EXCLUDED.updated_at,updated_by=EXCLUDED.updated_by,version=tenant_portal.version+1`
+		if canDualWrite(api) {
+			tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			tx.MarkAggregate("tenant_portal", p.TenantID)
+			if err := dualwrite.ExecBoth(r.Context(), tx, removeSQL, p.TenantID, platform.Now(), p.UserID); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+		} else {
+			if _, err := api.DB.Exec(r.Context(), removeSQL, p.TenantID, platform.Now(), p.UserID); err != nil {
+				return err
+			}
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"message": "企业 logo 已移除，门户将显示平台默认 logo"})
 	})

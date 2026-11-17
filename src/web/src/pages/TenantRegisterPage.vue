@@ -208,8 +208,8 @@ onBeforeUnmount(() => { if (ticker) { window.clearInterval(ticker); ticker = und
           </div>
           <div v-if="result?.status === 'approved' && result?.initial_password" class="credential-box">
             <p><strong>管理员账户：</strong><span class="code-value">{{ result?.admin_login_name }}</span></p>
-            <p><strong>员工首次登录密码：</strong><span class="code-value">{{ result?.initial_password }}</span></p>
-            <p class="cred-tip">该密码供本厂其他员工首次短信/微信登录使用；管理员本人可直接用手机号或微信登录。</p>
+            <p><strong>员工账号密码：</strong><span class="code-value">{{ result?.initial_password }}</span></p>
+            <p class="cred-tip">该密码供账号密码登录或开通「密码验证」时使用；默认登录只需手机验证码，首次进入无需输入密码。</p>
           </div>
         </template>
         <template v-else>

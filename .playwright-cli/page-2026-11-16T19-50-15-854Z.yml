@@ -1,0 +1,90 @@
+- generic [ref=f3e152]:
+  - generic [ref=f3e153]:
+    - generic [ref=f3e154]:
+      - generic [ref=f3e155]: 智
+      - generic [ref=f3e156]:
+        - generic [ref=f3e157]: 一智万商
+        - generic [ref=f3e158]: 南宁一智万商科技有限责任公司
+    - generic [ref=f3e159]:
+      - generic [ref=f3e160] [cursor=pointer]: 登录
+      - generic [ref=f3e161] [cursor=pointer]: 体验
+  - generic [ref=f3e170]:
+    - generic [ref=f3e171]:
+      - generic [ref=f3e172]: 一智
+      - generic [ref=f3e173]: 万商
+    - generic [ref=f3e174]: 企业 AI 经营平台
+    - generic [ref=f3e175]: 1步2步3步，我们一起走进AI
+    - generic [ref=f3e176]:
+      - generic [ref=f3e177] [cursor=pointer]: 免费体验一个月
+      - generic [ref=f3e178] [cursor=pointer]: 了解三大应用 ↓
+    - generic [ref=f3e179]: 已登录，进入制衣厂门户 ›
+  - generic [ref=f3e181]:
+    - generic [ref=f3e182]: 三大应用
+    - generic [ref=f3e183]:
+      - generic [ref=f3e184]:
+        - generic [ref=f3e185]: 智
+        - generic [ref=f3e186]:
+          - generic [ref=f3e187]: 一智算
+          - generic [ref=f3e188]: AI Accounting & Settlement
+          - generic [ref=f3e189]: 算账结算省心
+      - generic [ref=f3e190]:
+        - generic [ref=f3e191]: 订单工单全流程
+        - generic [ref=f3e192]: 扫菲计件算工资
+        - generic [ref=f3e193]: 一厂一密钥加密
+      - generic [ref=f3e194] [cursor=pointer]: 进入一智算
+    - generic [ref=f3e195]:
+      - generic [ref=f3e196]:
+        - generic [ref=f3e197]: 撮
+        - generic [ref=f3e198]:
+          - generic [ref=f3e199]: 二撮合
+          - generic [ref=f3e200]: Order Matching Platform
+          - generic [ref=f3e201]: 订单客户与制衣厂双向撮合
+      - generic [ref=f3e202]:
+        - generic [ref=f3e203]: 产能评价模型
+        - generic [ref=f3e204]: AI 漫剧营销
+        - generic [ref=f3e205]: 供需双向撮合
+      - generic [ref=f3e206] [cursor=pointer]: 进入二撮合
+    - generic [ref=f3e207]:
+      - generic [ref=f3e208]:
+        - generic [ref=f3e209]: 万
+        - generic [ref=f3e210]:
+          - generic [ref=f3e211]: 三生万
+          - generic [ref=f3e212]: Business Model Intelligence
+          - generic [ref=f3e213]: 经营分析模型 → 数据资产
+      - generic [ref=f3e214]:
+        - generic [ref=f3e215]: 经营分析模型
+        - generic [ref=f3e216]: 能力提升服务
+        - generic [ref=f3e217]: 数据资产入伙
+      - generic [ref=f3e218] [cursor=pointer]: 进入三生万
+  - generic [ref=f3e219]:
+    - generic [ref=f3e220]: 统一入口，各走各的路
+    - generic [ref=f3e222]:
+      - generic [ref=f3e223]:
+        - generic [ref=f3e224]: 手机号
+        - generic [ref=f3e226]:
+          - generic: 11 位手机号
+          - spinbutton [ref=f3e227]
+      - generic [ref=f3e228]:
+        - generic [ref=f3e229]: 短信验证码
+        - generic [ref=f3e230]:
+          - generic [ref=f3e232]:
+            - generic: 6 位验证码
+            - spinbutton [ref=f3e233]
+          - generic [ref=f3e234]: 获取验证码
+      - generic [ref=f3e235] [cursor=pointer]: 登录
+      - generic [ref=f3e236]:
+        - generic [ref=f3e237]: ✓ 全功能开放
+        - generic [ref=f3e238]: ✓ 无需绑卡
+        - generic [ref=f3e239]: ✓ 专员一对一带教
+      - generic [ref=f3e240] [cursor=pointer]: 注册
+      - generic [ref=f3e241]: 账号密码登录
+  - generic [ref=f3e242]:
+    - generic [ref=f3e243]:
+      - generic [ref=f3e244]: 一智万商 · 企业 AI 经营平台
+      - generic [ref=f3e245]: 引商入局 · 开拓新土 · 共创未来
+      - generic [ref=f3e246]: 专注小微企业数字化：一智算打地基，二撮合接订单，三生万共成长。
+    - generic [ref=f3e247]:
+      - generic [ref=f3e248]: 商务合作：0771-XXXXXXX
+      - generic [ref=f3e249]: 微信：yzs-service
+      - generic [ref=f3e250]: 邮箱：business@yizhisuan.cn
+    - generic [ref=f3e251]: © 2026 南宁一智万商科技有限责任公司

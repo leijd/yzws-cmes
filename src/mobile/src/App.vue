@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { onLaunch, onShow, onHide } from "@dcloudio/uni-app";
+import { getToken } from "./utils/request";
+import { auth } from "./store/auth";
 /* 界面语言固定为简体中文：uni-app 内置的 picker（字典/日期/时间选择）、showModal、
  * showActionSheet 的按钮文案跟随系统语言，英文环境下会显示 Done / Cancel、OK / Cancel。
  * H5 端已由 index.html 预置 UNI_LOCALE + manifest.locale 保证首次渲染即中文，
@@ -15,6 +17,13 @@ function lockChineseLocale() {
 onLaunch(() => {
   lockChineseLocale();
   console.log("App Launch");
+  /* 刷新/冷启动恢复会话：权限只存内存（reactive），登录时已拉取；
+   * 这里对持有效令牌的用户补拉身份与权限，避免刷新后 hasPerm 全 false
+   * （菜单/按钮按权限渲染的页面会因此空白或缺失）。 */
+  if (getToken()) {
+    void auth.fetchMe().catch(() => {});
+    void auth.fetchPermissions();
+  }
 });
 onShow(() => {
   console.log("App Show");
@@ -76,12 +85,12 @@ uni-page uni-input {
   color: #1e293b;
 }
 .sub {
-  font-size: 24rpx;
+  font-size: 26rpx;
   color: #64748b;
   margin-top: 8rpx;
 }
 .muted {
-  font-size: 22rpx;
+  font-size: 26rpx;
   color: #94a3b8;
   margin-top: 6rpx;
 }
@@ -99,7 +108,7 @@ uni-page uni-input {
 .tag {
   display: inline-flex;
   align-items: center;
-  font-size: 20rpx;
+  font-size: 22rpx;
   padding: 4rpx 16rpx;
   border-radius: 999rpx;
   line-height: 1.6;
@@ -152,7 +161,7 @@ uni-page uni-input {
   border: 1px solid #fca5a5;
 }
 .btn-sm {
-  font-size: 24rpx;
+  font-size: 26rpx;
   padding: 0 24rpx;
   height: 60rpx;
   line-height: 60rpx;
@@ -185,7 +194,7 @@ uni-page uni-input {
 }
 .field-label {
   display: block;
-  font-size: 24rpx;
+  font-size: 26rpx;
   color: #64748b;
   margin-bottom: 10rpx;
 }
@@ -222,7 +231,7 @@ uni-page uni-input {
   margin-bottom: 20rpx;
 }
 .chip {
-  font-size: 24rpx;
+  font-size: 26rpx;
   color: #64748b;
   background: #fff;
   border: 1px solid #e2e8f0;
@@ -252,7 +261,7 @@ uni-page uni-input {
 .loadmore {
   text-align: center;
   color: #94a3b8;
-  font-size: 24rpx;
+  font-size: 26rpx;
   padding: 24rpx 0;
 }
 .divider {

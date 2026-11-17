@@ -8,6 +8,7 @@ import (
 
 	"clothp/internal/auth"
 	"clothp/internal/httpapi"
+	"clothp/internal/orgapp"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 	"github.com/shopspring/decimal"
@@ -140,6 +141,14 @@ func listPayrollWide(api *httpapi.API, w http.ResponseWriter, r *http.Request, p
 			where += fmt.Sprintf(" AND %s=$%d", column, len(args))
 		}
 	}
+	/* 数据范围（设计 5.7）：车间/产线负责人只看本范围人员的工资单 */
+	access, err := orgapp.ComputeAccess(r.Context(), api.DB, p)
+	if err != nil {
+		return err
+	}
+	scopeCond, scopeArgs := access.OrgScopeSQL("e", len(args)+1)
+	args = append(args, scopeArgs...)
+	where += scopeCond
 	sumOf := func(code string) string {
 		return fmt.Sprintf("(SELECT COALESCE(SUM(i.amount),0)::text FROM payroll_item i WHERE i.tenant_id=s.tenant_id AND i.payroll_sheet_id=s.id AND i.item_code='%s')", code)
 	}

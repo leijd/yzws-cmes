@@ -10,7 +10,7 @@ func TestLoadSMSProviders(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	body := `mode: center
 server:
-  listen: ":18370"
+  listen: ":18390"
 node:
   id: test-node
 storage:

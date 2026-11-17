@@ -34,6 +34,8 @@ type Principal struct {
 	Permissions            map[string]bool
 	/* ClientType 会话终端（pc/mobile，设计 5.6.1）；工人账号仅允许 mobile */
 	ClientType string
+	/* ClientScope 账号允许的终端范围（all/pc/mobile，设计 4.7）：每个请求都校验，防手机会话访问 PC API */
+	ClientScope string
 }
 
 type Service struct {
@@ -107,27 +109,54 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (map[string]any, 
 
 /** 手机号 + 制衣厂登录（短信验证通过后凭一次性 ticket 换取真实会话）：一个手机号可在多个厂各绑定员工账号。
  * 匹配规则：员工档案手机号（e.phone），或该厂「制衣厂信息」登记的注册联系电话（t.contact_phone，限厂管理员账号）。
- * 非管理员用户首次登录还须输入厂管理员提供的密码；成功登录后，以后只需手机验证码。 */
+ * 短信验证码是恒开的基础验证；只有账号开通了「密码验证」时才额外校验密码，首次登录不再需要初始密码。 */
 func (s *Service) LoginByPhone(ctx context.Context, phone, tenantCode, password, nodeID string, crypto *seccrypto.Service) (map[string]any, error) {
-	account, err := s.lookupPhoneAccount(ctx, []string{strings.TrimSpace(phone)}, tenantCode, crypto)
-	if err != nil {
+	phone = strings.TrimSpace(phone)
+	/* 短信登录同样写 auth_login_log（设计 4.9）：成功与各类失败都留痕，便于安全统计与排查 */
+	attempt := &loginLogAttempt{
+		Method: "phone_sms", ClientType: "mobile", RequestID: "req-" + platform.ID(),
+	}
+	if phone != "" {
+		attempt.IdentifierMasked = maskIdentifier(phone)
+		attempt.IdentifierHash = identifierHMAC(ctx, crypto, phone)
+	}
+	fail := func(code, reason string, err error) (map[string]any, error) {
+		attempt.Result, attempt.FailureCode, attempt.FailureReason = "failure", code, reason
+		s.writeLoginLog(ctx, attempt)
 		return nil, err
 	}
-	/* 首次短信登录：普通用户必须同时提供厂管理员设置的密码；管理员或已登录过的用户只需验证码。 */
-	if !account.isAdmin && account.lastLogin == nil {
+	account, err := s.lookupPhoneAccount(ctx, []string{phone}, tenantCode, crypto)
+	if err != nil {
+		return fail("ACCOUNT_NOT_FOUND", "该手机号在此制衣厂没有绑定账号", err)
+	}
+	/* 验证方式按账号配置，不再按「首次登录 / 是否管理员」硬编码。 */
+	if LoadAuthMethods(ctx, s.db, account.tenantID, account.userID).Password {
 		if strings.TrimSpace(password) == "" {
-			return nil, ErrPasswordRequired
+			return fail("PASSWORD_REQUIRED", "该账号已开通密码验证，请补充密码", ErrPasswordRequired)
 		}
 		if !verifyPassword(account.verifier, password) {
-			return nil, ErrInvalidCredentials
+			return fail("INVALID_PASSWORD", "密码错误", ErrInvalidCredentials)
 		}
 	}
-	/* 首次密码+验证码校验通过后，不再强制改密（后续仅凭验证码登录）。 */
+	/* 短信验证通过后不再强制改密（后续仅凭验证码登录，除非开通了密码验证）。 */
 	if _, err := s.db.Exec(ctx, `UPDATE user_account SET password_change_required=FALSE
 		WHERE tenant_id=$1 AND id=$2`, account.tenantID, account.userID); err != nil {
-		return nil, err
+		return fail("INTERNAL_ERROR", "更新账号状态失败", err)
 	}
-	return s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, strings.TrimSpace(phone), "mobile")
+	result, err := s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, phone, "mobile")
+	if err != nil {
+		return fail("INTERNAL_ERROR", "签发会话失败", err)
+	}
+	attempt.Result = "success"
+	attempt.TenantID = &account.tenantID
+	attempt.UserID = &account.userID
+	if session, ok := result["session"].(map[string]any); ok {
+		if sid, ok2 := session["id"].(string); ok2 {
+			attempt.SessionID = &sid
+		}
+	}
+	s.writeLoginLog(ctx, attempt)
+	return result, nil
 }
 
 type phoneAccount struct {
@@ -418,20 +447,43 @@ func (s *Service) PrincipalPhones(ctx context.Context, p Principal, crypto *secc
 /** 已登录用户切换到名下另一家制衣厂门户：手机号须登记在该厂（员工手机号或注册联系电话）。
  * 手机号在短信登录时已验证，切换门户不再重复要求首次登录密码。 */
 func (s *Service) SwitchTenant(ctx context.Context, p Principal, tenantCode, nodeID string, crypto *seccrypto.Service) (map[string]any, error) {
+	attempt := &loginLogAttempt{Method: "tenant_switch", ClientType: "mobile", RequestID: "req-" + platform.ID()}
+	fail := func(code, reason string, err error) (map[string]any, error) {
+		attempt.Result, attempt.FailureCode, attempt.FailureReason = "failure", code, reason
+		s.writeLoginLog(ctx, attempt)
+		return nil, err
+	}
 	phones, err := s.PrincipalPhones(ctx, p, crypto)
+	if err == nil && len(phones) > 0 {
+		attempt.IdentifierMasked = maskIdentifier(phones[0])
+		attempt.IdentifierHash = identifierHMAC(ctx, crypto, phones[0])
+	}
 	if err != nil || len(phones) == 0 {
-		return nil, ErrInvalidCredentials
+		return fail("ACCOUNT_NOT_FOUND", "当前会话没有可识别手机号", ErrInvalidCredentials)
 	}
 	account, err := s.lookupPhoneAccount(ctx, phones, tenantCode, crypto)
 	if err != nil {
-		return nil, err
+		return fail("NO_TENANT_ACCESS", "该手机号在目标制衣厂没有绑定账号", err)
 	}
 	if _, err := s.db.Exec(ctx, `UPDATE user_account SET password_change_required=FALSE
 		WHERE tenant_id=$1 AND id=$2`, account.tenantID, account.userID); err != nil {
-		return nil, err
+		return fail("INTERNAL_ERROR", "更新账号状态失败", err)
 	}
 	/* 新会话沿用同一登录手机号（老会话无记录时用当前识别出的手机号），切换后仍能切回其他厂。 */
-	return s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, phones[0], "mobile")
+	result, err := s.issueTokens(ctx, account.tenantID, account.userID, account.employeeID, nodeID, phones[0], "mobile")
+	if err != nil {
+		return fail("INTERNAL_ERROR", "签发会话失败", err)
+	}
+	attempt.Result = "success"
+	attempt.TenantID = &account.tenantID
+	attempt.UserID = &account.userID
+	if session, ok := result["session"].(map[string]any); ok {
+		if sid, ok2 := session["id"].(string); ok2 {
+			attempt.SessionID = &sid
+		}
+	}
+	s.writeLoginLog(ctx, attempt)
+	return result, nil
 }
 
 func (s *Service) issueTokens(ctx context.Context, tenantID, userID, employeeID, nodeID, loginPhone, clientType string) (map[string]any, error) {
@@ -531,6 +583,18 @@ func (s *Service) AuthenticateRequest(r *http.Request) (Principal, error) {
 		return Principal{}, err
 	}
 	principal.ClientType = claims.ClientType
+	/* 每个请求校验终端范围（设计 4.7/5.6.1）：刷新令牌沿用原终端，
+	 * 工人（client_scope=mobile）不得用手机会话访问 PC API，反之 pc 账号也不得走手机端。 */
+	switch principal.ClientScope {
+	case "mobile":
+		if principal.ClientType != "mobile" {
+			return Principal{}, ErrClientForbidden
+		}
+	case "pc":
+		if principal.ClientType != "pc" {
+			return Principal{}, ErrClientForbidden
+		}
+	}
 	return principal, nil
 }
 
@@ -538,7 +602,7 @@ func (s *Service) loadPrincipal(ctx context.Context, tenantID, userID, sessionID
 	var principal Principal
 	var employeeID *string
 	/* 每次请求都校验租户可用性：驳回/待审/停用的租户，其现存会话也立即失效 */
-	err := s.db.QueryRow(ctx, `SELECT u.login_name,u.employee_id,u.password_change_required FROM user_account u JOIN tenant t ON t.id=u.tenant_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND t.status='active' AND t.registration_status='approved'`, tenantID, userID).Scan(&principal.LoginName, &employeeID, &principal.PasswordChangeRequired)
+	err := s.db.QueryRow(ctx, `SELECT u.login_name,u.employee_id,u.password_change_required,COALESCE(u.client_scope,'all') FROM user_account u JOIN tenant t ON t.id=u.tenant_id WHERE u.tenant_id=$1 AND u.id=$2 AND u.status='active' AND t.status='active' AND t.registration_status='approved'`, tenantID, userID).Scan(&principal.LoginName, &employeeID, &principal.PasswordChangeRequired, &principal.ClientScope)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -568,17 +632,43 @@ func (s *Service) loadPrincipal(ctx context.Context, tenantID, userID, sessionID
  * 不得用手机会话刷新出 PC 令牌（设计 5.6.1）。 */
 func (s *Service) Refresh(ctx context.Context, refreshToken, nodeID, clientType string) (map[string]any, error) {
 	hash := platform.Hash([]byte(refreshToken))
+	attempt := &loginLogAttempt{Method: "token_refresh", ClientType: strings.TrimSpace(clientType), RequestID: "req-" + platform.ID()}
+	if attempt.ClientType == "" {
+		attempt.ClientType = "pc"
+	}
 	var tenantID, sessionID, userID, employeeID, loginPhone string
 	err := s.db.QueryRow(ctx, `SELECT s.tenant_id,s.id,s.user_id,u.employee_id,COALESCE(s.login_phone,'') FROM auth_session s
 		JOIN user_account u ON u.tenant_id=s.tenant_id AND u.id=s.user_id
 		WHERE s.refresh_token_hash=$1 AND s.revoked_at IS NULL AND s.offline_expires_at>$2`, hash, platform.Now()).Scan(&tenantID, &sessionID, &userID, &employeeID, &loginPhone)
 	if err != nil {
+		attempt.Result, attempt.FailureCode, attempt.FailureReason = "failure", "SESSION_EXPIRED", "刷新令牌不存在或已过期"
+		s.writeLoginLog(ctx, attempt)
 		return nil, ErrUnauthenticated
 	}
+	attempt.TenantID, attempt.UserID = &tenantID, &userID
+	if strings.TrimSpace(loginPhone) != "" {
+		attempt.IdentifierMasked = maskIdentifier(strings.TrimSpace(loginPhone))
+		attempt.IdentifierHash = platform.Hash([]byte(strings.TrimSpace(loginPhone)))
+	}
 	if _, err = s.db.Exec(ctx, "UPDATE auth_session SET revoked_at=$1,reason='rotated' WHERE tenant_id=$2 AND id=$3", platform.Now(), tenantID, sessionID); err != nil {
+		attempt.Result, attempt.FailureCode, attempt.FailureReason = "failure", "INTERNAL_ERROR", "轮换会话失败"
+		s.writeLoginLog(ctx, attempt)
 		return nil, err
 	}
-	return s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, loginPhone, clientType)
+	result, err := s.issueTokens(ctx, tenantID, userID, employeeID, nodeID, loginPhone, clientType)
+	if err != nil {
+		attempt.Result, attempt.FailureCode, attempt.FailureReason = "failure", "INTERNAL_ERROR", "签发会话失败"
+		s.writeLoginLog(ctx, attempt)
+		return nil, err
+	}
+	attempt.Result = "success"
+	if session, ok := result["session"].(map[string]any); ok {
+		if sid, ok2 := session["id"].(string); ok2 {
+			attempt.SessionID = &sid
+		}
+	}
+	s.writeLoginLog(ctx, attempt)
+	return result, nil
 }
 
 /* Logout 平台注销：吊销当前会话，并顺手吊销该手机号在本厂的「体验进入令牌」。

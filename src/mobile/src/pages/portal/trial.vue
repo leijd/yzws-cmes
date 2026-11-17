@@ -126,7 +126,7 @@
         <text class="emp-toggle">{{ empOpen ? "收起 ▲" : "展开 ▼" }}</text>
       </view>
       <template v-if="empOpen">
-        <text class="card-sub">绑定手机号的员工可免密进入所属工厂；首次进入需输入厂管理员提供的初始密码。</text>
+        <text class="card-sub">绑定手机号的员工凭手机验证码即可进入所属工厂；如账号开通了密码验证，需再输入账号密码。</text>
         <view class="field">
           <text class="label">手机号</text>
           <input v-model.trim="empPhone" type="number" maxlength="11" placeholder="11 位手机号" />
@@ -191,11 +191,11 @@
           </view>
 
           <view v-if="needPassword" class="field password-field">
-            <text class="label">首次登录密码</text>
+            <text class="label">密码验证</text>
             <input
               v-model="password"
               password
-              placeholder="请输入厂管理员提供的初始密码"
+              placeholder="请输入账号密码"
             />
             <view v-if="passwordError" class="error">{{ passwordError }}</view>
             <button class="btn primary" :disabled="!!entering" @click="retryWithPassword">
@@ -682,7 +682,7 @@ async function enterFactory(f: TenantItem) {
 async function retryWithPassword() {
   passwordError.value = "";
   if (!password.value) {
-    passwordError.value = "请输入初始密码";
+    passwordError.value = "请输入账号密码";
     return;
   }
   entering.value = pendingFactoryCode.value;

@@ -247,6 +247,10 @@ func maskIdentifier(account string) string {
 
 /* identifierHMAC 登录标识 HMAC（安全统计用；明文库存同值）。 */
 func identifierHMAC(ctx context.Context, crypto *seccrypto.Service, account string) string {
+	if crypto == nil {
+		/* 明文库模式（无加密服务）：用无密钥 SHA-256 保证登录标识仍可统计去重 */
+		return platform.Hash([]byte(account))
+	}
 	h, err := crypto.BlindIndexForPlatform(ctx, "auth.login_identifier", account)
 	if err != nil {
 		return ""
