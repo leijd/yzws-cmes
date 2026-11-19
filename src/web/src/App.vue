@@ -23,36 +23,54 @@ const canManageIdentity = computed(() => !!permissions.value['identity:write'])
 const currentUserName = ref('')
 /* 工作页面品牌：本厂配置的 logo 与系统名称（未配置时显示本厂厂名） */
 const branding = ref<{ system_name?: string | null; tenant_name?: string | null; logo_url?: string | null }>({})
+/* 场景化菜单（设计 v0.02-002 6.12）：工作台 / 生产管理 / 基本资料 / 分析中心 / 系统管理 五个一级组。
+ * 业务场景不单设菜单，作为项目工单属性贯穿筛选；外协与取证能力并入生产管理相应环节。
+ * 分组顺序即 groups 计算顺序（Set 保持首次出现顺序），移动端取前 5 个可见入口。 */
 const nav = [
-  { path: '/workbench/A03', label: '工作台', icon: '⌂', group: '生产管理', permission: 'workbench:read' },
-  { path: '/notifications/A04', label: '消息与会话', icon: '✉', group: '生产管理', permission: '' },
-  { path: '/orders/C03', label: '项目与工单', icon: '▤', group: '生产管理', permission: 'work_order:read' },
-  { path: '/tasks/D01', label: '任务与派工', icon: '✓', group: '生产管理', permission: 'task:read' },
-  { path: '/mywage/H02', label: '我的工资', icon: '¥', group: '生产管理', permission: '' },
+  /* 工作台 */
+  { path: '/workbench/A03', label: '工作台', icon: '⌂', group: '工作台', permission: 'workbench:read' },
+  { path: '/intake/new', label: '新建项目向导', icon: '✚', group: '工作台', permission: 'intake:write' },
+  { path: '/notifications/A04', label: '消息与会话', icon: '✉', group: '工作台', permission: '' },
+  { path: '/evidence', label: '巡厂与证据', icon: '◉', group: '工作台', permission: 'video:view' },
+  { path: '/attendance/screen', label: '考勤屏', icon: '▣', group: '工作台', permission: 'attendance:screen' },
+  { path: '/attendance/records', label: '简单考勤', icon: '⏱', group: '工作台', permission: 'attendance:manage' },
 
-  { path: '/reports/D06', label: '报工与审批', icon: '◎', group: '生产管理', permission: 'report:read' },
-  { path: '/quality/E01', label: '质检与库存', icon: '▣', group: '生产管理', permission: 'work_order:read' },
-  { path: '/quality/process-inspections', label: '过程巡检', icon: '◉', group: '生产管理', permission: 'work_order:read' },
-  { path: '/payroll/F09', label: '工资单管理', icon: '¥', group: '分析中心', permission: 'payroll:read' },
-  { path: '/progress/F01', label: '进度与统计', icon: '◫', group: '分析中心', permission: 'progress:read' },
-  { path: '/products/B01', label: '产品与工序', icon: '◇', group: '基础资料', permission: 'product:read' },
-  { path: '/markers/C11', label: '唛架管理', icon: '▤', group: '基础资料', permission: 'marker:read' },
+  /* 生产管理：按生产链路顺序（产品订单 → 物料入库 → 裁床 → 工序 → 工单 → 派工 → 报工 → 质检 → 入库 → 发货） */
+  { path: '/orders/C03', label: '产品订单管理', icon: '▤', group: '生产管理', permission: 'work_order:read' },
+  { path: '/materials/receipts', label: '物料入库', icon: '▥', group: '生产管理', permission: 'inventory:read' },
+  { path: '/cutting/sheets', label: '裁床', icon: '▤', group: '生产管理', permission: 'cutting:read' },
+  { path: '/markers/C11', label: '唛架管理', icon: '▤', group: '生产管理', permission: 'marker:read' },
   { path: '/print/C10', label: '菲票打印', icon: '⎙', group: '生产管理', permission: 'print:read' },
   { path: '/labels/C12', label: '扎标签', icon: '▥', group: '生产管理', permission: 'work_order:read' },
-  { path: '/materials/receipts', label: '物料入库', icon: '▥', group: '生产管理', permission: 'inventory:read' },
-  { path: '/materials/master', label: '物料管理', icon: '▦', group: '基础资料', permission: 'warehouse:read' },
+  { path: '/products/B01', label: '产品工序', icon: '◇', group: '生产管理', permission: 'product:read' },
+  { path: '/tasks/D01', label: '派工', icon: '✓', group: '生产管理', permission: 'task:read' },
+  { path: '/reports/D06?tab=report', label: '报工', icon: '◎', group: '生产管理', permission: 'report:read' },
+  { path: '/reports/D06?tab=review', label: '审核报工', icon: '⊘', group: '生产管理', permission: 'report:read' },
+  { path: '/quality/process-inspections', label: '线检', icon: '◉', group: '生产管理', permission: 'work_order:read' },
+  { path: '/quality/E01', label: '总检', icon: '▣', group: '生产管理', permission: 'work_order:read' },
+  { path: '/finished-receipts', label: '成品入库', icon: '▦', group: '生产管理', permission: 'work_order:read' },
+  { path: '/shipments/E04', label: '发货', icon: '⇧', group: '生产管理', permission: 'shipment:read' },
   { path: '/rework/E03', label: '返工复检', icon: '⟳', group: '生产管理', permission: 'work_order:read' },
   { path: '/outsource/orders', label: '外协管理', icon: '⇄', group: '生产管理', permission: 'outsource:read' },
-  { path: '/evidence', label: '巡厂与证据', icon: '◉', group: '生产管理', permission: 'video:view' },
-  { path: '/attendance/screen', label: '考勤屏', icon: '▣', group: '生产管理', permission: 'attendance:screen' },
-  { path: '/attendance/records', label: '简单考勤', icon: '⏱', group: '生产管理', permission: 'attendance:manage' },
-  { path: '/settings/workshops', label: '车间管理', icon: '⌂', group: '基础资料', permission: 'workshop:read' },
-  { path: '/settings/lines', label: '产线管理', icon: '▤', group: '基础资料', permission: 'line:read' },
-  { path: '/settings/users', label: '人员与组织', icon: '♙', group: '基础资料', permission: 'identity:read' },
-  { path: '/settings/teams', label: '生产组管理', icon: '♟', group: '基础资料', permission: 'team:read' },
-  { path: '/masterdata/customers', label: '客户资料', icon: '◈', group: '基础资料', permission: 'masterdata:read' },
-  { path: '/masterdata/B06', label: '员工信息', icon: '♙', group: '基础资料', permission: '' },
-  { path: '/settings/dictionaries', label: '字典维护', icon: '☰', group: '基础资料', permission: 'masterdata:read' },
+
+  /* 基本资料 */
+  { path: '/masterdata/customers', label: '客户资料', icon: '◈', group: '基本资料', permission: 'masterdata:read' },
+  { path: '/masterdata/B06', label: '员工信息', icon: '♙', group: '基本资料', permission: '' },
+  { path: '/settings/workshops', label: '车间管理', icon: '⌂', group: '基本资料', permission: 'workshop:read' },
+  { path: '/settings/lines', label: '生产线管理', icon: '▤', group: '基本资料', permission: 'line:read' },
+  { path: '/settings/teams', label: '生产组管理', icon: '♟', group: '基本资料', permission: 'team:read' },
+  { path: '/settings/users', label: '人员与组织', icon: '♙', group: '基本资料', permission: 'identity:read' },
+  { path: '/materials/master', label: '仓库信息', icon: '▦', group: '基本资料', permission: 'warehouse:read' },
+  { path: '/process-standards', label: '标准工序', icon: '☷', group: '基本资料', permission: 'process:read' },
+  { path: '/settings/dictionaries', label: '数据字典', icon: '☰', group: '基本资料', permission: 'masterdata:read' },
+
+  /* 分析中心（保留原有 + 员工薪水分析） */
+  { path: '/progress/F01', label: '进度与统计', icon: '◫', group: '分析中心', permission: 'progress:read' },
+  { path: '/payroll/F09', label: '工资单管理', icon: '¥', group: '分析中心', permission: 'payroll:read' },
+  { path: '/analysis/salary', label: '员工薪水分析', icon: '¥', group: '分析中心', permission: 'salary:read' },
+  { path: '/mywage/H02', label: '我的工资', icon: '¥', group: '分析中心', permission: '' },
+
+  /* 系统管理（子菜单与原来一致） */
   { path: '/tenant/profile', label: '本厂信息', icon: '⌂', group: '系统管理', permission: '' },
   { path: '/portal/settings', label: '门户内容', icon: '▤', group: '系统管理', permission: '' },
   { path: '/identity/G05', label: '用户角色权限', icon: '⚷', group: '系统管理', permission: 'identity:read' },
@@ -63,8 +81,17 @@ const nav = [
   { path: '/tenant/backups', label: '明文备份导出', icon: '⚿', group: '系统管理', permission: 'backup:export' },
   { path: '/audit/G08', label: '审计与字段', icon: '⌘', group: '系统管理', permission: 'settings:read' },
 ]
-const visibleNav = computed(() => nav.filter(item => !item.permission || permissions.value[item.permission]))
+/* 唛架管理 / 菲票打印 / 扎标签：默认不进入侧边导航（入口收敛到裁床单与扫码页）。
+ * 需要临时显示时，控制台执行 localStorage.setItem('clothp_reveal_hidden_nav','1') 后刷新。 */
+const defaultHiddenPaths = ['/markers/C11', '/print/C10', '/labels/C12']
+const revealHiddenNav = typeof localStorage !== 'undefined' && localStorage.getItem('clothp_reveal_hidden_nav') === '1'
+const visibleNav = computed(() => nav.filter(item =>
+  (!item.permission || permissions.value[item.permission]) &&
+  (revealHiddenNav || !defaultHiddenPaths.includes(item.path))))
 const groups = computed(() => [...new Set(visibleNav.value.map(item => item.group))])
+/* 手机端岗位首页固定入口（设计 6.6 / 6.12.9）：按可见权限取常用岗位动作，不混排全部分组 */
+const mobilePaths = ['/workbench/A03', '/tasks/D01', '/reports/D06?tab=report', '/reports/D06?tab=review', '/quality/process-inspections', '/materials/receipts', '/mywage/H02']
+const mobileNav = computed(() => mobilePaths.map(path => visibleNav.value.find(item => item.path === path)).filter((v): v is (typeof nav)[number] => !!v).slice(0, 5))
 /* 从工作页面退出：服务端注销会话（吊销访问令牌与刷新令牌）后再回登录页 */
 function logout() {
   void confirmLogout()
@@ -213,7 +240,7 @@ onBeforeUnmount(() => {
     </header>
     <main class="content"><router-view /></main>
     <nav class="mobile-nav">
-      <RouterLink v-for="item in visibleNav.slice(0, 5)" :key="item.path" :to="item.path"><span>{{ item.icon }}</span>{{ item.label.replace('与审批', '').replace('与统计', '') }}</RouterLink>
+      <RouterLink v-for="item in mobileNav" :key="item.path" :to="item.path"><span>{{ item.icon }}</span>{{ item.label }}</RouterLink>
     </nav>
     <!-- 体验助手：悬浮开关 + 分步操作引导（动画箭头），按当前用户权限过滤步骤 -->
     <GuideAssistant :permissions="permissions" />

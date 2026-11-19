@@ -50,6 +50,15 @@ var entities = map[string]entity{
 	"employees":  {table: "employee", permission: "masterdata", codeField: "employee_no", required: []string{"employee_no", "name"}, fields: map[string]string{"employee_no": "employee_no", "name": "name", "gender": "gender", "birth_date": "birth_date", "phone": "phone", "id_card_no": "id_card_no", "address": "address", "nation": "nation", "native_place": "native_place", "hire_date": "hire_date", "org_unit_id": "org_unit_id", "position": "position", "workshop": "workshop", "production_line": "production_line", "skill_grade": "skill_grade", "pay_mode": "pay_mode", "base_salary": "base_salary", "rate_level": "rate_level", "bank_card": "bank_card", "bank_name": "bank_name", "emergency_contact": "emergency_contact", "emergency_phone": "emergency_phone", "remark": "remark"}},
 }
 
+// CreateFor 供业务单据窗口快捷新增主数据复用（权限由调用方接口声明）。
+func CreateFor(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Principal, key string, input map[string]any) error {
+	definition, ok := entities[key]
+	if !ok {
+		return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "主数据类型不存在")
+	}
+	return createWithInput(api, w, r, p, definition, input)
+}
+
 func Register(api *httpapi.API) {
 	for path, definition := range entities {
 		registerEntity(api, path, definition)

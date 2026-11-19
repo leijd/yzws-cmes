@@ -5,6 +5,7 @@ import { usePermissions } from '../permissions'
 import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 import FilterSelect from '../components/FilterSelect.vue'
+import EvidenceCapture from '../components/EvidenceCapture.vue'
 
 const { has } = usePermissions()
 const canWrite = computed(() => has('work_order:write'))
@@ -98,7 +99,7 @@ onMounted(load)
   <div class="page-header"><div><h1>过程巡检</h1><p>按工单工序和扎记录巡检结果，不合格可生成返工单</p></div><div class="header-actions"><button class="button secondary" @click="load">刷新</button><button v-if="canWrite" class="button" @click="openCreate">+ 巡检单</button></div></div>
   <div v-if="error" class="notice error">{{ error }}</div><div v-if="notice" class="notice success">{{ notice }}</div>
   <section class="panel"><PageState :loading="loading" />
-    <div v-if="!loading" class="table-wrap"><table><thead><tr><th>巡检单号</th><th>工单</th><th>工序</th><th>扎</th><th>巡检数</th><th>合格</th><th>返工</th><th>报废</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in inspections" :key="item.id"><td><strong>{{ item.inspection_no }}</strong></td><td>{{ item.work_order_code }}</td><td>{{ item.process_code }} · {{ item.process_name }}</td><td>{{ item.bundle_no }} · {{ item.color }}/{{ item.size }}</td><td>{{ item.inspected_qty }}</td><td>{{ item.passed_qty }}</td><td :class="{ 'text-danger': item.rework_qty > 0 }">{{ item.rework_qty }}</td><td>{{ item.scrapped_qty }}</td><td><span class="status" :class="item.status">{{ statusTextMap[item.status] || statusText[item.status] || item.status }}</span></td><td><button v-if="canWrite && item.status === 'pending'" class="button link" @click="confirmInspection(item)">确认</button><button v-if="canWrite && item.status === 'confirmed' && item.rework_qty > 0" class="button link text-danger" @click="createRework(item)">生成返工单</button></td></tr></tbody></table><PageState :empty="!inspections.length" /></div>
+    <div v-if="!loading" class="table-wrap"><table><thead><tr><th>巡检单号</th><th>工单</th><th>工序</th><th>扎</th><th>巡检数</th><th>合格</th><th>返工</th><th>报废</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in inspections" :key="item.id"><td><strong>{{ item.inspection_no }}</strong></td><td>{{ item.work_order_code }}</td><td>{{ item.process_code }} · {{ item.process_name }}</td><td>{{ item.bundle_no }} · {{ item.color }}/{{ item.size }}</td><td>{{ item.inspected_qty }}</td><td>{{ item.passed_qty }}</td><td :class="{ 'text-danger': item.rework_qty > 0 }">{{ item.rework_qty }}</td><td>{{ item.scrapped_qty }}</td><td><span class="status" :class="item.status">{{ statusTextMap[item.status] || statusText[item.status] || item.status }}</span></td><td><button v-if="canWrite && item.status === 'pending'" class="button link" @click="confirmInspection(item)">确认</button><button v-if="canWrite && item.status === 'confirmed' && item.rework_qty > 0" class="button link text-danger" @click="createRework(item)">生成返工单</button><EvidenceCapture biz-type="line_inspection" :biz-id="item.id" label="线检取证" /></td></tr></tbody></table><PageState :empty="!inspections.length" /></div>
   </section>
 
   <ModalDialog v-if="modal" title="新增过程巡检" @close="modal = false">

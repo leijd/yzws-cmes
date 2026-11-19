@@ -64,8 +64,9 @@ function toggleModule(group: PermModule, ev: Event) {
 /* 写权限默认包含读权限：勾选 xxx:write 时自动补上 xxx:read（若该权限点存在）。 */
 function syncWriteImpliesRead() {
   if (props.readonly) return
-  const codes = new Set(props.items.map(item => item.code))
+  const codes = new Set(props.items.filter(item => !item.admin_only).map(item => item.code))
   for (const item of props.items) {
+    if (item.admin_only) continue
     if (item.code.endsWith(':write') && props.selected[item.code]) {
       const readCode = item.code.slice(0, -':write'.length) + ':read'
       if (codes.has(readCode)) props.selected[readCode] = true

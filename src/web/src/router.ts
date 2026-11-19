@@ -78,6 +78,13 @@ export const router = createRouter({
     { path: '/attendance/records', component: () => import('./pages/AttendanceRecordsPage.vue') },
     { path: '/settings/G01', component: () => import('./pages/SettingsPage.vue') },
     { path: '/portal/settings', component: () => import('./pages/PortalSettingsPage.vue') },
+    /* 场景化菜单新增页面（设计 v0.02-002 6.12）：规划新建，均接入真实后端接口 */
+    { path: '/intake/new', component: () => import('./pages/IntakeWizardPage.vue') },
+    { path: '/cutting/sheets', component: () => import('./pages/CuttingSheetsPage.vue') },
+    { path: '/shipments/E04', component: () => import('./pages/ShipmentsPage.vue') },
+    { path: '/analysis/salary', component: () => import('./pages/SalaryAnalysisPage.vue') },
+    { path: '/process-standards', component: () => import('./pages/ProcessStandardsPage.vue') },
+    { path: '/finished-receipts', component: () => import('./pages/FinishedReceiptsPage.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/workbench/A03' },
   ],
 })

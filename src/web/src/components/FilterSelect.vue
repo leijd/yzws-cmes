@@ -5,7 +5,9 @@ const props = withDefaults(defineProps<{
   modelValue?: string | number | null
   options: { value: any; label: string }[]
   placeholder?: string
-}>(), { placeholder: '请选择' })
+  allowCreate?: boolean
+  wide?: boolean
+}>(), { placeholder: '请选择', allowCreate: false, wide: false })
 const emit = defineEmits<{ 'update:modelValue': [any]; change: [any] }>()
 
 const open = ref(false)
@@ -14,7 +16,7 @@ const pos = ref({ left: 0, top: 0 })
 const searchInput = ref<HTMLInputElement>()
 
 const current = computed(() => props.options.find(o => o.value === props.modelValue))
-const display = computed(() => current.value?.label || '')
+const display = computed(() => current.value?.label || (props.allowCreate && typeof props.modelValue === 'string' && props.modelValue !== '' ? props.modelValue : ''))
 const filtered = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
   return kw ? props.options.filter(o => o.label.toLowerCase().includes(kw)) : props.options
@@ -37,6 +39,15 @@ function choose(option: { value: any; label: string }) {
   emit('change', option.value)
   open.value = false
 }
+function onTyped(event: Event) {
+  const value = (event.target as HTMLInputElement).value
+  emit('update:modelValue', value)
+  emit('change', value)
+}
+function commitTyped() {
+  // 手填文本保持为值本身，由使用方决定如何解析成主数据 ID
+  open.value = false
+}
 function onDocumentMouseDown(event: MouseEvent) {
   const target = event.target as HTMLElement
   if (!target.closest('.filter-select') && !target.closest('.fs-panel')) open.value = false
@@ -55,8 +66,10 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <span class="filter-select">
-    <input :value="display" :placeholder="placeholder" readonly @click="toggle">
+  <span class="filter-select" :class="{ wide }">
+    <input v-if="allowCreate" :value="display" :placeholder="placeholder" @input="onTyped" @blur="commitTyped" @focus="open && (open = false)">
+    <input v-else :value="display" :placeholder="placeholder" readonly @click="toggle">
+    <button v-if="allowCreate" type="button" class="fs-toggle" @click="toggle" aria-label="展开选项">▾</button>
     <Teleport to="body">
       <div v-if="open" class="fs-panel" :style="{ left: pos.left + 'px', top: pos.top + 'px' }">
         <input ref="searchInput" v-model="keyword" class="fs-search" placeholder="输入关键字筛选">
@@ -78,6 +91,9 @@ onBeforeUnmount(() => {
 <style scoped>
 .filter-select { position: relative; display: inline-block; }
 .filter-select > input { cursor: pointer; min-width: 160px; }
+.filter-select.wide, .filter-select.wide > input { width: 100%; min-width: 320px; }
+.filter-select > input:not([readonly]) { padding-right: 28px; }
+.fs-toggle { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: #7b8ab0; padding: 2px 6px; cursor: pointer; }
 .fs-panel {
   position: fixed; z-index: 9000; min-width: 260px; max-width: 380px; background: #fff;
   border: 1px solid #e4e9f0; border-radius: 10px; box-shadow: 0 12px 32px rgba(16, 24, 40, 0.18);

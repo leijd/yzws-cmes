@@ -16,11 +16,11 @@
             <text class="title" style="font-size: 28rpx">{{ r.receipt_no }}</text>
             <text class="tag" :class="statusCls(r.status)">{{ statusText(r.status) }}</text>
           </view>
-          <text class="muted">{{ r.project_code }} · {{ r.product_name }}</text>
+          <text class="muted">{{ r.customer_name || r.project_code || "—" }} · {{ r.style_no || r.product_code || "" }} {{ r.product_name || "" }}</text>
         </view>
       </view>
       <view class="row between" style="margin-top: 14rpx">
-        <text class="muted">来料 {{ r.received_total }} · 合格 {{ r.pass_total }} · 金额 {{ r.amount_total }}</text>
+        <text class="muted">来料 {{ fmtQty(r.received_total) }} · 合格 {{ fmtQty(r.pass_total) }} · 金额 {{ fmtMoney(r.amount_total) }}</text>
         <text class="muted">{{ r.supplier_name || "未指定供应商" }}</text>
       </view>
       <view class="actions">
@@ -39,9 +39,9 @@
         <template v-else-if="detail">
           <view v-for="l in detail.lines" :key="l.id" class="list-row" style="align-items: flex-start">
             <view class="grow">
-              <text class="title" style="font-size: 28rpx">{{ l.material_name }}</text>
-              <text class="muted">{{ l.material_code }} · {{ l.specification || "无规格" }} · {{ l.unit }}</text>
-              <text class="muted">来料 {{ l.received_qty }} · 合格 {{ l.pass_qty }} · 实收 {{ l.accepted_qty }} · 单价 {{ l.unit_price }}</text>
+              <text class="title" style="font-size: 28rpx">{{ l.material_name || l.material_id }}</text>
+              <text class="muted">{{ l.material_code || l.material_id }} · {{ l.specification || "无规格" }} · {{ l.unit }}</text>
+              <text class="muted">来料 {{ fmtQty(l.received_qty) }} · 合格 {{ fmtQty(l.pass_qty) }} · 实收 {{ fmtQty(l.accepted_qty) }} · 单价 {{ fmtMoney(l.unit_price) }}</text>
               <text v-if="l.iqc_result" class="muted">IQC：{{ iqcText(l.iqc_result) }}{{ l.inspector_name ? `（${l.inspector_name}）` : "" }}</text>
             </view>
             <button v-if="!l.iqc_result" class="btn btn-outline btn-sm" @click="openIqc(l)">IQC</button>
@@ -74,10 +74,28 @@
           <input class="input" v-model.trim="form.receipt_no" placeholder="如 MR-0001" />
         </view>
         <view class="field">
-          <text class="field-label required">项目</text>
-          <picker :range="projectLabels" :value="projectIndex" @change="projectIndex = $event.detail.value">
-            <view class="picker-box">{{ projectLabels[projectIndex] || "选择项目" }}</view>
+          <text class="field-label">项目号</text>
+          <picker :range="projectLabels" :value="projectIndex" @change="onProjectChange">
+            <view class="picker-box">{{ projectLabels[projectIndex] || "选择订单项目（可选）" }}</view>
           </picker>
+        </view>
+        <view class="field">
+          <text class="field-label">客户</text>
+          <picker :range="customerLabels" :value="customerIndex" @change="customerIndex = $event.detail.value">
+            <view class="picker-box">{{ customerLabels[customerIndex] || "选择客户（可选）" }}</view>
+          </picker>
+        </view>
+        <view class="field">
+          <text class="field-label">产品名称</text>
+          <input class="input" v-model.trim="form.product_name" placeholder="产品名称" />
+        </view>
+        <view class="field">
+          <text class="field-label">产品款号</text>
+          <input class="input" v-model.trim="form.style_no" placeholder="款号" />
+        </view>
+        <view class="field">
+          <text class="field-label">款式</text>
+          <input class="input" v-model.trim="form.style_name" placeholder="款式名称" />
         </view>
         <view class="field">
           <text class="field-label required">仓库</text>
@@ -104,9 +122,7 @@
           </view>
           <view class="field">
             <text class="field-label required">物料</text>
-            <picker :range="materialNames" :value="line.materialIndex" @change="line.materialIndex = $event.detail.value">
-              <view class="picker-box">{{ materialNames[line.materialIndex] || "选择物料" }}</view>
-            </picker>
+            <input class="input" v-model.trim="line.material_id" placeholder="物料编码/名称，可手填" />
           </view>
           <view class="row gap8">
             <view class="field grow">
@@ -149,6 +165,7 @@ import { fmtDate } from "../../utils/format";
 interface ReceiptItem {
   id: string; receipt_no: string; receipt_date: number; status: string; version: number;
   project_id: string; project_code: string; product_code: string; product_name: string;
+  customer_name?: string; style_no?: string; style_name?: string;
   supplier_name?: string; warehouse_name?: string; receiver_name?: string;
   line_count: number; received_total: string; pass_total: string; amount_total: string;
 }
@@ -165,7 +182,7 @@ interface ReceiptDetail {
 }
 
 interface LineForm {
-  materialIndex: number;
+  material_id: string;
   received_qty: string;
   pass_qty: string;
   accepted_qty: string;
@@ -177,9 +194,9 @@ const items = ref<ReceiptItem[]>([]);
 const loading = ref(false);
 const saving = ref(false);
 
-const projects = ref<{ id: string; project_code: string }[]>([]);
-const projectLabels = computed(() => projects.value.map((p) => p.project_code));
-const projectIndex = ref(0);
+const customers = ref<{ id: string; name: string }[]>([]);
+const customerLabels = computed(() => customers.value.map((c) => c.name));
+const customerIndex = ref(0);
 const warehouses = ref<{ id: string; name: string }[]>([]);
 const warehouseNames = computed(() => warehouses.value.map((w) => w.name));
 const warehouseIndex = ref(0);
@@ -191,7 +208,10 @@ const materialNames = computed(() => materials.value.map((m) => m.name));
 
 const createSheet = ref(false);
 const formError = ref("");
-const form = ref({ receipt_no: "", lines: [] as LineForm[] });
+const form = ref({ receipt_no: "", project_id: "", customer_id: "", product_name: "", style_no: "", style_name: "", lines: [] as LineForm[] });
+const projects = ref<{ id: string; project_code: string; customer_id: string; style_no?: string; style_name?: string; product_name?: string }[]>([]);
+const projectLabels = computed(() => projects.value.map((p) => p.project_code));
+const projectIndex = ref(0);
 
 const detailSheet = ref(false);
 const detailLoading = ref(false);
@@ -217,6 +237,16 @@ function statusCls(s: string) {
 function iqcText(s: string) {
   return s === "pass" ? "通过" : s === "fail" ? "不通过" : s === "concession" ? "让步接收" : s;
 }
+function fmtQty(v: any) {
+  if (v === "" || v === null || v === undefined) return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? String(Math.round(n)) : String(v);
+}
+function fmtMoney(v: any) {
+  if (v === "" || v === null || v === undefined) return "";
+  const n = Number(v);
+  return Number.isFinite(n) ? String(Number(n.toFixed(2))) : String(v);
+}
 
 async function load() {
   loading.value = true;
@@ -232,13 +262,15 @@ async function load() {
 
 async function loadOptions() {
   try {
-    const [p, w, s, m] = await Promise.all([
-      request<{ items: { id: string; project_code: string }[] }>("/projects", { silent: true }),
+    const [p, pr, w, s, m] = await Promise.all([
+      request<{ items: { id: string; name: string }[] }>("/customers", { silent: true }),
+      request<{ items: { id: string; project_code: string; customer_id: string; style_no?: string; style_name?: string; product_name?: string }[] }>("/projects", { silent: true }),
       request<{ items: { id: string; name: string }[] }>("/warehouses", { silent: true }),
       request<{ items: { id: string; name: string }[] }>("/suppliers", { silent: true }),
       request<{ items: { id: string; name: string; unit?: string }[] }>("/materials", { silent: true }),
     ]);
-    projects.value = p.items || [];
+    customers.value = p.items || [];
+    projects.value = pr.items || [];
     warehouses.value = w.items || [];
     suppliers.value = s.items || [];
     materials.value = m.items || [];
@@ -248,16 +280,26 @@ async function loadOptions() {
 }
 
 function addLine() {
-  form.value.lines.push({ materialIndex: 0, received_qty: "", pass_qty: "", accepted_qty: "", unit_price: "", bed_no: "" });
+  form.value.lines.push({ material_id: "", received_qty: "", pass_qty: "", accepted_qty: "", unit_price: "", bed_no: "" });
 }
 
 function openCreate() {
-  form.value = { receipt_no: "", lines: [{ materialIndex: 0, received_qty: "", pass_qty: "", accepted_qty: "", unit_price: "", bed_no: "" }] };
-  projectIndex.value = 0;
+  form.value = { receipt_no: "", project_id: "", customer_id: "", product_name: "", style_no: "", style_name: "", lines: [{ material_id: "", received_qty: "", pass_qty: "", accepted_qty: "", unit_price: "", bed_no: "" }] };
+  projectIndex.value = 0; customerIndex.value = 0;
   warehouseIndex.value = 0;
   supplierIndex.value = 0;
   formError.value = "";
   createSheet.value = true;
+}
+
+function onProjectChange(event: any) {
+  projectIndex.value = Number(event.detail.value);
+  const project = projects.value[projectIndex.value];
+  if (!project) return;
+  if (!form.value.customer_id) form.value.customer_id = project.customer_id || "";
+  form.value.style_no = project.style_no || form.value.style_no;
+  form.value.style_name = project.style_name || form.value.style_name;
+  form.value.product_name = form.value.product_name || project.product_name || "";
 }
 
 async function saveCreate() {
@@ -265,14 +307,14 @@ async function saveCreate() {
   const f = form.value;
   if (!f.receipt_no) { formError.value = "请填写入库单号"; return; }
   const project = projects.value[projectIndex.value];
+  const customer = customers.value[customerIndex.value];
   const warehouse = warehouses.value[warehouseIndex.value];
   const supplier = suppliers.value[supplierIndex.value];
-  if (!project || !warehouse || !supplier) { formError.value = "请选择项目、仓库与供应商"; return; }
+  if (!warehouse || !supplier) { formError.value = "请选择仓库与供应商"; return; }
   if (!f.lines.length) { formError.value = "请至少添加一行明细"; return; }
   const lines = f.lines.map((l) => {
-    const material = materials.value[l.materialIndex];
     return {
-      material_id: material?.id || "",
+      material_id: l.material_id,
       received_qty: l.received_qty,
       pass_qty: l.pass_qty || l.received_qty,
       accepted_qty: l.accepted_qty || l.pass_qty || l.received_qty,
@@ -281,7 +323,7 @@ async function saveCreate() {
     };
   });
   for (const [i, l] of lines.entries()) {
-    if (!l.material_id) { formError.value = `第 ${i + 1} 行请选择物料`; return; }
+    if (!l.material_id) { formError.value = `第 ${i + 1} 行请填写物料`; return; }
     if (!Number(l.received_qty) || Number(l.received_qty) <= 0) { formError.value = `第 ${i + 1} 行来料数必须大于 0`; return; }
   }
   saving.value = true;
@@ -290,7 +332,11 @@ async function saveCreate() {
       method: "POST",
       data: {
         receipt_no: f.receipt_no,
-        project_id: project.id,
+        project_id: project?.id || "",
+        customer_id: customer?.id || "",
+        product_name: f.product_name,
+        style_no: f.style_no,
+        style_name: f.style_name,
         warehouse_id: warehouse.id,
         supplier_id: supplier.id,
         lines,

@@ -27,6 +27,7 @@ import (
 	"clothp/internal/plainbackup"
 	"clothp/internal/platformadmin"
 	"clothp/internal/production"
+	"clothp/internal/scenario"
 	"clothp/internal/seccrypto"
 	"clothp/internal/tech"
 	"clothp/internal/tenantreg"
@@ -210,6 +211,7 @@ func main() {
 	outsource.Register(api)
 	camera.Register(api)
 	attendance.Register(api)
+	scenario.Register(api)
 
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
 	go func() {

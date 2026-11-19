@@ -1,23 +1,159 @@
 package production
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
+	"sync"
+	"time"
 
 	"clothp/internal/auth"
+	"clothp/internal/dualwrite"
 	"clothp/internal/httpapi"
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/shopspring/decimal"
 )
 
+// projectCreateMu 串行化新增订单项目：取号（双库校验）+ 插入处于同一临界区，
+// 防止并发创建取到相同流水号造成项目编号重复。
+var projectCreateMu sync.Mutex
+
+// looksLikeUUID 判断文本是否为字典 ID（36 位 8-4-4-4-12 十六进制），
+// 用于阻止把编号误当成客户/产品名称写入。
+func looksLikeUUID(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// readProjectMaxSeq 读取指定库内符合 QDyyyyMMdd-NNN 规则的项目编号最大流水。
+// 历史遗留的非该格式编号（如纯微秒编号）不参与流水计算。
+func readProjectMaxSeq(ctx context.Context, pool *pgxpool.Pool, tenantID string) (int64, error) {
+	if pool == nil {
+		return 0, nil
+	}
+	var maxSeq int64
+	err := pool.QueryRow(ctx, `SELECT COALESCE(MAX(SUBSTRING(project_code FROM '-([0-9]+)$')::bigint),0)
+		FROM project WHERE tenant_id=$1 AND project_code ~ '^QD[0-9]{8}-[0-9]+$'`, tenantID).Scan(&maxSeq)
+	return maxSeq, err
+}
+
+// nextProjectCode 双库校验取最大号 +1：分别读取明文库与密文库的项目编号流水，
+// 取两库最大值加一生成新编号，保证编号在两库范围内都不重复。
+// 双库流水不一致属于原则性数据分叉：记录 CRITICAL 日志明确暴露，绝不静默绕过。
+func nextProjectCode(ctx context.Context, api *httpapi.API, tenantID string) (string, error) {
+	var plainPool, securePool *pgxpool.Pool
+	if api.Store != nil {
+		plainPool, securePool = api.Store.Plain, api.Store.Secure
+	}
+	if plainPool == nil && securePool == nil {
+		plainPool = api.DB
+	}
+	plainSeq, err := readProjectMaxSeq(ctx, plainPool, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("读取明文库项目最大号失败: %w", err)
+	}
+	secureSeq, err := readProjectMaxSeq(ctx, securePool, tenantID)
+	if err != nil {
+		return "", fmt.Errorf("读取密文库项目最大号失败: %w", err)
+	}
+	if plainSeq != secureSeq {
+		log.Printf("CRITICAL: 项目编号双库数据不一致（原则性问题，需立即对账）: tenant=%s plain_max_seq=%d secure_max_seq=%d", tenantID, plainSeq, secureSeq)
+	}
+	maxSeq := plainSeq
+	if secureSeq > maxSeq {
+		maxSeq = secureSeq
+	}
+	return fmt.Sprintf("QD%s-%03d", time.Now().Format("20060102"), maxSeq+1), nil
+}
+
 func registerOrders(api *httpapi.API) {
+	// 按名称解析客户/产品：存在则直接返回，不存在则自动创建，供订单项目手填使用。
+	api.Handle("POST /api/v1/projects/resolve-customer", "project:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Name string `json:"name"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "客户名称不能为空")
+		}
+		var id string
+		if err := api.DB.QueryRow(r.Context(), `SELECT id FROM customer WHERE tenant_id=$1 AND name=$2 LIMIT 1`, p.TenantID, name).Scan(&id); err == nil {
+			return httpapi.JSON(w, 200, map[string]any{"id": id, "created": false})
+		} else if err != pgx.ErrNoRows {
+			return err
+		}
+		id, now := platform.ID(), platform.Now()
+		code := "CUS" + fmt.Sprintf("%d", now)
+		_, err := api.DB.Exec(r.Context(), `INSERT INTO customer(tenant_id,id,code,name,status,created_at,created_by,created_node,updated_at,updated_by,updated_node)
+			VALUES($1,$2,$3,$4,'active',$5,$6,$7,$5,$6,$7)`, p.TenantID, id, code, name, now, p.UserID, api.Config.NodeID)
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 201, map[string]any{"id": id, "created": true})
+	})
+
+	api.Handle("POST /api/v1/projects/resolve-product", "project:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Name       string `json:"name"`
+			CustomerID string `json:"customer_id"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		name := strings.TrimSpace(in.Name)
+		if name == "" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "产品名称不能为空")
+		}
+		var id string
+		if err := api.DB.QueryRow(r.Context(), `SELECT id FROM product WHERE tenant_id=$1 AND name=$2 LIMIT 1`, p.TenantID, name).Scan(&id); err == nil {
+			return httpapi.JSON(w, 200, map[string]any{"id": id, "created": false})
+		} else if err != pgx.ErrNoRows {
+			return err
+		}
+		id, now := platform.ID(), platform.Now()
+		code := "PRD" + fmt.Sprintf("%d", now)
+		_, err := api.DB.Exec(r.Context(), `INSERT INTO product(tenant_id,id,product_code,name,unit,status,created_at,created_by,created_node,updated_at,updated_by,updated_node)
+			VALUES($1,$2,$3,$4,'件','draft',$5,$6,$7,$5,$6,$7)`, p.TenantID, id, code, name, now, p.UserID, api.Config.NodeID)
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 201, map[string]any{"id": id, "created": true})
+	})
+
 	api.Handle("POST /api/v1/projects", "project:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		var in struct {
 			ProjectCode          string  `json:"project_code"`
 			CustomerID           string  `json:"customer_id"`
 			ProductID            string  `json:"product_id"`
+			CustomerName         string  `json:"customer_name"`
+			ProductName          string  `json:"product_name"`
+			StyleNo              string  `json:"style_no"`
+			StyleName            string  `json:"style_name"`
 			ReceivedDate         *int64  `json:"received_date"`
 			OrderQty             int64   `json:"order_qty"`
 			CustomerUnitPrice    string  `json:"customer_unit_price"`
@@ -30,8 +166,15 @@ func registerOrders(api *httpapi.API) {
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
-		if in.ProjectCode == "" || in.CustomerID == "" || in.ProductID == "" || in.OrderQty <= 0 {
-			return httpapi.Error(400, "VALIDATION_ERROR", "项目编号、客户、产品和订单数必填")
+		if in.OrderQty <= 0 {
+			return httpapi.Error(400, "VALIDATION_ERROR", "订单数必须大于 0")
+		}
+		// 客户/产品按自由文本落库，必须是名称，不接受把字典 ID 当名称写入
+		if looksLikeUUID(in.CustomerName) {
+			return httpapi.Error(400, "VALIDATION_ERROR", "客户应填写名称，不能是编号")
+		}
+		if looksLikeUUID(in.ProductName) {
+			return httpapi.Error(400, "VALIDATION_ERROR", "产品应填写名称，不能是编号")
 		}
 		if in.CustomerUnitPrice == "" {
 			in.CustomerUnitPrice = "0"
@@ -39,36 +182,82 @@ func registerOrders(api *httpapi.API) {
 		if in.ExternalUnitPrice == "" {
 			in.ExternalUnitPrice = "0"
 		}
+		// 新增项目前锁住取号 + 写入，串行化避免并发取到相同流水号。
+		projectCreateMu.Lock()
+		defer projectCreateMu.Unlock()
+
 		id, now := platform.ID(), platform.Now()
-		_, err := api.DB.Exec(r.Context(), `INSERT INTO project(tenant_id,id,project_code,customer_id,product_id,received_date,order_qty,customer_unit_price,external_unit_price,material_owner,owner_employee_id,qc_employee_id,required_delivery_date,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$14,$15,$16)`, p.TenantID, id, in.ProjectCode, in.CustomerID, in.ProductID, in.ReceivedDate, in.OrderQty, in.CustomerUnitPrice, in.ExternalUnitPrice, in.MaterialOwner, in.OwnerEmployeeID, in.QCEmployeeID, in.RequiredDeliveryDate, now, p.UserID, api.Config.NodeID)
-		if err != nil {
-			return httpapi.Error(409, "INVALID_PROJECT", "项目编号重复或客户/产品引用无效")
+		if in.ProjectCode == "" {
+			code, err := nextProjectCode(r.Context(), api, p.TenantID)
+			if err != nil {
+				return httpapi.Error(500, "PROJECT_CODE_ERROR", "生成项目编号失败: "+err.Error())
+			}
+			in.ProjectCode = code
 		}
-		return httpapi.JSON(w, 201, map[string]any{"id": id, "version": 1, "status": "draft"})
+		insertSQL := `INSERT INTO project(tenant_id,id,project_code,customer_id,product_id,customer_name,product_name,style_no,style_name,received_date,order_qty,customer_unit_price,external_unit_price,material_owner,owner_employee_id,qc_employee_id,required_delivery_date,status,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'confirmed',$18,$19,$20,$18,$19,$20)`
+		args := []any{p.TenantID, id, in.ProjectCode, nullableText(in.CustomerID), nullableText(in.ProductID),
+			nullableText(in.CustomerName), nullableText(in.ProductName), nullableText(in.StyleNo), nullableText(in.StyleName),
+			in.ReceivedDate, in.OrderQty, in.CustomerUnitPrice, in.ExternalUnitPrice, in.MaterialOwner,
+			in.OwnerEmployeeID, in.QCEmployeeID, in.RequiredDeliveryDate, now, p.UserID, api.Config.NodeID}
+		response := map[string]any{"id": id, "version": 1, "status": "confirmed"}
+
+		/* 单库降级：Writer/双库未配置时保持旧的单库直写行为 */
+		if api.Writer == nil || api.Store == nil || api.Store.Plain == nil || api.Store.Secure == nil {
+			if _, err := api.DB.Exec(r.Context(), insertSQL, args...); err != nil {
+				log.Printf("create project insert failed: code=%s customer=%s product=%s err=%v", in.ProjectCode, in.CustomerName, in.ProductName, err)
+				return httpapi.Error(409, "INVALID_PROJECT", "项目编号重复或数据校验失败: "+err.Error())
+			}
+			return httpapi.JSON(w, 201, response)
+		}
+
+		/* 双写 2PC：project 无敏感列，两库写同一 SQL + 同一 args。
+		 * 唯一冲突直接映射 409；PREPARE 后不可再执行 SQL，因此不在 Commit 前换号重试。 */
+		tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(r.Context())
+		tx.MarkAggregate("project", id)
+		if err := dualwrite.ExecBoth(r.Context(), tx, insertSQL, args...); err != nil {
+			log.Printf("create project dual insert failed: code=%s customer=%s product=%s err=%v", in.ProjectCode, in.CustomerName, in.ProductName, err)
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return httpapi.Error(409, "INVALID_PROJECT", "项目编号重复或数据校验失败: "+err.Error())
+			}
+			return err
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 201, response)
 	})
 	api.Handle("GET /api/v1/projects", "project:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		rows, err := api.DB.Query(r.Context(), `SELECT p.id,p.project_code,c.name,p2.name,p.order_qty,p.customer_unit_price::text,p.external_unit_price::text,p.required_delivery_date,p.status,p.version,COALESCE((SELECT SUM(sl.qty) FROM shipment_line sl JOIN shipment s ON s.tenant_id=sl.tenant_id AND s.id=sl.shipment_id WHERE sl.tenant_id=p.tenant_id AND s.project_id=p.id AND s.status='confirmed'),0)
+		rows, err := api.DB.Query(r.Context(), `SELECT p.id,p.project_code,
+			COALESCE(NULLIF(p.customer_name,''),NULLIF(c.name,''),''),
+			COALESCE(NULLIF(p.product_name,''),NULLIF(p2.name,''),''),
+			COALESCE(p.style_no,''),COALESCE(p.style_name,''),p.order_qty,p.customer_unit_price::text,p.external_unit_price::text,p.required_delivery_date,p.status,p.version,COALESCE((SELECT SUM(sl.qty) FROM shipment_line sl JOIN shipment s ON s.tenant_id=sl.tenant_id AND s.id=sl.shipment_id WHERE sl.tenant_id=p.tenant_id AND s.project_id=p.id AND s.status='confirmed'),0)
 			- COALESCE((SELECT SUM(sr.qty) FROM shipment_return sr WHERE sr.tenant_id=p.tenant_id AND sr.project_id=p.id AND sr.status='posted'),0),
 			COALESCE(p2.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p2.tenant_id AND l.owner_type='product' AND l.owner_id=p2.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id
-			FROM project p JOIN customer c ON c.tenant_id=p.tenant_id AND c.id=p.customer_id JOIN product p2 ON p2.tenant_id=p.tenant_id AND p2.id=p.product_id WHERE p.tenant_id=$1 ORDER BY p.id DESC`, p.TenantID)
+			FROM project p LEFT JOIN customer c ON c.tenant_id=p.tenant_id AND c.id=p.customer_id
+			LEFT JOIN product p2 ON p2.tenant_id=p.tenant_id AND p2.id=p.product_id WHERE p.tenant_id=$1 ORDER BY p.id DESC`, p.TenantID)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, code, customer, product, price, external, status string
+			var id, code, customer, product, styleNo, styleName, price, external, status string
 			var qty, version, shipped int64
 			var delivery *string
 			var imageID *string
-			if err := rows.Scan(&id, &code, &customer, &product, &qty, &price, &external, &delivery, &status, &version, &shipped, &imageID); err != nil {
+			if err := rows.Scan(&id, &code, &customer, &product, &styleNo, &styleName, &qty, &price, &external, &delivery, &status, &version, &shipped, &imageID); err != nil {
 				return err
 			}
 			unshipped := qty - shipped
 			if unshipped < 0 {
 				unshipped = 0
 			}
-			items = append(items, map[string]any{"id": id, "project_code": code, "customer_name": customer, "product_name": product, "order_qty": qty, "shipped_qty": shipped, "customer_unit_price": price, "external_unit_price": external, "required_delivery_date": delivery, "status": status, "version": version, "unshipped_qty": unshipped, "image_attachment_id": imageID})
+			items = append(items, map[string]any{"id": id, "project_code": code, "customer_name": customer, "product_name": product, "style_no": styleNo, "style_name": styleName, "order_qty": qty, "shipped_qty": shipped, "customer_unit_price": price, "external_unit_price": external, "required_delivery_date": delivery, "status": status, "version": version, "unshipped_qty": unshipped, "image_attachment_id": imageID})
 		}
 		return httpapi.JSON(w, 200, map[string]any{"items": items})
 	})
@@ -97,23 +286,39 @@ func registerOrders(api *httpapi.API) {
 			RequiredDeliveryDate *string `json:"required_delivery_date"`
 			CustomerUnitPrice    *string `json:"customer_unit_price"`
 			ExternalUnitPrice    *string `json:"external_unit_price"`
+			CustomerName         *string `json:"customer_name"`
+			ProductName          *string `json:"product_name"`
+			StyleNo              *string `json:"style_no"`
+			StyleName            *string `json:"style_name"`
 			Version              int64   `json:"version"`
 			Reason               string  `json:"reason"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
-		tx, err := api.DB.Begin(r.Context())
-		if err != nil {
-			return err
+		// 客户/产品必须是名称，不接受字典 ID
+		if in.CustomerName != nil && looksLikeUUID(*in.CustomerName) {
+			return httpapi.Error(400, "VALIDATION_ERROR", "客户应填写名称，不能是编号")
 		}
-		defer tx.Rollback(r.Context())
-		var currentQty, shipped, planned, version int64
-		if err := tx.QueryRow(r.Context(), `SELECT p.order_qty,
+		if in.ProductName != nil && looksLikeUUID(*in.ProductName) {
+			return httpapi.Error(400, "VALIDATION_ERROR", "产品应填写名称，不能是编号")
+		}
+		if in.Reason == "" {
+			in.Reason = "编辑订单项目"
+		}
+		projectID := r.PathValue("id")
+		checkSQL := `SELECT p.order_qty,
 			COALESCE((SELECT SUM(sl.qty) FROM shipment_line sl JOIN shipment s ON s.tenant_id=sl.tenant_id AND s.id=sl.shipment_id WHERE sl.tenant_id=p.tenant_id AND s.project_id=p.id AND s.status='confirmed'),0)
 			- COALESCE((SELECT SUM(sr.qty) FROM shipment_return sr WHERE sr.tenant_id=p.tenant_id AND sr.project_id=p.id AND sr.status='posted'),0),
 			COALESCE((SELECT SUM(w.planned_product_qty) FROM work_order w WHERE w.tenant_id=p.tenant_id AND w.project_id=p.id AND w.status<>'cancelled'),0),
-			p.version FROM project p WHERE p.tenant_id=$1 AND p.id=$2 FOR UPDATE`, p.TenantID, r.PathValue("id")).Scan(&currentQty, &shipped, &planned, &version); err != nil {
+			p.version FROM project p WHERE p.tenant_id=$1 AND p.id=$2`
+		updateSQL := `UPDATE project SET order_qty=$1,required_delivery_date=COALESCE($2,required_delivery_date),customer_unit_price=COALESCE($3,customer_unit_price),external_unit_price=COALESCE($4,external_unit_price),customer_name=COALESCE($5,customer_name),product_name=COALESCE($6,product_name),style_no=COALESCE($7,style_no),style_name=COALESCE($8,style_name),version=version+1,updated_at=$9,updated_by=$10,updated_node=$11 WHERE tenant_id=$12 AND id=$13 AND version=$14`
+		now := platform.Now()
+		dual := api.Writer != nil && api.Store != nil && api.Store.Plain != nil && api.Store.Secure != nil
+
+		// 读取校验行（version/订单数/已出货/已排产）统一从读池获取，双写时加行锁由 writeMode 单侧事务负责
+		var currentQty, shipped, planned, version int64
+		if err := api.DB.QueryRow(r.Context(), checkSQL, p.TenantID, projectID).Scan(&currentQty, &shipped, &planned, &version); err != nil {
 			if err == pgx.ErrNoRows {
 				return httpapi.Error(404, "NOT_FOUND", "项目不存在")
 			}
@@ -131,12 +336,109 @@ func registerOrders(api *httpapi.API) {
 			appErr.Details = map[string]any{"shipped_qty": shipped, "planned_qty": planned, "requested": newQty}
 			return appErr
 		}
-		now := platform.Now()
-		if _, err := tx.Exec(r.Context(), `UPDATE project SET order_qty=$1,required_delivery_date=COALESCE($2,required_delivery_date),customer_unit_price=COALESCE($3,customer_unit_price),external_unit_price=COALESCE($4,external_unit_price),version=version+1,updated_at=$5,updated_by=$6,updated_node=$7 WHERE tenant_id=$8 AND id=$9`, newQty, in.RequiredDeliveryDate, in.CustomerUnitPrice, in.ExternalUnitPrice, now, p.UserID, api.Config.NodeID, p.TenantID, r.PathValue("id")); err != nil {
+		args := []any{newQty, in.RequiredDeliveryDate, in.CustomerUnitPrice, in.ExternalUnitPrice,
+			in.CustomerName, in.ProductName, in.StyleNo, in.StyleName, now, p.UserID, api.Config.NodeID, p.TenantID, projectID, in.Version}
+		response := map[string]any{"id": projectID, "order_qty": newQty, "version": version + 1}
+
+		if !dual {
+			/* 单库降级 */
+			tx, err := api.DB.Begin(r.Context())
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			res, err := tx.Exec(r.Context(), updateSQL, args...)
+			if err != nil {
+				return err
+			}
+			if res.RowsAffected() == 0 {
+				return httpapi.Error(409, "VERSION_CONFLICT", "项目已变更，请刷新后重试")
+			}
+			if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "update", "project", projectID, map[string]any{"order_qty": currentQty}, response, in.Reason); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+			return httpapi.JSON(w, 200, response)
+		}
+
+		/* 双写 2PC：project 无敏感列，两库执行同一条 UPDATE（带 version CAS） */
+		tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+		if err != nil {
 			return err
 		}
-		response := map[string]any{"id": r.PathValue("id"), "order_qty": newQty, "version": version + 1}
-		if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "update", "project", r.PathValue("id"), map[string]any{"order_qty": currentQty}, response, in.Reason); err != nil {
+		defer tx.Rollback(r.Context())
+		tx.MarkAggregate("project", projectID)
+		if err := dualwrite.ExecBoth(r.Context(), tx, updateSQL, args...); err != nil {
+			return err
+		}
+		// 审计只写审计侧一次（audit_log 不参与双库补偿）
+		auditTx := tx.Secure()
+		if auditTx == nil {
+			auditTx = tx.Plain()
+		}
+		if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "update", "project", projectID, map[string]any{"order_qty": currentQty}, response, in.Reason); err != nil {
+			return err
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 200, response)
+	})
+	api.Handle("POST /api/v1/projects/{id}/confirm", "project:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Version int64  `json:"version"`
+			Reason  string `json:"reason"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		if in.Reason == "" {
+			in.Reason = "项目订单转正式"
+		}
+		projectID := r.PathValue("id")
+		now := platform.Now()
+		dual := api.Writer != nil && api.Store != nil && api.Store.Plain != nil && api.Store.Secure != nil
+		updateSQL := `UPDATE project SET status='confirmed',version=version+1,updated_at=$1,updated_by=$2,updated_node=$3 WHERE tenant_id=$4 AND id=$5 AND version=$6 AND status='draft'`
+		args := []any{now, p.UserID, api.Config.NodeID, p.TenantID, projectID, in.Version}
+		response := map[string]any{"id": projectID, "status": "confirmed", "version": in.Version + 1}
+
+		if !dual {
+			tx, err := api.DB.Begin(r.Context())
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			res, err := tx.Exec(r.Context(), updateSQL, args...)
+			if err != nil {
+				return err
+			}
+			if res.RowsAffected() == 0 {
+				return httpapi.Error(409, "INVALID_STATE", "项目已变更或已转正式，请刷新后重试")
+			}
+			if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "confirm_project", "project", projectID, map[string]any{"status": "draft"}, response, in.Reason); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+			return httpapi.JSON(w, 200, response)
+		}
+		tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(r.Context())
+		tx.MarkAggregate("project", projectID)
+		if err := dualwrite.ExecBoth(r.Context(), tx, updateSQL, args...); err != nil {
+			return err
+		}
+		auditTx := tx.Secure()
+		if auditTx == nil {
+			auditTx = tx.Plain()
+		}
+		if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "confirm_project", "project", projectID, map[string]any{"status": "draft"}, response, in.Reason); err != nil {
 			return err
 		}
 		if err := tx.Commit(r.Context()); err != nil {
@@ -279,22 +581,89 @@ func registerOrders(api *httpapi.API) {
 		})
 	}
 	api.Handle("DELETE /api/v1/projects/{id}", "project:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
-		var orderCount, shipmentCount int
-		if err := api.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM work_order WHERE tenant_id=$1 AND project_id=$2", p.TenantID, r.PathValue("id")).Scan(&orderCount); err != nil {
-			return err
+		projectID := r.PathValue("id")
+		// 只要后续任何环节已有数据就不允许删除：逐表按 (tenant_id, project_id) 检查
+		downstream := []struct{ table, label string }{
+			{"material_receipt", "物料入库"},
+			{"cutting_sheet", "裁床"},
+			{"cutting_bed", "床次"},
+			{"marker", "唛架"},
+			{"work_order", "生产工单"},
+			{"material_issue", "生产领料"},
+			{"process_inspection", "工序巡检"},
+			{"work_report", "工序汇报"},
+			{"style_progress_projection", "进度投影"},
+			{"shipment", "出货"},
+			{"shipment_return", "出货退回"},
+			{"outsourcing_order", "委外单"},
 		}
-		if err := api.DB.QueryRow(r.Context(), "SELECT COUNT(*) FROM shipment WHERE tenant_id=$1 AND project_id=$2", p.TenantID, r.PathValue("id")).Scan(&shipmentCount); err != nil {
-			return err
+		blockers := []string{}
+		for _, d := range downstream {
+			var exists bool
+			if err := api.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)`, d.table).Scan(&exists); err != nil {
+				return err
+			}
+			if !exists {
+				continue
+			}
+			var n int
+			if err := api.DB.QueryRow(r.Context(), fmt.Sprintf(`SELECT COUNT(*) FROM "%s" WHERE tenant_id=$1 AND project_id=$2`, d.table), p.TenantID, projectID).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				blockers = append(blockers, d.label)
+			}
 		}
-		if orderCount > 0 || shipmentCount > 0 {
-			return httpapi.Error(409, "PROJECT_IN_USE", "项目已流转到工单或出货环节，不能删除")
+		if len(blockers) > 0 {
+			appErr := httpapi.Error(409, "PROJECT_IN_USE", "项目已产生后续业务数据（"+strings.Join(blockers, "、")+"），不能删除。请先撤销相关单据后再试。")
+			appErr.Details = map[string]any{"blocking_stages": blockers}
+			return appErr
 		}
-		result, err := api.DB.Exec(r.Context(), "DELETE FROM project WHERE tenant_id=$1 AND id=$2", p.TenantID, r.PathValue("id"))
+
+		deleteSQL := `DELETE FROM project WHERE tenant_id=$1 AND id=$2`
+		args := []any{p.TenantID, projectID}
+		dual := api.Writer != nil && api.Store != nil && api.Store.Plain != nil && api.Store.Secure != nil
+
+		if !dual {
+			tx, err := api.DB.Begin(r.Context())
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			res, err := tx.Exec(r.Context(), deleteSQL, args...)
+			if err != nil {
+				return err
+			}
+			if res.RowsAffected() == 0 {
+				return httpapi.Error(404, "NOT_FOUND", "项目不存在")
+			}
+			if err := httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "delete", "project", projectID, map[string]any{"id": projectID}, nil, "删除项目"); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+			return httpapi.JSON(w, 200, map[string]any{"deleted": true})
+		}
+
+		tx, err := api.Writer.Begin(r.Context(), p.TenantID)
 		if err != nil {
 			return err
 		}
-		if result.RowsAffected() == 0 {
-			return httpapi.Error(404, "NOT_FOUND", "项目不存在")
+		defer tx.Rollback(r.Context())
+		tx.MarkAggregate("project", projectID)
+		if err := dualwrite.ExecBoth(r.Context(), tx, deleteSQL, args...); err != nil {
+			return err
+		}
+		auditTx := tx.Secure()
+		if auditTx == nil {
+			auditTx = tx.Plain()
+		}
+		if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "delete", "project", projectID, map[string]any{"id": projectID}, nil, "删除项目"); err != nil {
+			return err
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			return err
 		}
 		return httpapi.JSON(w, 200, map[string]any{"deleted": true})
 	})
@@ -380,30 +749,33 @@ func listWorkOrders(api *httpapi.API, w http.ResponseWriter, r *http.Request, p 
 		where += fmt.Sprintf(" AND w.status=$%d", len(args))
 	}
 	args = append(args, limit+1)
-	rows, err := api.DB.Query(r.Context(), fmt.Sprintf(`SELECT w.id,w.work_order_code,p.name,w.planned_product_qty,w.status,w.priority,w.product_version,w.version,COALESCE(w.review_status,''),
+	rows, err := api.DB.Query(r.Context(), fmt.Sprintf(`SELECT w.id,w.work_order_code,COALESCE(p.name,'—'),w.planned_product_qty,w.status,w.priority,w.product_version,w.version,COALESCE(w.review_status,''),
+		w.scene_type,w.scene_sub,w.order_source,COALESCE(w.source_order_ref,''),
 		COALESCE((SELECT SUM(t.planned_qty) FROM production_task t WHERE t.tenant_id=w.tenant_id AND t.work_order_id=w.id AND t.parent_task_id IS NULL),0),
 		/* 工单完成件数统一使用「已审核成品入库数」口径，与项目/产品进度一致。
 		 * 旧实现按生产报工统计，未派工/报工但已入库的工单会被算成零。 */
 		COALESCE((SELECT SUM(rl.qty) FROM finished_receipt rc JOIN finished_receipt_line rl ON rl.tenant_id=rc.tenant_id AND rl.receipt_id=rc.id WHERE rc.tenant_id=w.tenant_id AND rc.work_order_id=w.id AND rc.status='approved'),0),
 		COALESCE(p.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p.tenant_id AND l.owner_type='product' AND l.owner_id=p.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id
-		FROM work_order w JOIN product p ON p.tenant_id=w.tenant_id AND p.id=w.product_id WHERE %s ORDER BY w.id LIMIT $%d`, where, len(args)), args...)
+		FROM work_order w LEFT JOIN product p ON p.tenant_id=w.tenant_id AND p.id=w.product_id WHERE %s ORDER BY w.id LIMIT $%d`, where, len(args)), args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, code, product, status, priority, reviewStatus string
+		var id, code, product, status, priority, reviewStatus, sceneType, sceneSub, orderSource, sourceRef string
 		var qty, productVersion, version, planned, finished int64
 		var imageID *string
-		if err := rows.Scan(&id, &code, &product, &qty, &status, &priority, &productVersion, &version, &reviewStatus, &planned, &finished, &imageID); err != nil {
+		if err := rows.Scan(&id, &code, &product, &qty, &status, &priority, &productVersion, &version, &reviewStatus,
+			&sceneType, &sceneSub, &orderSource, &sourceRef, &planned, &finished, &imageID); err != nil {
 			return err
 		}
 		ratio := 0.0
 		if qty > 0 {
 			ratio = float64(finished) / float64(qty)
 		}
-		items = append(items, map[string]any{"id": id, "work_order_code": code, "product_name": product, "planned_product_qty": qty, "status": status, "priority": priority, "product_version": productVersion, "version": version, "review_status": reviewStatus, "planned_qty": planned, "approved_good_qty": finished, "progress_ratio": ratio, "image_attachment_id": imageID})
+		items = append(items, map[string]any{"id": id, "work_order_code": code, "product_name": product, "planned_product_qty": qty, "status": status, "priority": priority, "product_version": productVersion, "version": version, "review_status": reviewStatus, "planned_qty": planned, "approved_good_qty": finished, "progress_ratio": ratio, "image_attachment_id": imageID,
+			"scene_type": sceneType, "scene_sub": sceneSub, "order_source": orderSource, "source_order_ref": sourceRef})
 	}
 	hasMore := len(items) > limit
 	if hasMore {

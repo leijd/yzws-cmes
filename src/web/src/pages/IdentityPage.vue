@@ -50,7 +50,10 @@ async function openRole(item: any) {
   if (!item) return
   try {
     const detail = await api<{ permission_codes: string[] }>(`/roles/${item.id}/permissions`)
-    detail.permission_codes.forEach((code: string) => selectedPermissions[code] = true)
+    /* 历史角色可能带有“仅管理员”权限（如 identity:read），界面不展示也不能提交，
+     * 加载时只恢复仍可分配的权限点，避免保存触发 INVALID_PERMISSION。 */
+    const assignable = new Set(permissions.value.filter((p: any) => !p.admin_only).map((p: any) => p.code))
+    detail.permission_codes.forEach((code: string) => { if (assignable.has(code)) selectedPermissions[code] = true })
   } catch (e) { error.value = (e as Error).message }
 }
 async function saveRole() {
