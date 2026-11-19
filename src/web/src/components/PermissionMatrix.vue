@@ -59,6 +59,18 @@ function toggleModule(group: PermModule, ev: Event) {
   if (props.readonly) return
   const checked = (ev.target as HTMLInputElement).checked
   group.items.forEach(item => props.selected[item.code] = checked)
+  syncWriteImpliesRead()
+}
+/* 写权限默认包含读权限：勾选 xxx:write 时自动补上 xxx:read（若该权限点存在）。 */
+function syncWriteImpliesRead() {
+  if (props.readonly) return
+  const codes = new Set(props.items.map(item => item.code))
+  for (const item of props.items) {
+    if (item.code.endsWith(':write') && props.selected[item.code]) {
+      const readCode = item.code.slice(0, -':write'.length) + ':read'
+      if (codes.has(readCode)) props.selected[readCode] = true
+    }
+  }
 }
 function text(group: PermModule) {
   return !expanded[group.name] && group.summary.length > SUMMARY_LIMIT
@@ -68,6 +80,7 @@ function text(group: PermModule) {
 
 <template>
   <div class="permission-matrix">
+    <div class="notice" style="margin-bottom:10px">维护 = 相关业务数据可 CRUD（自动包含查看）；查看 = 相关业务数据允许查询。</div>
     <div class="pm-toolbar">
       <input v-model="filter" placeholder="检索功能模块 / 权限类型 / 说明">
       <label class="pm-toggle"><input v-model="showDescription" type="checkbox">显示说明</label>
@@ -86,7 +99,7 @@ function text(group: PermModule) {
             <td>
               <div class="pm-grid">
                 <label v-for="item in group.items" :key="item.code" class="pm-item">
-                  <input v-model="selected[item.code]" type="checkbox" :disabled="readonly">
+                  <input v-model="selected[item.code]" type="checkbox" :disabled="readonly" @change="syncWriteImpliesRead">
                   <span>{{ item.name }}</span>
                 </label>
               </div>

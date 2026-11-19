@@ -70,7 +70,12 @@ func ComputeAccess(ctx context.Context, db *pgxpool.Pool, p auth.Principal) (*Ac
 		return nil, err
 	}
 	if scope == "" {
-		return EmptyAccess(), nil // tenant_admin 或无业务角色：无业务数据范围
+		/* 租户自定义角色没有配置 default_data_scope 时，按数据权限推导：
+		 * 有“查看/维护车间”权限就有厂级车间数据范围，否则保持空范围。 */
+		scope = scopeFromPermissions(p.Permissions)
+	}
+	if scope == "" {
+		return EmptyAccess(), nil // 无业务角色且无可推导权限：无业务数据范围
 	}
 	/* 管理级别决定可见上限（设计 4.17.1/5.7）：与角色默认范围取交集，取更窄者 */
 	if levelScope := mgmtLevelScope(ctx, db, p); levelScope != "" && rankOfScope(levelScope) < rankOfScope(scope) {
@@ -251,6 +256,16 @@ func scopeForRole(code string) string {
 	default:
 		return ""
 	}
+}
+
+/* scopeFromPermissions 自定义角色未配置 default_data_scope 时的数据范围推导。
+ * 车间是厂级组织骨架：授予 workshop:read/workshop:write 即表示可浏览/维护全厂车间，
+ * 否则列表会被 AND FALSE 过滤成空，与“有查看车间权限”的授权语义矛盾。 */
+func scopeFromPermissions(perms map[string]bool) string {
+	if perms["workshop:read"] || perms["workshop:write"] {
+		return "factory"
+	}
+	return ""
 }
 
 func rankOfScope(scope string) int {

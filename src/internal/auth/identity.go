@@ -5,7 +5,6 @@ import (
 
 	"clothp/internal/dualwrite"
 	"clothp/internal/platform"
-	"github.com/jackc/pgx/v5"
 )
 
 type TenantUserEmployee struct {
@@ -77,15 +76,15 @@ func (s *Service) CreateEmployeeAccount(ctx context.Context, tx *dualwrite.Tx, t
 }
 
 // ResetAccountPassword 由管理员重置密码，并注销该账号现有会话。
-func (s *Service) ResetAccountPassword(ctx context.Context, tx pgx.Tx, tenantID, userID, password, actorID string) error {
+// 必须在双写事务中调用：密码只哈希一次，两库写同一验证器，避免两侧凭据漂移。
+func (s *Service) ResetAccountPassword(ctx context.Context, tx *dualwrite.Tx, tenantID, userID, password, actorID string) error {
 	verifier, err := hashPassword(password)
 	if err != nil {
 		return err
 	}
 	now := platform.Now()
-	if _, err := tx.Exec(ctx, `UPDATE user_account SET password_verifier=$1,version=version+1,updated_at=$2,updated_by=$3,updated_node=$4 WHERE tenant_id=$5 AND id=$6`, verifier, now, actorID, s.nodeID, tenantID, userID); err != nil {
+	if err := dualwrite.ExecBoth(ctx, tx, `UPDATE user_account SET password_verifier=$1,version=version+1,updated_at=$2,updated_by=$3,updated_node=$4 WHERE tenant_id=$5 AND id=$6`, verifier, now, actorID, s.nodeID, tenantID, userID); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `UPDATE auth_session SET revoked_at=$1,reason='password_reset' WHERE tenant_id=$2 AND user_id=$3 AND revoked_at IS NULL`, now, tenantID, userID)
-	return err
+	return dualwrite.ExecBoth(ctx, tx, `UPDATE auth_session SET revoked_at=$1,reason='password_reset' WHERE tenant_id=$2 AND user_id=$3 AND revoked_at IS NULL`, now, tenantID, userID)
 }

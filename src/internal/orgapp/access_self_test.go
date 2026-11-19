@@ -43,6 +43,18 @@ func TestOrgScopeSQLSelfOnly(t *testing.T) {
 	})
 }
 
+func TestScopeFromPermissions(t *testing.T) {
+	if got := scopeFromPermissions(map[string]bool{"workshop:read": true, "workshop:write": true}); got != "factory" {
+		t.Fatalf("可维护车间的自定义角色应推导为 factory，实际 %q", got)
+	}
+	if got := scopeFromPermissions(map[string]bool{"workshop:read": true}); got != "factory" {
+		t.Fatalf("有查看车间权限的角色应能查看车间列表，实际范围 %q", got)
+	}
+	if got := scopeFromPermissions(nil); got != "" {
+		t.Fatalf("无权限时范围应为空，实际 %q", got)
+	}
+}
+
 func TestAllowEmployeeOrgSelfOnly(t *testing.T) {
 	a := &Access{SelfOnly: true, SelfEmployeeID: "emp-1"}
 

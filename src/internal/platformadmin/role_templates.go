@@ -346,28 +346,37 @@ func (p *roleApplyPlan) Summary() map[string]any {
 	return map[string]any{"created_roles": p.Created, "updated_roles": p.Updated, "applied_templates": len(p.Roles)}
 }
 
-/* apply 纯写入：角色 upsert + 授权重建 + 权限点补齐（同一计划在两库各执行一遍）。 */
+/* apply 纯写入：角色 upsert + 授权重建 + 权限点补齐（同一计划在两库各执行一遍）。
+ * 计划从读库（secure）取得 ID，但两库可能存在历史主键分叉/权限点缺失；
+ * 写入时必须按当前库实际行解析 role_id / permission_id，否则外键 23503。 */
 func (p *roleApplyPlan) apply(ctx context.Context, tx pgx.Tx) error {
 	for _, role := range p.Roles {
 		if role.IsNew {
-			if _, err := tx.Exec(ctx, "INSERT INTO role(tenant_id,id,code,name,description,is_system,source,platform_template_id,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,FALSE,'platform',$6,$7,$8,$9,$7,$8,$9)", p.TenantID, role.RoleID, role.Code, role.Name, role.Description, role.TemplateID, p.Now, p.ActorID, p.NodeID); err != nil {
+			if _, err := tx.Exec(ctx, "INSERT INTO role(tenant_id,id,code,name,description,is_system,source,platform_template_id,created_at,created_by,created_node,updated_at,updated_by,updated_node) VALUES($1,$2,$3,$4,$5,FALSE,'platform',$6,$7,$8,$9,$7,$8,$9) ON CONFLICT DO NOTHING", p.TenantID, role.RoleID, role.Code, role.Name, role.Description, role.TemplateID, p.Now, p.ActorID, p.NodeID); err != nil {
 				return err
 			}
 		} else {
-			if _, err := tx.Exec(ctx, "UPDATE role SET name=$1,description=$2,source='platform',platform_template_id=$3,version=version+1,updated_at=$4,updated_by=$5,updated_node=$6 WHERE tenant_id=$7 AND id=$8", role.Name, role.Description, role.TemplateID, p.Now, p.ActorID, p.NodeID, p.TenantID, role.RoleID); err != nil {
+			if _, err := tx.Exec(ctx, "UPDATE role SET name=$1,description=$2,source='platform',platform_template_id=$3,version=version+1,updated_at=$4,updated_by=$5,updated_node=$6 WHERE tenant_id=$7 AND code=$8", role.Name, role.Description, role.TemplateID, p.Now, p.ActorID, p.NodeID, p.TenantID, role.Code); err != nil {
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, "DELETE FROM role_permission WHERE tenant_id=$1 AND role_id=$2", p.TenantID, role.RoleID); err != nil {
+		var roleID string
+		if err := tx.QueryRow(ctx, "SELECT id FROM role WHERE tenant_id=$1 AND code=$2", p.TenantID, role.Code).Scan(&roleID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM role_permission WHERE tenant_id=$1 AND role_id=$2", p.TenantID, roleID); err != nil {
 			return err
 		}
 		for _, perm := range role.Permissions {
-			if perm.InsertPermission {
-				if _, err := tx.Exec(ctx, "INSERT INTO permission(tenant_id,id,code,resource,action) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,code) DO NOTHING", p.TenantID, perm.PermissionID, perm.Code, perm.Resource, perm.Action); err != nil {
-					return err
-				}
+			/* 每个库都补齐权限点并按本库行取 ID，避免计划里的 secure ID 在明文库不存在。 */
+			if _, err := tx.Exec(ctx, "INSERT INTO permission(tenant_id,id,code,resource,action) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,code) DO NOTHING", p.TenantID, perm.PermissionID, perm.Code, perm.Resource, perm.Action); err != nil {
+				return err
 			}
-			if _, err := tx.Exec(ctx, "INSERT INTO role_permission(tenant_id,id,role_id,permission_id) VALUES($1,$2,$3,$4)", p.TenantID, perm.RolePermissionID, role.RoleID, perm.PermissionID); err != nil {
+			var permissionID string
+			if err := tx.QueryRow(ctx, "SELECT id FROM permission WHERE tenant_id=$1 AND code=$2", p.TenantID, perm.Code).Scan(&permissionID); err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, "INSERT INTO role_permission(tenant_id,id,role_id,permission_id) VALUES($1,$2,$3,$4)", p.TenantID, perm.RolePermissionID, roleID, permissionID); err != nil {
 				return err
 			}
 		}

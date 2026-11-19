@@ -12,7 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"clothp/internal/attendance"
 	"clothp/internal/auth"
+	"clothp/internal/camera"
 	"clothp/internal/config"
 	"clothp/internal/datastore"
 	"clothp/internal/datatool"
@@ -20,6 +22,7 @@ import (
 	"clothp/internal/httpapi"
 	"clothp/internal/masterdata"
 	"clothp/internal/orgapp"
+	"clothp/internal/outsource"
 	"clothp/internal/person"
 	"clothp/internal/plainbackup"
 	"clothp/internal/platformadmin"
@@ -204,6 +207,9 @@ func main() {
 	orgapp.Register(api)
 	person.Register(api)
 	tech.Register(api)
+	outsource.Register(api)
+	camera.Register(api)
+	attendance.Register(api)
 
 	server := &http.Server{Addr: cfg.Listen, Handler: api.Handler(), ReadHeaderTimeout: cfg.ReadHeaderTimeout}
 	go func() {

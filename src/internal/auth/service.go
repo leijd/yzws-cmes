@@ -625,7 +625,26 @@ func (s *Service) loadPrincipal(ctx context.Context, tenantID, userID, sessionID
 		}
 		principal.Permissions[code] = true
 	}
+	/* 写权限默认包含读权限：统一在加载层展开，路由校验、/me/permissions
+	 * 菜单和业务内判断共用同一份集合。 */
+	expandImpliedPermissions(principal.Permissions)
 	return principal, nil
+}
+
+/* expandImpliedPermissions 任何 resource:write 都蕴含 resource:read。 */
+func expandImpliedPermissions(perms map[string]bool) {
+	var writes []string
+	for code, granted := range perms {
+		if granted && strings.HasSuffix(code, ":write") {
+			writes = append(writes, code)
+		}
+	}
+	for _, code := range writes {
+		read := strings.TrimSuffix(code, ":write") + ":read"
+		if !perms[read] {
+			perms[read] = true
+		}
+	}
 }
 
 /* Refresh 刷新会话：clientType 沿用原会话终端，由调用方（客户端刷新请求）带入，

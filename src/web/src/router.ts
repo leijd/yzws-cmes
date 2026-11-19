@@ -68,6 +68,14 @@ export const router = createRouter({
     { path: '/mywage/H02', component: () => import('./pages/MyWagesPage.vue') },
     { path: '/myprofile/H03', component: () => import('./pages/MyProfilePage.vue') },
     { path: '/progress/F01', component: () => import('./pages/ProgressPage.vue') },
+    /* 外协管理（设计 4.25/6.8） */
+    { path: '/outsource/orders', component: () => import('./pages/OutsourcePage.vue') },
+    /* 巡厂与证据（设计 4.26/6.9） */
+    { path: '/evidence', component: () => import('./pages/EvidencePage.vue') },
+    /* 简单考勤（设计 4.27/6.10）：考勤屏常亮展示、员工手机扫码登记、管理查询 */
+    { path: '/attendance/screen', component: () => import('./pages/AttendanceScreenPage.vue'), meta: { standalone: true } },
+    { path: '/attendance/scan', component: () => import('./pages/AttendanceScanPage.vue'), meta: { standalone: true } },
+    { path: '/attendance/records', component: () => import('./pages/AttendanceRecordsPage.vue') },
     { path: '/settings/G01', component: () => import('./pages/SettingsPage.vue') },
     { path: '/portal/settings', component: () => import('./pages/PortalSettingsPage.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/workbench/A03' },
