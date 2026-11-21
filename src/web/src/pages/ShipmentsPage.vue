@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
+import { todayISO } from '../date'
 import { usePermissions } from '../permissions'
 import ModalDialog from '../components/ModalDialog.vue'
+import DatePicker from '../components/DatePicker.vue'
 import PageState from '../components/PageState.vue'
 import SceneBadge from '../components/SceneBadge.vue'
 import ThreeStateTabs from '../components/ThreeStateTabs.vue'
@@ -50,7 +52,7 @@ async function load() {
   } catch (e) { error.value = (e as Error).message } finally { loading.value = false }
 }
 function openCreate() {
-  Object.assign(form, { shipment_no: '', project_id: '', shipment_date: new Date().toISOString().slice(0, 10), lines: [blankLine()], remark: '' })
+  Object.assign(form, { shipment_no: '', project_id: '', shipment_date: todayISO(), lines: [blankLine()], remark: '' })
   error.value = ''; modal.value = 'create'
 }
 async function create() {
@@ -114,7 +116,7 @@ onMounted(load)
         <label>发货单号*<input v-model="form.shipment_no"></label>
         <label>项目*<select v-model="form.project_id"><option value="">请选择</option>
           <option v-for="p in projects" :key="p.id" :value="p.id">{{ p.project_code }} · {{ p.product_name }}</option></select></label>
-        <label>发货日期<input type="date" v-model="form.shipment_date"></label>
+        <label>发货日期<DatePicker v-model="form.shipment_date"/></label>
         <label class="full">备注<input v-model="form.remark"></label>
       </div>
       <h4>发货明细（按扎）</h4>

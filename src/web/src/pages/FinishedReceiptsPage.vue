@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { usePermissions } from '../permissions'
+import { formatMicros } from '../date'
 import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 import ThreeStateTabs from '../components/ThreeStateTabs.vue'
@@ -89,7 +90,7 @@ onMounted(load)
             <td>{{ r.work_order_code || r.work_order_id || '—' }}</td>
             <td>{{ r.warehouse_name || r.warehouse_id || '—' }}</td>
             <td><span class="status" :class="r.status">{{ statusText[r.status] || r.status }}</span></td>
-            <td>{{ r.created_at ? new Date(r.created_at / 1000).toLocaleDateString('zh-CN') : '—' }}</td>
+            <td>{{ r.created_at ? formatMicros(r.created_at) : '—' }}</td>
             <td class="ops">
               <button v-if="canWrite && r.status !== 'approved'" type="button" class="btn-mini" :disabled="saving" @click="approve(r)">审核入库</button>
               <EvidenceCapture biz-type="finished_receipt" :biz-id="r.id" label="入库取证" />

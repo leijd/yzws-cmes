@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import { usePermissions } from '../permissions'
+import { todayISO } from '../date'
 import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 import DatePicker from '../components/DatePicker.vue'
@@ -52,7 +53,7 @@ async function load() {
   } catch (e) { error.value = (e as Error).message } finally { loading.value = false }
 }
 function resetForm() {
-  Object.assign(form, { marker_no: '', marker_date: new Date().toISOString().slice(0, 10), work_order_id: filterOrder.value || '', color: '', material_id: '', fabric_width_cm: '150', fabric_layers: 1, marker_length_m: '', utilization_rate: '', drawing_attachment_id: '', layout_employee_id: '', remark: '', ratios: [{ size: '', ratio_qty: 0, sort_no: 1 }] })
+  Object.assign(form, { marker_no: '', marker_date: todayISO(), work_order_id: filterOrder.value || '', color: '', material_id: '', fabric_width_cm: '150', fabric_layers: 1, marker_length_m: '', utilization_rate: '', drawing_attachment_id: '', layout_employee_id: '', remark: '', ratios: [{ size: '', ratio_qty: 0, sort_no: 1 }] })
 }
 function openCreate() { current.value = null; resetForm(); error.value = ''; modal.value = 'marker' }
 async function openEdit(item: any) {

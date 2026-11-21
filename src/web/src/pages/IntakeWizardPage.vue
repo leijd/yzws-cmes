@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api } from '../api'
+import DatePicker from '../components/DatePicker.vue'
 import PageState from '../components/PageState.vue'
 import SceneBadge from '../components/SceneBadge.vue'
 
@@ -110,14 +111,14 @@ onMounted(load)
         <div v-if="step === 1" class="form-grid">
           <label>项目编号*<input v-model="form.project_code" placeholder="如 QD2026111901"></label>
           <label>客商 / 委托方*<select v-model="form.customer_id"><option value="">请选择</option>
-            <option v-for="c in options.customers" :key="c.id" :value="c.id">{{ c.code }} · {{ c.name }}</option></select></label>
+            <option v-for="c in options.customers" :key="c.id" :value="c.id">{{ c.name }}</option></select></label>
           <label>对方单号<span v-if="needsSourceRef" class="req">*</span><input v-model="form.source_order_ref" :placeholder="needsSourceRef ? '外部委托方单号' : '选填'"></label>
           <label>场景子类型<select v-model="form.scene_sub"><option v-for="s in sceneSubs" :key="s.scene_sub" :value="s.scene_sub">{{ s.label }}</option></select></label>
         </div>
         <!-- 第 2 步：物料/半成品 -->
         <div v-else-if="step === 2" class="form-grid">
           <label>订单数量*<input v-model.number="form.order_qty" type="number" min="1"></label>
-          <label>交期<input type="date" v-model="form.required_delivery_date"></label>
+          <label>交期<DatePicker v-model="form.required_delivery_date"/></label>
           <label v-if="needsProduct">产品*<select v-model="form.product_id"><option value="">请选择</option>
             <option v-for="p in options.products" :key="p.id" :value="p.id">{{ p.code }} · {{ p.name }}</option></select></label>
           <div v-else class="empty-note">接外包工序：无产品信息（允许无记录），裁床单仅接收上游扎号/菲票部分信息，产品字段为空，以「—/不适用」呈现。</div>

@@ -94,7 +94,7 @@ onMounted(() => { loadOrders(); load() })
     <!-- 工单进度：树形表格（一级产品/项目，二级工单） -->
     <div v-if="!loading && tab === 'work-orders'" class="panel-body">
       <div class="toolbar" style="padding:0 0 14px;border:0">
-        <input v-model.trim="progressFilter.project_code" class="search-input" placeholder="项目号 / 产品号" @keyup.enter="load">
+        <input v-model.trim="progressFilter.project_code" class="search-input" placeholder="订单号 / 产品号" @keyup.enter="load">
         <input v-model.trim="progressFilter.product_name" class="search-input" placeholder="产品名称" @keyup.enter="load">
         <input v-model.trim="progressFilter.work_order_code" class="search-input" placeholder="工单号" @keyup.enter="load">
         <button class="button secondary" @click="load">查询</button>

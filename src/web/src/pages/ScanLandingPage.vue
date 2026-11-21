@@ -36,6 +36,9 @@ interface Task {
   reported_qty: number
   remaining_qty: number
   assigned_qty: number
+  available_qty?: number
+  previous_ready?: boolean
+  has_previous?: boolean
 }
 
 interface ResolveResult {
@@ -82,6 +85,12 @@ const canAssign = computed(() => !!context.value?.can_assign)
 const canReport = computed(() => !!context.value?.can_report)
 const supportsDispatch = computed(() => context.value?.report_mode === 'A')
 const canDispatch = computed(() => supportsDispatch.value && canAssign.value)
+const reportLimit = computed(() => {
+  const task = selectedTask.value
+  if (!task) return 0
+  const remaining = Number(task.remaining_qty || 0)
+  return task.has_previous ? Math.max(0, Math.min(remaining, Number(task.available_qty || 0) - Number(task.reported_qty || 0))) : remaining
+})
 const employees = computed(() => context.value?.employees || [])
 const partsText = computed(() => {
   const parts = label.value?.parts || []
@@ -109,7 +118,7 @@ async function load() {
 async function loadContext() {
   try {
     context.value = await api<ResolveResult>(`/scan/resolve?payload=${encodeURIComponent(code)}`)
-    const available = context.value.tasks || []
+    const available = (context.value.tasks || []).filter(t => t.previous_ready !== false)
     if (!selectedTaskID.value && available.length) {
       selectedTaskID.value = available[0].task_id
       onTaskChange()
@@ -121,6 +130,7 @@ async function loadContext() {
 }
 
 function onTaskChange() {
+  if (selectedTask.value?.previous_ready === false) { error.value = '前道工序尚未报工，不能选择该工序'; return }
   goodQty.value = null
   defectQty.value = null
   dispatchQty.value = assignableQty.value > 0 ? assignableQty.value : null
@@ -134,7 +144,9 @@ async function submitReport() {
   const good = Number(goodQty.value || 0)
   const defect = Number(defectQty.value || 0)
   if (!selectedTask.value) { error.value = '请选择工序'; return }
+  if (selectedTask.value.previous_ready === false) { error.value = '前道工序尚未报工或审批，当前工序不能报工'; return }
   if (good + defect <= 0) { error.value = '请填写合格数或次品数'; return }
+  if (selectedTask.value.has_previous && good + defect > reportLimit.value) { error.value = `最多可报 ${reportLimit.value} 件（按上游最小分支）`; return }
   submitting.value = true
   error.value = ''
   try {
@@ -204,7 +216,7 @@ onMounted(load)
 
     <section v-if="label" class="scan-card">
       <div class="scan-grid">
-        <div><span>项目号</span><b>{{ label.project_code || '—' }}</b></div>
+        <div><span>订单号</span><b>{{ label.project_code || '—' }}</b></div>
         <div><span>扎号</span><b>{{ label.bundle_no || '—' }}</b></div>
         <div><span>品牌</span><b>{{ label.brand || '—' }}</b></div>
         <div><span>款式</span><b>{{ label.style || '—' }}</b></div>
@@ -233,11 +245,12 @@ onMounted(load)
             v-for="task in tasks"
             :key="task.task_id"
             class="scan-task"
-            :class="{ active: selectedTaskID === task.task_id }"
+            :class="{ active: selectedTaskID === task.task_id, locked: task.previous_ready === false }"
             @click="selectedTaskID = task.task_id; onTaskChange()"
           >
             <span>{{ task.sequence_no }}. {{ task.process_name }}</span>
-            <small>已报 {{ task.reported_qty }} / 计划 {{ task.planned_qty }}</small>
+            <small>已报 {{ task.reported_qty }} / 计划 {{ task.planned_qty }}<template v-if="task.has_previous"> · 上游可用 {{ task.available_qty }}</template></small>
+            <small v-if="task.previous_ready === false" class="scan-warn">前道工序尚未报工</small>
           </button>
           <div v-if="!tasks.length" class="scan-tip">该工单暂无工序任务。</div>
         </div>
@@ -248,8 +261,9 @@ onMounted(load)
         <div class="scan-form-row"><label>合格数</label><input v-model.number="goodQty" type="number" min="0" placeholder="0"></div>
         <div class="scan-form-row"><label>次品数</label><input v-model.number="defectQty" type="number" min="0" placeholder="0"></div>
         <div class="scan-form-row"><label>备注</label><input v-model.trim="remark" placeholder="选填"></div>
-        <div class="scan-tip">本工序剩余可报 {{ selectedTask.remaining_qty }} 件；同一扎同一工序只能报工一次。</div>
-        <button class="scan-primary" :disabled="submitting || !canReport" @click="submitReport">{{ submitting ? '提交中…' : '提交报工' }}</button>
+        <div class="scan-tip">本工序剩余可报 {{ reportLimit }} 件；同一扎同一工序只能报工一次。</div>
+        <div v-if="selectedTask.previous_ready === false" class="scan-tip scan-warn">前道工序尚未报工或审批，当前工序不能报工。</div>
+        <button class="scan-primary" :disabled="submitting || !canReport || selectedTask.previous_ready === false" @click="submitReport">{{ submitting ? '提交中…' : '提交报工' }}</button>
       </section>
 
       <section v-if="selectedTask && canDispatch && mode === 'dispatch'" class="scan-card">
@@ -287,6 +301,7 @@ onMounted(load)
 .scan-grid b { text-align: right; }
 .scan-code { margin-top: 12px; font-family: ui-monospace, "Courier New", monospace; font-size: 12px; color: #667085; text-align: center; letter-spacing: .08em; }
 .scan-tip { color: #667085; font-size: 12px; line-height: 1.6; margin: 8px 0; }
+.scan-warn { color: #b54708 !important; }
 .scan-primary { width: 100%; border: 0; border-radius: 10px; background: #155eef; color: #fff; padding: 13px; font-size: 16px; font-weight: 600; }
 .scan-primary:disabled { opacity: .5; }
 .scan-tabs { display: flex; gap: 8px; background: #f2f4f7; border-radius: 10px; padding: 4px; margin-bottom: 12px; }
@@ -296,6 +311,7 @@ onMounted(load)
 .scan-task { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; border: 1px solid #e4e9f0; background: #fff; border-radius: 10px; padding: 10px 12px; text-align: left; color: #344054; }
 .scan-task small { color: #667085; font-size: 11px; }
 .scan-task.active { border-color: #155eef; background: #eff4ff; }
+.scan-task.locked { opacity: 0.55; }
 .scan-card h2 { font-size: 17px; margin: 0 0 12px; }
 .scan-form-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
 .scan-form-row label { width: 80px; color: #667085; font-size: 13px; flex: 0 0 auto; }

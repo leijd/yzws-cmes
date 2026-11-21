@@ -4,6 +4,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { api, formatTime } from '../api'
 import { toastError, toastSuccess } from '../toast'
 import FilterSelect from '../components/FilterSelect.vue'
+import DatePicker from '../components/DatePicker.vue'
 import PageState from '../components/PageState.vue'
 
 const items = ref<any[]>([])
@@ -40,7 +41,7 @@ onMounted(load)
       <div class="toolbar">
         <FilterSelect v-model="filter.att_type" :options="[{ value: '', label: '全部类型' }, { value: 'in', label: '上班' }, { value: 'out', label: '下班' }]" @update:model-value="load" />
         <input v-model.trim="filter.point" class="search-input" placeholder="考勤点" @keyup.enter="load">
-        <input v-model="filter.date" type="date" @change="load">
+        <DatePicker v-model="filter.date" placeholder="选择日期" @update:model-value="load"/>
         <button class="button secondary" @click="load">查询</button>
       </div>
     </header>

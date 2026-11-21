@@ -21,6 +21,8 @@ param(
   [switch]$BackendOnly
 )
 $ErrorActionPreference = 'Stop'
+# 远端 bash 需要无 BOM 的 UTF-8 且仅 LF 换行，否则首行 set -e 会被当作 \357\273\277set
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $Root     = $PSScriptRoot | Split-Path
 $BuildDir = Join-Path $Root 'deploy\build'
 $Stamp    = Get-Date -Format 'yyyyMMddHHmmss'
@@ -81,6 +83,8 @@ echo "--- served index hash ---"
 curl -fsS "http://127.0.0.1:18389/" | grep -o 'index-[A-Za-z0-9_-]*\.js' | head -1 || true
 '@
 $Remote = $Remote.Replace('__APP__',$AppDir).Replace('__SVC__',$Service).Replace('__PORT__',"$Port").Replace('__TS__',$Stamp).Replace('__DOWEB__',$doWebInt).Replace('__DOBACKEND__',$doBackendInt)
-$Remote | ssh @SshBase "$ServerUser@$ServerHost" 'bash -s'
+$Remote = $Remote.Replace("`r", '')
+$RemoteB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Remote))
+ssh @SshBase "$ServerUser@$ServerHost" "echo $RemoteB64 | base64 -d | bash -s"
 ssh @SshBase "$ServerUser@$ServerHost" 'rm -rf /tmp/clothp2-deploy'
 Write-Host "`n==> 完成" -ForegroundColor Green

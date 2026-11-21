@@ -44,7 +44,7 @@ type entity struct {
 var entities = map[string]entity{
 	"customers":  {table: "customer", permission: "masterdata", codeField: "code", required: []string{"code", "name"}, fields: map[string]string{"code": "code", "name": "name", "contact_name": "contact_name", "phone": "phone", "address": "address", "remark": "remark"}},
 	"suppliers":  {table: "supplier", permission: "masterdata", codeField: "code", required: []string{"code", "name"}, fields: map[string]string{"code": "code", "name": "name", "contact_name": "contact_name", "phone": "phone", "address": "address", "remark": "remark"}},
-	"materials":  {table: "material", permission: "warehouse", codeField: "code", required: []string{"code", "name", "unit"}, fields: map[string]string{"code": "code", "name": "name", "category": "category", "specification": "specification", "unit": "unit", "default_supplier_id": "default_supplier_id", "safety_stock": "safety_stock"}},
+	"materials":  {table: "material", permission: "warehouse", codeField: "code", required: []string{"code", "name", "unit"}, fields: map[string]string{"code": "code", "name": "name", "category": "category", "material_type": "material_type", "specification": "specification", "unit": "unit", "default_supplier_id": "default_supplier_id", "safety_stock": "safety_stock"}},
 	"warehouses": {table: "warehouse", permission: "warehouse", codeField: "code", required: []string{"code", "name", "warehouse_type"}, fields: map[string]string{"code": "code", "name": "name", "warehouse_type": "warehouse_type", "org_unit_id": "org_unit_id", "manager_employee_id": "manager_employee_id"}},
 	"org-units":  {table: "org_unit", permission: "masterdata", codeField: "code", required: []string{"code", "name", "org_type"}, fields: map[string]string{"code": "code", "name": "name", "org_type": "org_type", "parent_id": "parent_id", "manager_employee_id": "manager_employee_id"}},
 	"employees":  {table: "employee", permission: "masterdata", codeField: "employee_no", required: []string{"employee_no", "name"}, fields: map[string]string{"employee_no": "employee_no", "name": "name", "gender": "gender", "birth_date": "birth_date", "phone": "phone", "id_card_no": "id_card_no", "address": "address", "nation": "nation", "native_place": "native_place", "hire_date": "hire_date", "org_unit_id": "org_unit_id", "position": "position", "workshop": "workshop", "production_line": "production_line", "skill_grade": "skill_grade", "pay_mode": "pay_mode", "base_salary": "base_salary", "rate_level": "rate_level", "bank_card": "bank_card", "bank_name": "bank_name", "emergency_contact": "emergency_contact", "emergency_phone": "emergency_phone", "remark": "remark"}},
@@ -331,6 +331,15 @@ func codeOwnerFor(definition entity, input map[string]any) string {
 	return ""
 }
 
+// customerNameTaken 按租户校验客户名称唯一（忽略大小写与首尾空格）。
+func customerNameTaken(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, tenantID, name, exceptID string) (bool, error) {
+	var exists bool
+	err := q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM customer WHERE tenant_id=$1 AND lower(trim(name))=lower(trim($2)) AND ($3='' OR id<>$3))`, tenantID, name, exceptID).Scan(&exists)
+	return exists, err
+}
+
 func createWithInput(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Principal, definition entity, input map[string]any) error {
 	if definition.table == "employee" {
 		/* 员工表走专用写入：敏感列加密 + phone_hash 盲索引 + 双库写入（见 employee_write.go） */
@@ -350,6 +359,15 @@ func createWithInput(api *httpapi.API, w http.ResponseWriter, r *http.Request, p
 	for _, field := range definition.required {
 		if strings.TrimSpace(fmt.Sprint(input[field])) == "" || input[field] == nil {
 			return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "缺少必填字段："+field)
+		}
+	}
+	if definition.table == "customer" {
+		taken, err := customerNameTaken(r.Context(), api.DB, p.TenantID, fmt.Sprint(input["name"]), "")
+		if err != nil {
+			return err
+		}
+		if taken {
+			return httpapi.Error(http.StatusConflict, "DUPLICATE_CUSTOMER_NAME", "客户名称已存在")
 		}
 	}
 	id, now := platform.ID(), platform.Now()
@@ -376,6 +394,9 @@ func createWithInput(api *httpapi.API, w http.ResponseWriter, r *http.Request, p
 	defer tx.Rollback(r.Context())
 	_, err = tx.Exec(r.Context(), fmt.Sprintf("INSERT INTO %s(%s) VALUES(%s)", definition.table, strings.Join(columns, ","), strings.Join(placeholders, ",")), values...)
 	if err != nil {
+		if definition.table == "customer" && isUniqueViolation(err) {
+			return httpapi.Error(http.StatusConflict, "DUPLICATE_CUSTOMER_NAME", "客户名称已存在")
+		}
 		return httpapi.Error(http.StatusConflict, "DUPLICATE_OR_INVALID_REFERENCE", "编码重复或引用数据无效")
 	}
 	if err = httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "create", definition.table, id, nil, input, ""); err != nil {
@@ -417,6 +438,21 @@ func patch(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Prin
 	if !ok {
 		return httpapi.Error(http.StatusBadRequest, "VERSION_REQUIRED", "必须提供记录版本")
 	}
+	if definition.table == "customer" {
+		if raw, exists := input["name"]; exists {
+			name := strings.TrimSpace(fmt.Sprint(raw))
+			if name == "" {
+				return httpapi.Error(http.StatusBadRequest, "VALIDATION_ERROR", "客户名称不能为空")
+			}
+			taken, err := customerNameTaken(r.Context(), api.DB, p.TenantID, name, r.PathValue("id"))
+			if err != nil {
+				return err
+			}
+			if taken {
+				return httpapi.Error(http.StatusConflict, "DUPLICATE_CUSTOMER_NAME", "客户名称已存在")
+			}
+		}
+	}
 	sets, args := []string{}, []any{}
 	for field, column := range definition.fields {
 		if value, exists := input[field]; exists {
@@ -437,6 +473,9 @@ func patch(api *httpapi.API, w http.ResponseWriter, r *http.Request, p auth.Prin
 	defer tx.Rollback(r.Context())
 	result, err := tx.Exec(r.Context(), fmt.Sprintf("UPDATE %s SET %s WHERE tenant_id=$%d AND id=$%d AND version=$%d", definition.table, strings.Join(sets, ","), len(args)-2, len(args)-1, len(args)), args...)
 	if err != nil {
+		if definition.table == "customer" && isUniqueViolation(err) {
+			return httpapi.Error(http.StatusConflict, "DUPLICATE_CUSTOMER_NAME", "客户名称已存在")
+		}
 		return err
 	}
 	if result.RowsAffected() == 0 {
@@ -832,7 +871,53 @@ func registerDictionaries(api *httpapi.API) {
 		}
 		dictOptionsInvalidateTenant(p.TenantID)
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"id": r.PathValue("id"), "version": input.Version + 1})
-	})
+		})
+		api.Handle("DELETE /api/v1/dictionaries/items/{id}", "masterdata:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var code string
+		err := api.DB.QueryRow(r.Context(), `SELECT code FROM dictionary_item WHERE tenant_id=$1 AND id=$2`, p.TenantID, r.PathValue("id")).Scan(&code)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpapi.Error(http.StatusNotFound, "NOT_FOUND", "字典项不存在")
+			}
+			return err
+		}
+		var used int64
+		if err := api.DB.QueryRow(r.Context(), `SELECT count(*) FROM material WHERE tenant_id=$1 AND material_type=$2`, p.TenantID, code).Scan(&used); err != nil {
+			return err
+		}
+		if used > 0 {
+			return httpapi.Error(http.StatusConflict, "DICTIONARY_IN_USE", "该物料类型已被物料使用，不允许删除")
+		}
+		deleteSQL := `DELETE FROM dictionary_item WHERE tenant_id=$1 AND id=$2`
+		if api.Writer != nil && api.Store != nil && api.Store.Plain != nil && api.Store.Secure != nil {
+			tx, err := api.Writer.Begin(r.Context(), p.TenantID)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(r.Context())
+			tx.MarkAggregate("dictionary_item", r.PathValue("id"))
+			if err := dualwrite.ExecBoth(r.Context(), tx, deleteSQL, p.TenantID, r.PathValue("id")); err != nil {
+				return err
+			}
+			auditTx := tx.Secure()
+			if auditTx == nil {
+				auditTx = tx.Plain()
+			}
+			if err := httpapi.Audit(r.Context(), auditTx, p, api.Config.NodeID, "delete", "dictionary_item", r.PathValue("id"), nil,
+				map[string]any{"code": code}, ""); err != nil {
+				return err
+			}
+			if err := tx.Commit(r.Context()); err != nil {
+				return err
+			}
+		} else {
+			if _, err := api.DB.Exec(r.Context(), deleteSQL, p.TenantID, r.PathValue("id")); err != nil {
+				return err
+			}
+		}
+		dictOptionsInvalidateTenant(p.TenantID)
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"ok": true})
+		})
 }
 
 var _ = json.Marshal

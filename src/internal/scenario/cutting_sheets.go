@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -70,7 +71,10 @@ func registerCuttingSheets(api *httpapi.API) {
 		args = append(args, 200)
 		rows, err := api.DB.Query(r.Context(), `SELECT s.id,s.cutting_no,s.scene_type,s.scene_sub,s.cutting_date,s.status,
 			COALESCE(c.name,''),COALESCE(s.remark,''),s.version,COALESCE(p.project_code,''),COALESCE(s.project_id,''),
-			(SELECT COUNT(*) FROM cutting_bed b WHERE b.tenant_id=s.tenant_id AND b.sheet_id=s.id)
+			(SELECT COUNT(*) FROM cutting_bed b WHERE b.tenant_id=s.tenant_id AND b.sheet_id=s.id),
+			COALESCE((SELECT b.style_no FROM cutting_bed b WHERE b.tenant_id=s.tenant_id AND b.sheet_id=s.id ORDER BY b.sort_no,b.id LIMIT 1),''),
+			COALESCE((SELECT b.color FROM cutting_bed b WHERE b.tenant_id=s.tenant_id AND b.sheet_id=s.id ORDER BY b.sort_no,b.id LIMIT 1),''),
+			COALESCE(s.total_qty,(SELECT COALESCE(SUM(d.piece_qty),0) FROM cutting_bed b JOIN cutting_bundle_detail d ON d.tenant_id=b.tenant_id AND d.bed_id=b.id WHERE b.tenant_id=s.tenant_id AND b.sheet_id=s.id))
 			FROM cutting_sheet s LEFT JOIN customer c ON c.tenant_id=s.tenant_id AND c.id=s.customer_id
 			LEFT JOIN project p ON p.tenant_id=s.tenant_id AND p.id=s.project_id
 			WHERE `+where+fmt.Sprintf(" ORDER BY s.cutting_date DESC,s.id DESC LIMIT $%d", len(args)), args...)
@@ -80,14 +84,14 @@ func registerCuttingSheets(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, no, st, sub, status, customer, remark, projectCode, projectID string
-			var cuttingDate, version, bedCount int64
-			if err := rows.Scan(&id, &no, &st, &sub, &cuttingDate, &status, &customer, &remark, &version, &projectCode, &projectID, &bedCount); err != nil {
+			var id, no, st, sub, status, customer, remark, projectCode, projectID, styleNo, color string
+			var cuttingDate, version, bedCount, pieceQty int64
+			if err := rows.Scan(&id, &no, &st, &sub, &cuttingDate, &status, &customer, &remark, &version, &projectCode, &projectID, &bedCount, &styleNo, &color, &pieceQty); err != nil {
 				return err
 			}
 			items = append(items, map[string]any{"id": id, "cutting_no": no, "scene_type": st, "scene_sub": sub,
 				"cutting_date": cuttingDate, "status": status, "customer_name": customer, "remark": remark,
-				"project_code": projectCode, "project_id": projectID,
+				"project_code": projectCode, "project_id": projectID, "style_no": styleNo, "color": color, "piece_qty": pieceQty,
 				"version": version, "bed_count": bedCount, "outsource": isOutsourceScene(st)})
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"items": items})
@@ -444,29 +448,33 @@ func registerCuttingSheets(api *httpapi.API) {
 		/* 本床裁片数(cut_qty)与下级明细件数(piece_qty)彼此独立：
 		 * 保存扎号明细不再改动/校验裁片数，裁片数由床次行单独维护。
 		 * 仅发布到工单时要求裁片数>0（既有 cutting_order CHECK 约束）。 */
-		/* 已锁定行不允许删除或改数 */
-		if _, err := tx.Exec(ctx, `DELETE FROM cutting_bundle_detail WHERE tenant_id=$1 AND bed_id=$2 AND locked=FALSE`, p.TenantID, in.BedID); err != nil {
+		/* 已锁定行不允许删除或改数：先删掉本次未提交的未锁定行，保留已提交行再逐行 UPDATE */
+		submittedIDs := []string{}
+		submittedSet := map[string]bool{}
+		for _, d := range in.Rows {
+			if d.ID != "" && !submittedSet[d.ID] {
+				submittedSet[d.ID] = true
+				submittedIDs = append(submittedIDs, d.ID)
+			}
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM cutting_bundle_detail WHERE tenant_id=$1 AND bed_id=$2 AND locked=FALSE AND NOT (id = ANY($3::text[]))`, p.TenantID, in.BedID, submittedIDs); err != nil {
 			return err
 		}
 		var lockedCount int64
 		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM cutting_bundle_detail WHERE tenant_id=$1 AND bed_id=$2`, p.TenantID, in.BedID).Scan(&lockedCount); err != nil {
 			return err
 		}
-		submitLocked := map[string]detailInput{}
-		for _, d := range in.Rows {
-			if d.ID != "" {
-				submitLocked[d.ID] = d
-			}
-		}
-		if lockedCount > 0 && len(submitLocked) == 0 {
+		if lockedCount > 0 && len(submittedIDs) == 0 {
 			return httpapi.Error(http.StatusConflict, "CUTTING_BUNDLE_LOCKED", "存在已锁定的扎号，请保留原记录后再保存")
 		}
 		now := platformNow()
-		for idx, d := range in.Rows {
-			if d.ID != "" {
-				continue
-			}
-			id := platformNewID()
+		type existingRow struct {
+			data  detailInput
+			index int
+		}
+		existing := []existingRow{}
+		toInsert := []existingRow{}
+		insertDetail := func(d detailInput, idx int, id string) error {
 			sortNo := d.SortNo
 			if sortNo == 0 {
 				sortNo = idx + 1
@@ -475,11 +483,61 @@ func registerCuttingSheets(api *httpapi.API) {
 			if parts == nil {
 				parts = []string{}
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO cutting_bundle_detail(tenant_id,id,bed_id,work_order_no,style_no,color,bed_no,
+			_, err := tx.Exec(ctx, `INSERT INTO cutting_bundle_detail(tenant_id,id,bed_id,work_order_no,style_no,color,bed_no,
 				size,bundle_no,piece_qty,parts,sort_no,locked,created_at,created_by,created_node,updated_at,updated_by,updated_node)
 				VALUES($1,$2,$3,NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11::jsonb,$12,FALSE,$13,$14,$15,$13,$14,$15)`,
 				p.TenantID, id, in.BedID, d.WorkOrderNo, d.StyleNo, bed.Color, bed.BedNo, d.Size, d.BundleNo,
+				d.PieceQty, jsonString(parts), sortNo, now, p.UserID, api.Config.NodeID)
+			return err
+		}
+		/* 先把已提交行的扎号临时化，避免交换扎号时撞唯一约束 */
+		for idx, d := range in.Rows {
+			if d.ID == "" {
+				toInsert = append(toInsert, existingRow{data: d, index: idx})
+				continue
+			}
+			tag, err := tx.Exec(ctx, `UPDATE cutting_bundle_detail SET bundle_no=$4 WHERE tenant_id=$1 AND bed_id=$2 AND id=$3 AND locked=FALSE`,
+				p.TenantID, in.BedID, d.ID, "__updating__"+d.ID)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() > 0 {
+				existing = append(existing, existingRow{data: d, index: idx})
+				continue
+			}
+			var locked bool
+			err = tx.QueryRow(ctx, `SELECT locked FROM cutting_bundle_detail WHERE tenant_id=$1 AND bed_id=$2 AND id=$3`, p.TenantID, in.BedID, d.ID).Scan(&locked)
+			if err == nil {
+				if locked {
+					continue
+				}
+				toInsert = append(toInsert, existingRow{data: d, index: idx})
+			} else if errors.Is(err, pgx.ErrNoRows) {
+				toInsert = append(toInsert, existingRow{data: d, index: idx})
+			} else {
+				return err
+			}
+		}
+		for _, item := range existing {
+			d := item.data
+			sortNo := d.SortNo
+			if sortNo == 0 {
+				sortNo = item.index + 1
+			}
+			parts := d.Parts
+			if parts == nil {
+				parts = []string{}
+			}
+			if _, err := tx.Exec(ctx, `UPDATE cutting_bundle_detail SET work_order_no=NULLIF($4,''),style_no=NULLIF($5,''),color=$6,bed_no=$7,
+				size=$8,bundle_no=$9,piece_qty=$10,parts=$11::jsonb,sort_no=$12,updated_at=$13,updated_by=$14,updated_node=$15,version=version+1
+				WHERE tenant_id=$1 AND bed_id=$2 AND id=$3 AND locked=FALSE`,
+				p.TenantID, in.BedID, d.ID, d.WorkOrderNo, d.StyleNo, bed.Color, bed.BedNo, d.Size, d.BundleNo,
 				d.PieceQty, jsonString(parts), sortNo, now, p.UserID, api.Config.NodeID); err != nil {
+				return err
+			}
+		}
+		for _, item := range toInsert {
+			if err := insertDetail(item.data, item.index, platformNewID()); err != nil {
 				return err
 			}
 		}
@@ -520,15 +578,19 @@ func registerCuttingSheets(api *httpapi.API) {
 			return httpapi.Error(http.StatusForbidden, "FORBIDDEN", "缺少必要权限：print:read")
 		}
 		var in struct {
-			IDs    []string `json:"ids"`
-			BedID  string   `json:"bed_id"`
-			Copies int      `json:"copies"`
+			IDs     []string `json:"ids"`
+			BedID   string   `json:"bed_id"`
+			Copies  int      `json:"copies"`
+			Collate bool     `json:"collate"`
 		}
 		if err := httpapi.Decode(r, &in); err != nil {
 			return err
 		}
 		if in.Copies <= 0 {
 			in.Copies = 1
+		}
+		if in.Copies > 50 {
+			in.Copies = 50
 		}
 		if len(in.IDs) == 0 && in.BedID == "" {
 			return httpapi.Error(http.StatusBadRequest, "PRINT_TARGET_REQUIRED", "请指定要打印的扎号或整床")
@@ -556,15 +618,28 @@ func registerCuttingSheets(api *httpapi.API) {
 		defer rows.Close()
 		items := []map[string]any{}
 		for rows.Next() {
-			var id, cuttingNo, styleNo, color, bedNo, size, bundleNo, parts, woNo string
+			var id, cuttingNo, styleNo, color, bedNo, size, bundleNo, partsRaw, woNo string
 			var qty int64
-			if err := rows.Scan(&id, &cuttingNo, &styleNo, &color, &bedNo, &size, &bundleNo, &qty, &parts, &woNo); err != nil {
+			if err := rows.Scan(&id, &cuttingNo, &styleNo, &color, &bedNo, &size, &bundleNo, &qty, &partsRaw, &woNo); err != nil {
 				return err
 			}
-			items = append(items, map[string]any{"id": id, "cutting_no": cuttingNo, "style_no": styleNo,
-				"color": color, "bed_no": bedNo, "size": size, "bundle_no": bundleNo, "piece_qty": qty,
-				"parts": parseParts(parts), "work_order_no": woNo,
-				"qrcode": fmt.Sprintf("%s|%s|%s|%s|%s", cuttingNo, bedNo, bundleNo, size, color)})
+			parts := parseParts(partsRaw)
+			if len(parts) == 0 {
+				parts = []string{""}
+			}
+			/* 每个部位单独一张菲票；未填部位时保留一张整件票 */
+			for _, partName := range parts {
+				qrcode := fmt.Sprintf("%s|%s|%s|%s|%s", cuttingNo, bedNo, bundleNo, size, color)
+				if partName != "" {
+					qrcode += "|" + partName
+				}
+				items = append(items, map[string]any{"id": id, "cutting_no": cuttingNo, "style_no": styleNo,
+					"color": color, "bed_no": bedNo, "size": size, "bundle_no": bundleNo, "piece_qty": qty,
+					"part_name": partName, "parts": []string{partName}, "work_order_no": woNo, "qrcode": qrcode})
+			}
+		}
+		if len(items) > 1000 {
+			return httpapi.Error(http.StatusBadRequest, "PRINT_LIMIT_EXCEEDED", "单次打印最多 1000 张菲票")
 		}
 		/* 打印任务（print_job）：无打印机/模板时只返回渲染载荷，前端走浏览器打印 */
 		var printerID, templateID string
@@ -578,7 +653,7 @@ func registerCuttingSheets(api *httpapi.API) {
 				p.TenantID, jobID, printerID, templateID, in.BedID, jsonString(items), in.Copies, p.UserID, platformNow())
 		}
 		if err := auditWrite(r.Context(), api, p, "print_cutting_tickets", "cutting_bundle_detail", in.BedID,
-			map[string]any{"ticket_count": len(items), "copies": in.Copies, "job_id": jobID}); err != nil {
+			map[string]any{"ticket_count": len(items), "copies": in.Copies, "collate": in.Collate, "job_id": jobID}); err != nil {
 			return err
 		}
 		return httpapi.JSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items), "job_id": jobID,
@@ -618,7 +693,7 @@ func registerCuttingSheets(api *httpapi.API) {
 			}
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT id,size,bundle_no,piece_qty,color,bed_no FROM cutting_bundle_detail
+		rows, err := tx.Query(ctx, `SELECT id,size,bundle_no,piece_qty,color,bed_no,parts::text FROM cutting_bundle_detail
 			WHERE tenant_id=$1 AND bed_id=$2 AND bundle_id IS NULL ORDER BY sort_no,id`, p.TenantID, in.BedID)
 		if err != nil {
 			return err
@@ -626,18 +701,22 @@ func registerCuttingSheets(api *httpapi.API) {
 		type drow struct {
 			id, size, bundleNo, color, bedNo string
 			qty                              int64
+			parts                            []string
 		}
 		list := []drow{}
 		for rows.Next() {
 			var d drow
-			if err := rows.Scan(&d.id, &d.size, &d.bundleNo, &d.qty, &d.color, &d.bedNo); err != nil {
+			var partsRaw string
+			if err := rows.Scan(&d.id, &d.size, &d.bundleNo, &d.qty, &d.color, &d.bedNo, &partsRaw); err != nil {
 				rows.Close()
 				return err
 			}
+			d.parts = parseParts(partsRaw)
 			list = append(list, d)
 		}
 		rows.Close()
 		now := platformNow()
+		ticketCount := int64(0)
 		for _, d := range list {
 			/* 复用既有 cutting_order（一工单一张），没有则补建 */
 			var cuttingOrderID string
@@ -665,19 +744,42 @@ func registerCuttingSheets(api *httpapi.API) {
 				p.TenantID, bundleID, bed.WorkOrderID, detailID, d.bundleNo, d.bedNo, d.color, d.size, d.qty, now); err != nil {
 				return err
 			}
-			ticketID := platformNewID()
-			codeSource := strings.ToUpper(strings.ReplaceAll(d.bundleNo+bundleID+ticketID, "-", ""))
-			if len(codeSource) > 20 {
-				codeSource = codeSource[:20]
+			parts := d.parts
+			if len(parts) == 0 {
+				parts = []string{"整件"}
 			}
-			publicCode := "T" + codeSource
-			if _, err := tx.Exec(ctx, `INSERT INTO ticket(tenant_id,id,bundle_id,public_code,signature_key_id,payload_hash,status,created_at)
-				VALUES($1,$2,$3,$4,'scene',md5($5),'active',$6)`,
-				p.TenantID, ticketID, bundleID, publicCode, d.bundleNo, now); err != nil {
-				return err
+			firstTicketID := ""
+			for pi, partName := range parts {
+				partCode := fmt.Sprintf("P%d", pi+1)
+				partName = strings.TrimSpace(partName)
+				if len(parts) == 1 && partName == "整件" {
+					partCode = "whole"
+				}
+				partID := platformNewID()
+				if _, err := tx.Exec(ctx, `INSERT INTO bundle_part(tenant_id,id,bundle_id,part_code,part_name,sort_no,qty,status,
+					created_at,created_by,created_node,updated_at,updated_by,updated_node)
+					VALUES($1,$2,$3,$4,$5,$6,$7,'active',$8,$9,$10,$8,$9,$10)`,
+					p.TenantID, partID, bundleID, partCode, partName, pi+1, d.qty, now, p.UserID, api.Config.NodeID); err != nil {
+					return err
+				}
+				ticketID := platformNewID()
+				if firstTicketID == "" {
+					firstTicketID = ticketID
+				}
+				codeSource := strings.ToUpper(strings.ReplaceAll(d.bundleNo+bundleID+ticketID, "-", ""))
+				if len(codeSource) > 20 {
+					codeSource = codeSource[:20]
+				}
+				publicCode := "T" + codeSource
+				if _, err := tx.Exec(ctx, `INSERT INTO ticket(tenant_id,id,bundle_id,bundle_part_id,part_code,part_name,public_code,
+					signature_key_id,payload_hash,status,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,'scene',md5($8),'active',$9)`,
+					p.TenantID, ticketID, bundleID, partID, partCode, partName, publicCode, d.bundleNo, now); err != nil {
+					return err
+				}
+				ticketCount++
 			}
 			if _, err := tx.Exec(ctx, `UPDATE cutting_bundle_detail SET bundle_id=$3,ticket_id=$4,updated_at=$5,updated_by=$6,updated_node=$7
-				WHERE tenant_id=$1 AND id=$2`, p.TenantID, d.id, bundleID, ticketID, now, p.UserID, api.Config.NodeID); err != nil {
+				WHERE tenant_id=$1 AND id=$2`, p.TenantID, d.id, bundleID, firstTicketID, now, p.UserID, api.Config.NodeID); err != nil {
 				return err
 			}
 		}
@@ -690,13 +792,13 @@ func registerCuttingSheets(api *httpapi.API) {
 			return err
 		}
 		if err := httpapi.Audit(ctx, tx, p, api.Config.NodeID, "publish_cutting_sheet", "cutting_sheet", r.PathValue("id"), nil,
-			map[string]any{"bed_id": in.BedID, "published": len(list)}, ""); err != nil {
+			map[string]any{"bed_id": in.BedID, "published": len(list), "tickets": ticketCount}, ""); err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
-		return httpapi.JSON(w, http.StatusOK, map[string]any{"published": true, "bundles": len(list)})
+		return httpapi.JSON(w, http.StatusOK, map[string]any{"published": true, "bundles": len(list), "tickets": ticketCount})
 	})
 }
 
@@ -879,5 +981,15 @@ func parseParts(raw string) []string {
 	if json.Unmarshal([]byte(raw), &v) != nil || v == nil {
 		return []string{}
 	}
-	return v
+	seen := map[string]bool{}
+	out := []string{}
+	for _, item := range v {
+		name := strings.TrimSpace(item)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }

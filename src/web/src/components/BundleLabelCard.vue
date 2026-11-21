@@ -27,7 +27,7 @@ function formatDate(micros?: number) {
     <div v-else class="bl-noqr">二维码未生成</div>
     <div v-if="label.public_code" class="bl-code">{{ label.public_code }}</div>
     <div class="bl-rows">
-      <div><span>项目号</span><b>{{ label.project_code || '—' }}</b></div>
+      <div><span>订单号</span><b>{{ label.project_code || '—' }}</b></div>
       <div><span>扎号</span><b>{{ label.bundle_no || '—' }}</b></div>
       <div><span>品牌</span><b>{{ label.brand || '—' }}</b></div>
       <div><span>款式</span><b>{{ label.style || '—' }}</b></div>

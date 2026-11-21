@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from './api'
 import { confirmLogout } from './session'
+import { nav, defaultHiddenPaths } from './nav'
 import ToastHost from './components/ToastHost.vue'
 import GuideAssistant from './components/GuideAssistant.vue'
 import HelpBot from './components/HelpBot.vue'
@@ -23,71 +24,13 @@ const canManageIdentity = computed(() => !!permissions.value['identity:write'])
 const currentUserName = ref('')
 /* 工作页面品牌：本厂配置的 logo 与系统名称（未配置时显示本厂厂名） */
 const branding = ref<{ system_name?: string | null; tenant_name?: string | null; logo_url?: string | null }>({})
-/* 场景化菜单（设计 v0.02-002 6.12）：工作台 / 生产管理 / 基本资料 / 分析中心 / 系统管理 五个一级组。
- * 业务场景不单设菜单，作为项目工单属性贯穿筛选；外协与取证能力并入生产管理相应环节。
- * 分组顺序即 groups 计算顺序（Set 保持首次出现顺序），移动端取前 5 个可见入口。 */
-const nav = [
-  /* 工作台 */
-  { path: '/workbench/A03', label: '工作台', icon: '⌂', group: '工作台', permission: 'workbench:read' },
-  { path: '/intake/new', label: '新建项目向导', icon: '✚', group: '工作台', permission: 'intake:write' },
-  { path: '/notifications/A04', label: '消息与会话', icon: '✉', group: '工作台', permission: '' },
-  { path: '/evidence', label: '巡厂与证据', icon: '◉', group: '工作台', permission: 'video:view' },
-  { path: '/attendance/screen', label: '考勤屏', icon: '▣', group: '工作台', permission: 'attendance:screen' },
-  { path: '/attendance/records', label: '简单考勤', icon: '⏱', group: '工作台', permission: 'attendance:manage' },
-
-  /* 生产管理：按生产链路顺序（产品订单 → 物料入库 → 裁床 → 工序 → 工单 → 派工 → 报工 → 质检 → 入库 → 发货） */
-  { path: '/orders/C03', label: '产品订单管理', icon: '▤', group: '生产管理', permission: 'work_order:read' },
-  { path: '/materials/receipts', label: '物料入库', icon: '▥', group: '生产管理', permission: 'inventory:read' },
-  { path: '/cutting/sheets', label: '裁床', icon: '▤', group: '生产管理', permission: 'cutting:read' },
-  { path: '/markers/C11', label: '唛架管理', icon: '▤', group: '生产管理', permission: 'marker:read' },
-  { path: '/print/C10', label: '菲票打印', icon: '⎙', group: '生产管理', permission: 'print:read' },
-  { path: '/labels/C12', label: '扎标签', icon: '▥', group: '生产管理', permission: 'work_order:read' },
-  { path: '/products/B01', label: '产品工序', icon: '◇', group: '生产管理', permission: 'product:read' },
-  { path: '/tasks/D01', label: '派工', icon: '✓', group: '生产管理', permission: 'task:read' },
-  { path: '/reports/D06?tab=report', label: '报工', icon: '◎', group: '生产管理', permission: 'report:read' },
-  { path: '/reports/D06?tab=review', label: '审核报工', icon: '⊘', group: '生产管理', permission: 'report:read' },
-  { path: '/quality/process-inspections', label: '线检', icon: '◉', group: '生产管理', permission: 'work_order:read' },
-  { path: '/quality/E01', label: '总检', icon: '▣', group: '生产管理', permission: 'work_order:read' },
-  { path: '/finished-receipts', label: '成品入库', icon: '▦', group: '生产管理', permission: 'work_order:read' },
-  { path: '/shipments/E04', label: '发货', icon: '⇧', group: '生产管理', permission: 'shipment:read' },
-  { path: '/rework/E03', label: '返工复检', icon: '⟳', group: '生产管理', permission: 'work_order:read' },
-  { path: '/outsource/orders', label: '外协管理', icon: '⇄', group: '生产管理', permission: 'outsource:read' },
-
-  /* 基本资料 */
-  { path: '/masterdata/customers', label: '客户资料', icon: '◈', group: '基本资料', permission: 'masterdata:read' },
-  { path: '/masterdata/B06', label: '员工信息', icon: '♙', group: '基本资料', permission: '' },
-  { path: '/settings/workshops', label: '车间管理', icon: '⌂', group: '基本资料', permission: 'workshop:read' },
-  { path: '/settings/lines', label: '生产线管理', icon: '▤', group: '基本资料', permission: 'line:read' },
-  { path: '/settings/teams', label: '生产组管理', icon: '♟', group: '基本资料', permission: 'team:read' },
-  { path: '/settings/users', label: '人员与组织', icon: '♙', group: '基本资料', permission: 'identity:read' },
-  { path: '/materials/master', label: '仓库信息', icon: '▦', group: '基本资料', permission: 'warehouse:read' },
-  { path: '/process-standards', label: '标准工序', icon: '☷', group: '基本资料', permission: 'process:read' },
-  { path: '/settings/dictionaries', label: '数据字典', icon: '☰', group: '基本资料', permission: 'masterdata:read' },
-
-  /* 分析中心（保留原有 + 员工薪水分析） */
-  { path: '/progress/F01', label: '进度与统计', icon: '◫', group: '分析中心', permission: 'progress:read' },
-  { path: '/payroll/F09', label: '工资单管理', icon: '¥', group: '分析中心', permission: 'payroll:read' },
-  { path: '/analysis/salary', label: '员工薪水分析', icon: '¥', group: '分析中心', permission: 'salary:read' },
-  { path: '/mywage/H02', label: '我的工资', icon: '¥', group: '分析中心', permission: '' },
-
-  /* 系统管理（子菜单与原来一致） */
-  { path: '/tenant/profile', label: '本厂信息', icon: '⌂', group: '系统管理', permission: '' },
-  { path: '/portal/settings', label: '门户内容', icon: '▤', group: '系统管理', permission: '' },
-  { path: '/identity/G05', label: '用户角色权限', icon: '⚷', group: '系统管理', permission: 'identity:read' },
-  { path: '/identity/sensitive-requests', label: '敏感信息授权审批', icon: '✉', group: '系统管理', permission: 'identity:write' },
-  { path: '/settings/G01', label: '功能设置', icon: '⚙', group: '系统管理', permission: 'settings:read' },
-  { path: '/import-export/G09', label: '导入导出', icon: '⇅', group: '系统管理', permission: 'settings:read' },
-  { path: '/backup/G10', label: '备份与同步', icon: '⛁', group: '系统管理', permission: 'settings:read' },
-  { path: '/tenant/backups', label: '明文备份导出', icon: '⚿', group: '系统管理', permission: 'backup:export' },
-  { path: '/audit/G08', label: '审计与字段', icon: '⌘', group: '系统管理', permission: 'settings:read' },
-]
-/* 唛架管理 / 菲票打印 / 扎标签：默认不进入侧边导航（入口收敛到裁床单与扫码页）。
- * 需要临时显示时，控制台执行 localStorage.setItem('clothp_reveal_hidden_nav','1') 后刷新。 */
-const defaultHiddenPaths = ['/markers/C11', '/print/C10', '/labels/C12']
+/* 场景化菜单与默认隐藏项已抽到 ./nav，供流程待办拓扑配置共享。 */
 const revealHiddenNav = typeof localStorage !== 'undefined' && localStorage.getItem('clothp_reveal_hidden_nav') === '1'
-const visibleNav = computed(() => nav.filter(item =>
-  (!item.permission || permissions.value[item.permission]) &&
-  (revealHiddenNav || !defaultHiddenPaths.includes(item.path))))
+const visibleNav = computed(() => nav.filter(item => {
+  const codes = item.permission ? item.permission.split(',') : []
+  return (!codes.length || codes.some(code => permissions.value[code])) &&
+    (revealHiddenNav || !defaultHiddenPaths.includes(item.path))
+}))
 const groups = computed(() => [...new Set(visibleNav.value.map(item => item.group))])
 /* 手机端岗位首页固定入口（设计 6.6 / 6.12.9）：按可见权限取常用岗位动作，不混排全部分组 */
 const mobilePaths = ['/workbench/A03', '/tasks/D01', '/reports/D06?tab=report', '/reports/D06?tab=review', '/quality/process-inspections', '/materials/receipts', '/mywage/H02']
@@ -110,6 +53,7 @@ async function loadPermissions() {
     ])
     permissions.value = permissionData.actions
     currentUserName.value = me.user.employee_name || me.user.login_name
+    void loadReminders()
   } catch {
     permissions.value = {}
     currentUserName.value = ''
@@ -161,6 +105,7 @@ function onBrandingUpdated() { void loadBranding() }
 const reminderOpen = ref(false)
 const reminders = ref<any[]>([])
 const reminderUnread = ref(0)
+const navBadges = ref<Record<string, number>>({})
 const reminderLoading = ref(false)
 const reminderError = ref('')
 const reminderDetailId = ref('')
@@ -174,9 +119,13 @@ async function loadReminders() {
   if (isLogin.value || !localStorage.getItem('clothp_access_token')) return
   reminderLoading.value = true; reminderError.value = ''
   try {
-    const res = await api<{ items: any[]; unread_count: number }>('/notifications?read=false&limit=20', {}, { silent: true })
+    const [res, badgeRes] = await Promise.all([
+      api<{ items: any[]; unread_count: number }>('/notifications?read=false&limit=20', {}, { silent: true }),
+      api<{ badges: Record<string, number> }>('/workflow-badges', {}, { silent: true }).catch(() => ({ badges: {} })),
+    ])
     reminders.value = res.items || []
     reminderUnread.value = res.unread_count || 0
+    navBadges.value = badgeRes.badges || {}
   } catch { /* 外壳提醒加载失败不弹提示 */ } finally { reminderLoading.value = false }
 }
 function openReminders() { reminderOpen.value = true; void loadReminders() }
@@ -191,13 +140,16 @@ function onReminderReviewed() { reminderDetailId.value = ''; void loadReminders(
 /* 登录后从独立页切回工作台时立即刷新提醒（不用 immediate，避免 setup 阶段引用未初始化的函数） */
 watch(isLogin, login => { if (!login) void loadReminders() })
 
+function onMaterialOutboundChanged() { void loadReminders() }
 onMounted(() => {
   window.addEventListener('clothp-branding-updated', onBrandingUpdated)
+  window.addEventListener('clothp-material-outbound-changed', onMaterialOutboundChanged)
   void loadReminders()
   reminderTimer = setInterval(() => { void loadReminders() }, 30000)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('clothp-branding-updated', onBrandingUpdated)
+  window.removeEventListener('clothp-material-outbound-changed', onMaterialOutboundChanged)
   if (reminderTimer) clearInterval(reminderTimer)
 })
 </script>
@@ -226,6 +178,7 @@ onBeforeUnmount(() => {
         <div v-if="!collapsed" class="nav-group">{{ group }}</div>
         <RouterLink v-for="item in visibleNav.filter(n => n.group === group)" :key="item.path" :to="item.path" :title="item.label">
           <span class="nav-icon">{{ item.icon }}</span><span v-if="!collapsed">{{ item.label }}</span>
+          <span v-if="(navBadges[item.path] || 0) > 0" class="nav-badge">{{ (navBadges[item.path] || 0) > 99 ? '··' : navBadges[item.path] }}</span>
         </RouterLink>
       </nav>
       <!-- 导航中的问题助手入口：平台管理员与制衣厂管理员排查「没有权限」 -->
@@ -285,6 +238,7 @@ onBeforeUnmount(() => {
 .brand-menu-item.current{color:#2563eb;font-weight:600}
 .reminder-button{position:relative;border:1px solid #c7dcff;background:white;border-radius:8px;padding:6px 12px;color:#17255f;cursor:pointer;font-size:13px}
 .reminder-badge{display:inline-block;margin-left:6px;min-width:18px;padding:0 5px;border-radius:9px;background:#e11d48;color:#fff;font-size:11px;line-height:18px;text-align:center}
+.nav-badge{display:inline-block;margin-left:auto;min-width:18px;padding:0 5px;border-radius:9px;background:#e11d48;color:#fff;font-size:11px;line-height:18px;text-align:center}
 .help-bot-entry{position:sticky;bottom:0;width:100%;margin-top:18px;display:flex;align-items:center;gap:10px;border:1px solid rgba(255,255,255,.18);border-radius:10px;background:rgba(37,99,235,.28);color:#e8f0ff;padding:10px 12px;font-size:13px;text-align:left}
 .help-bot-entry:hover{background:rgba(37,99,235,.55)}
 .hb-entry-icon{font-size:16px;flex:none}

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import NetworkBackground from '../components/NetworkBackground.vue'
 import BgAnimToggle from '../components/BgAnimToggle.vue'
 import { api } from '../api'
+import { formatMicros } from '../date'
 import { toastError, toastSuccess } from '../toast'
 import { syncNeedPhone } from '../phoneGate'
 import { confirmLogout, logoutToLogin } from '../session'
@@ -307,7 +308,7 @@ const extension = ref<TrialExtensionRequest | null>(null)
 const extendReason = ref('')
 const extendOpen = ref(false)
 const extendBusy = ref(false)
-const formatDate = (micros?: number | null) => micros ? new Date(micros / 1000).toLocaleDateString('zh-CN') : ''
+const formatDate = (micros?: number | null) => formatMicros(micros)
 const extensionText = computed(() => {
   const r = extension.value
   if (!r) return ''

@@ -2,6 +2,7 @@ package production
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -237,7 +238,8 @@ func registerOrders(api *httpapi.API) {
 			COALESCE(NULLIF(p.product_name,''),NULLIF(p2.name,''),''),
 			COALESCE(p.style_no,''),COALESCE(p.style_name,''),p.order_qty,p.customer_unit_price::text,p.external_unit_price::text,p.required_delivery_date,p.status,p.version,COALESCE((SELECT SUM(sl.qty) FROM shipment_line sl JOIN shipment s ON s.tenant_id=sl.tenant_id AND s.id=sl.shipment_id WHERE sl.tenant_id=p.tenant_id AND s.project_id=p.id AND s.status='confirmed'),0)
 			- COALESCE((SELECT SUM(sr.qty) FROM shipment_return sr WHERE sr.tenant_id=p.tenant_id AND sr.project_id=p.id AND sr.status='posted'),0),
-			COALESCE(p2.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p2.tenant_id AND l.owner_type='product' AND l.owner_id=p2.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id
+			COALESCE(p2.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p2.tenant_id AND l.owner_type='product' AND l.owner_id=p2.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id,
+			p.product_id
 			FROM project p LEFT JOIN customer c ON c.tenant_id=p.tenant_id AND c.id=p.customer_id
 			LEFT JOIN product p2 ON p2.tenant_id=p.tenant_id AND p2.id=p.product_id WHERE p.tenant_id=$1 ORDER BY p.id DESC`, p.TenantID)
 		if err != nil {
@@ -249,15 +251,15 @@ func registerOrders(api *httpapi.API) {
 			var id, code, customer, product, styleNo, styleName, price, external, status string
 			var qty, version, shipped int64
 			var delivery *string
-			var imageID *string
-			if err := rows.Scan(&id, &code, &customer, &product, &styleNo, &styleName, &qty, &price, &external, &delivery, &status, &version, &shipped, &imageID); err != nil {
+			var imageID, productID *string
+			if err := rows.Scan(&id, &code, &customer, &product, &styleNo, &styleName, &qty, &price, &external, &delivery, &status, &version, &shipped, &imageID, &productID); err != nil {
 				return err
 			}
 			unshipped := qty - shipped
 			if unshipped < 0 {
 				unshipped = 0
 			}
-			items = append(items, map[string]any{"id": id, "project_code": code, "customer_name": customer, "product_name": product, "style_no": styleNo, "style_name": styleName, "order_qty": qty, "shipped_qty": shipped, "customer_unit_price": price, "external_unit_price": external, "required_delivery_date": delivery, "status": status, "version": version, "unshipped_qty": unshipped, "image_attachment_id": imageID})
+			items = append(items, map[string]any{"id": id, "project_code": code, "customer_name": customer, "product_name": product, "product_id": productID, "style_no": styleNo, "style_name": styleName, "order_qty": qty, "shipped_qty": shipped, "customer_unit_price": price, "external_unit_price": external, "required_delivery_date": delivery, "status": status, "version": version, "unshipped_qty": unshipped, "image_attachment_id": imageID})
 		}
 		return httpapi.JSON(w, 200, map[string]any{"items": items})
 	})
@@ -667,6 +669,70 @@ func registerOrders(api *httpapi.API) {
 		}
 		return httpapi.JSON(w, 200, map[string]any{"deleted": true})
 	})
+	/* 编辑工单：计划数受项目订单总量约束（排除本工单自身），车间/产线联动校验；已结束工单不可改 */
+	api.Handle("PATCH /api/v1/work-orders/{id}", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Version           int64   `json:"version"`
+			PlannedProductQty int64   `json:"planned_product_qty"`
+			Priority          string  `json:"priority"`
+			WorkshopOrgUnitID *string `json:"workshop_org_unit_id"`
+			LineOrgUnitID     *string `json:"line_org_unit_id"`
+			PlannedStartAt    *int64  `json:"planned_start_at"`
+			PlannedEndAt      *int64  `json:"planned_end_at"`
+			Reason            string  `json:"reason"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		if in.PlannedProductQty <= 0 {
+			return httpapi.Error(400, "VALIDATION_ERROR", "计划产品数必须大于零")
+		}
+		if in.Priority != "normal" && in.Priority != "urgent" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "紧急程度只能是 normal 或 urgent")
+		}
+		tx, err := api.DB.Begin(r.Context())
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(r.Context())
+		var status, projectID string
+		var version int64
+		if err = tx.QueryRow(r.Context(), "SELECT status,project_id,version FROM work_order WHERE tenant_id=$1 AND id=$2 FOR UPDATE", p.TenantID, r.PathValue("id")).Scan(&status, &projectID, &version); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpapi.Error(404, "NOT_FOUND", "工单不存在")
+			}
+			return err
+		}
+		if in.Version != version {
+			return httpapi.Error(409, "VERSION_CONFLICT", "工单已变更，请刷新后重试")
+		}
+		if status == "completed" || status == "cancelled" {
+			return httpapi.Error(409, "INVALID_STATE", "已完成或已取消的工单不能编辑")
+		}
+		var orderQty, planned int64
+		if err = tx.QueryRow(r.Context(), `SELECT p.order_qty,COALESCE((SELECT SUM(w.planned_product_qty) FROM work_order w WHERE w.tenant_id=p.tenant_id AND w.project_id=p.id AND w.status<>'cancelled' AND w.id<>$3),0) FROM project p WHERE p.tenant_id=$1 AND p.id=$2`, p.TenantID, projectID, r.PathValue("id")).Scan(&orderQty, &planned); err != nil {
+			return err
+		}
+		if planned+in.PlannedProductQty > orderQty {
+			appErr := httpapi.Error(409, "QUANTITY_EXCEEDED", "同项目工单数量合计超过项目订单数")
+			appErr.Details = map[string]any{"order_qty": orderQty, "planned": planned, "requested": in.PlannedProductQty, "remaining": orderQty - planned}
+			return appErr
+		}
+		if err = validateWorkshopLine(r.Context(), tx, p.TenantID, in.WorkshopOrgUnitID, in.LineOrgUnitID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(r.Context(), `UPDATE work_order SET planned_product_qty=$1,priority=$2,workshop_org_unit_id=$3,line_org_unit_id=$4,planned_start_at=$5,planned_end_at=$6,version=version+1,updated_at=$7,updated_by=$8,updated_node=$9 WHERE tenant_id=$10 AND id=$11`, in.PlannedProductQty, in.Priority, in.WorkshopOrgUnitID, in.LineOrgUnitID, in.PlannedStartAt, in.PlannedEndAt, platform.Now(), p.UserID, api.Config.NodeID, p.TenantID, r.PathValue("id")); err != nil {
+			return err
+		}
+		response := map[string]any{"id": r.PathValue("id"), "version": version + 1}
+		if err = httpapi.Audit(r.Context(), tx, p, api.Config.NodeID, "update", "work_order", r.PathValue("id"), nil, response, in.Reason); err != nil {
+			return err
+		}
+		if err = tx.Commit(r.Context()); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 200, response)
+	})
 	api.Handle("DELETE /api/v1/work-orders/{id}", "work_order:write", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		tx, err := api.DB.Begin(r.Context())
 		if err != nil {
@@ -750,24 +816,29 @@ func listWorkOrders(api *httpapi.API, w http.ResponseWriter, r *http.Request, p 
 	}
 	args = append(args, limit+1)
 	rows, err := api.DB.Query(r.Context(), fmt.Sprintf(`SELECT w.id,w.work_order_code,COALESCE(p.name,'—'),w.planned_product_qty,w.status,w.priority,w.product_version,w.version,COALESCE(w.review_status,''),
-		w.scene_type,w.scene_sub,w.order_source,COALESCE(w.source_order_ref,''),
+		w.scene_type,w.scene_sub,w.order_source,COALESCE(w.source_order_ref,''),COALESCE(pj.project_code,''),COALESCE(pj.id,''),
 		COALESCE((SELECT SUM(t.planned_qty) FROM production_task t WHERE t.tenant_id=w.tenant_id AND t.work_order_id=w.id AND t.parent_task_id IS NULL),0),
 		/* 工单完成件数统一使用「已审核成品入库数」口径，与项目/产品进度一致。
 		 * 旧实现按生产报工统计，未派工/报工但已入库的工单会被算成零。 */
 		COALESCE((SELECT SUM(rl.qty) FROM finished_receipt rc JOIN finished_receipt_line rl ON rl.tenant_id=rc.tenant_id AND rl.receipt_id=rc.id WHERE rc.tenant_id=w.tenant_id AND rc.work_order_id=w.id AND rc.status='approved'),0),
-		COALESCE(p.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p.tenant_id AND l.owner_type='product' AND l.owner_id=p.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id
-		FROM work_order w LEFT JOIN product p ON p.tenant_id=w.tenant_id AND p.id=w.product_id WHERE %s ORDER BY w.id LIMIT $%d`, where, len(args)), args...)
+		COALESCE(p.image_attachment_id,(SELECT l.attachment_id FROM attachment_link l WHERE l.tenant_id=p.tenant_id AND l.owner_type='product' AND l.owner_id=p.id AND l.is_deleted=FALSE ORDER BY CASE WHEN l.usage_type='standard' THEN 0 ELSE 1 END,l.sort_no,l.id LIMIT 1)) AS image_attachment_id,
+		COALESCE((SELECT o.name FROM org_unit o WHERE o.tenant_id=w.tenant_id AND o.id=w.line_org_unit_id),'') AS line_name,
+		(SELECT COUNT(*) FROM work_order_group g WHERE g.tenant_id=w.tenant_id AND g.work_order_id=w.id),
+		(SELECT COUNT(*) FROM work_order_cutting_sheet s WHERE s.tenant_id=w.tenant_id AND s.work_order_id=w.id)
+		FROM work_order w LEFT JOIN product p ON p.tenant_id=w.tenant_id AND p.id=w.product_id
+		LEFT JOIN project pj ON pj.tenant_id=w.tenant_id AND pj.id=w.project_id WHERE %s ORDER BY w.id LIMIT $%d`, where, len(args)), args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, code, product, status, priority, reviewStatus, sceneType, sceneSub, orderSource, sourceRef string
-		var qty, productVersion, version, planned, finished int64
+		var id, code, product, status, priority, reviewStatus, sceneType, sceneSub, orderSource, sourceRef, projectCode, projectID string
+		var qty, productVersion, version, planned, finished, groupCount, sheetCount int64
 		var imageID *string
+		var lineName string
 		if err := rows.Scan(&id, &code, &product, &qty, &status, &priority, &productVersion, &version, &reviewStatus,
-			&sceneType, &sceneSub, &orderSource, &sourceRef, &planned, &finished, &imageID); err != nil {
+			&sceneType, &sceneSub, &orderSource, &sourceRef, &projectCode, &projectID, &planned, &finished, &imageID, &lineName, &groupCount, &sheetCount); err != nil {
 			return err
 		}
 		ratio := 0.0
@@ -775,7 +846,9 @@ func listWorkOrders(api *httpapi.API, w http.ResponseWriter, r *http.Request, p 
 			ratio = float64(finished) / float64(qty)
 		}
 		items = append(items, map[string]any{"id": id, "work_order_code": code, "product_name": product, "planned_product_qty": qty, "status": status, "priority": priority, "product_version": productVersion, "version": version, "review_status": reviewStatus, "planned_qty": planned, "approved_good_qty": finished, "progress_ratio": ratio, "image_attachment_id": imageID,
-			"scene_type": sceneType, "scene_sub": sceneSub, "order_source": orderSource, "source_order_ref": sourceRef})
+			"scene_type": sceneType, "scene_sub": sceneSub, "order_source": orderSource, "source_order_ref": sourceRef,
+			"project_code": projectCode, "project_id": projectID, "group_count": groupCount,
+			"line_name": lineName, "sheet_count": sheetCount})
 	}
 	hasMore := len(items) > limit
 	if hasMore {
@@ -1008,6 +1081,7 @@ func releaseWorkOrder(api *httpapi.API, w http.ResponseWriter, r *http.Request, 
 		seconds                      int64
 		parallel, critical, required bool
 		defects                      []byte
+		prevIDs                      []string
 	}
 	routes := []route{}
 	for rows.Next() {
@@ -1015,10 +1089,31 @@ func releaseWorkOrder(api *httpapi.API, w http.ResponseWriter, r *http.Request, 
 		if err := rows.Scan(&v.id, &v.code, &v.name, &v.sequence, &v.price, &v.ratio, &v.department, &v.seconds, &v.parallel, &v.critical, &v.required, &v.defects); err != nil {
 			return err
 		}
+		v.prevIDs = []string{}
 		routes = append(routes, v)
 	}
 	if len(routes) == 0 {
 		return httpapi.Error(409, "PRODUCT_PROCESS_EMPTY", "产品工序为空")
+	}
+	/* 读取工序 DAG 边，构建每个 product_process.id 的直接前驱列表，随工单快照固化 */
+	edgeRows, err := tx.Query(r.Context(), `SELECT from_id,to_id FROM product_process_edge WHERE tenant_id=$1 AND product_id=$2 AND product_version=$3`, p.TenantID, productID, productVersion)
+	if err != nil {
+		return err
+	}
+	prevByID := map[string][]string{}
+	for edgeRows.Next() {
+		var from, to string
+		if err := edgeRows.Scan(&from, &to); err != nil {
+			edgeRows.Close()
+			return err
+		}
+		prevByID[to] = append(prevByID[to], from)
+	}
+	edgeRows.Close()
+	for i := range routes {
+		if p := prevByID[routes[i].id]; len(p) > 0 {
+			routes[i].prevIDs = p
+		}
 	}
 	tasks := []map[string]any{}
 	for _, v := range routes {
@@ -1029,7 +1124,8 @@ func releaseWorkOrder(api *httpapi.API, w http.ResponseWriter, r *http.Request, 
 		}
 		snapshotID, taskID := platform.ID(), platform.ID()
 		flags := fmt.Sprintf(`{"parallel":%t,"critical":%t,"required":%t}`, v.parallel, v.critical, v.required)
-		if _, err = tx.Exec(r.Context(), `INSERT INTO work_order_process_snapshot(tenant_id,id,work_order_id,product_process_id,sequence_no,process_code,process_name,planned_qty,unit_price,report_ratio,department_id,standard_work_seconds,route_flags,defect_config,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, p.TenantID, snapshotID, r.PathValue("id"), v.id, v.sequence, v.code, v.name, qty, v.price, v.ratio, v.department, v.seconds, flags, v.defects, platform.Now()); err != nil {
+		prevJSON, _ := json.Marshal(v.prevIDs)
+		if _, err = tx.Exec(r.Context(), `INSERT INTO work_order_process_snapshot(tenant_id,id,work_order_id,product_process_id,sequence_no,process_code,process_name,planned_qty,unit_price,report_ratio,department_id,standard_work_seconds,route_flags,defect_config,prev_ids,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, p.TenantID, snapshotID, r.PathValue("id"), v.id, v.sequence, v.code, v.name, qty, v.price, v.ratio, v.department, v.seconds, flags, v.defects, string(prevJSON), platform.Now()); err != nil {
 			return err
 		}
 		now := platform.Now()

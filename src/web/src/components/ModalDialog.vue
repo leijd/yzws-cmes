@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, type CSSProperties } from 'vue'
-const props = defineProps<{ title: string; wide?: boolean; width?: string; bodyClass?: string }>()
+const props = defineProps<{ title: string; wide?: boolean; width?: string; height?: string; bodyClass?: string }>()
 const emit = defineEmits<{ close: [] }>()
 const position = ref<{ left: number; top: number } | null>(null)
 const modalStyle = computed<CSSProperties>(() => ({
   ...(props.width ? { width: props.width } : {}),
+  ...(props.height ? { height: props.height } : {}),
   ...(position.value ? { left: `${position.value.left}px`, top: `${position.value.top}px`, position: 'fixed' as const } : {}),
 }))
 let dragOrigin: { pointerX: number; pointerY: number; left: number; top: number } | null = null
@@ -30,7 +31,7 @@ function drag(event: PointerEvent) {
 function stopDrag() { dragOrigin = null }
 </script>
 <template>
-  <Teleport to="body"><div class="modal-backdrop" @mousedown.self="emit('close')"><section class="modal" :class="{ wide }" :style="modalStyle" role="dialog" aria-modal="true">
+  <Teleport to="body"><div class="modal-backdrop" @mousedown.self="emit('close')"><section class="modal" :class="{ wide, 'has-height': !!height }" :style="modalStyle" role="dialog" aria-modal="true">
     <header class="modal-header modal-drag-handle" @pointerdown="startDrag" @pointermove="drag" @pointerup="stopDrag" @pointercancel="stopDrag"><h2>{{ title }}</h2><button class="icon-button" @pointerdown.stop @click="emit('close')">×</button></header>
     <div class="modal-body" :class="bodyClass"><slot /></div>
     <footer v-if="$slots.footer" class="modal-footer"><slot name="footer" /></footer>

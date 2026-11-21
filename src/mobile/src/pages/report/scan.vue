@@ -68,12 +68,13 @@
         v-for="p in tasks"
         :key="p.task_id"
         class="process"
-        :class="{ active: selectedTaskId === p.task_id }"
-        @click="selectTask(p.task_id)"
+        :class="{ active: selectedTaskId === p.task_id, locked: !p.previous_ready }"
+        @click="selectTask(p)"
       >
         <view class="process-main">
           <text>{{ p.sequence_no }}. {{ p.process_name }}</text>
-          <text class="process-sub">已报 {{ p.reported_qty }} / 计划 {{ p.planned_qty }}</text>
+          <text class="process-sub">已报 {{ p.reported_qty }} / 计划 {{ p.planned_qty }}<template v-if="p.has_previous"> · 上游可用 {{ p.available_qty }}</template></text>
+          <text v-if="!p.previous_ready" class="process-lock">前道工序尚未报工，暂不可报</text>
         </view>
         <text v-if="selectedTaskId === p.task_id" class="check">✓</text>
       </view>
@@ -95,8 +96,9 @@
         <text class="label">备注</text>
         <input v-model.trim="remark" placeholder="选填" />
       </view>
-      <view class="hint">本工序剩余可报 {{ selectedTask.remaining_qty }} 件；同一扎同一工序只能报工一次。</view>
-      <button class="submit" :disabled="submitting || !ticket?.can_report" @click="submitReport">
+      <view class="hint">本工序剩余可报 {{ reportLimit }} 件；同一扎同一工序只能报工一次。</view>
+      <view v-if="!selectedTask.previous_ready" class="hint warn">前道工序尚未报工或审批，当前工序不能报工。</view>
+      <button class="submit" :disabled="submitting || !ticket?.can_report || !selectedTask.previous_ready" @click="submitReport">
         {{ submitting ? "提交中…" : "提交报工" }}
       </button>
     </view>
@@ -137,6 +139,9 @@ interface ScanTask {
   reported_qty: number;
   remaining_qty: number;
   assigned_qty: number;
+  available_qty?: number;
+  previous_ready?: boolean;
+  has_previous?: boolean;
 }
 
 interface ScanEmployee {
@@ -184,6 +189,12 @@ const submitting = ref(false);
 const selectedTask = computed(
   () => tasks.value.find((task) => task.task_id === selectedTaskId.value) || null
 );
+const reportLimit = computed(() => {
+  const task = selectedTask.value;
+  if (!task) return 0;
+  const remaining = Number(task.remaining_qty || 0);
+  return task.has_previous ? Math.max(0, Math.min(remaining, Number(task.available_qty || 0) - Number(task.reported_qty || 0))) : remaining;
+});
 const selectedEmployeeName = computed(
   () => employees.value.find((item) => item.id === selectedEmployeeId.value)?.name || ""
 );
@@ -231,8 +242,9 @@ async function resolve(payload: string) {
     dispatchQty.value = null;
     remark.value = "";
     manualCode.value = "";
-    if (res.tasks?.length) {
-      selectTask(res.tasks[0].task_id);
+    const ready = (res.tasks || []).find((task: ScanTask) => task.previous_ready !== false);
+    if (ready) {
+      selectTask(ready);
     } else {
       uni.showToast({ title: "该扎没有可操作工序", icon: "none" });
     }
@@ -241,8 +253,12 @@ async function resolve(payload: string) {
   }
 }
 
-function selectTask(taskId: string) {
-  selectedTaskId.value = taskId;
+function selectTask(task: any) {
+  if (!task?.previous_ready) {
+    uni.showToast({ title: "前道工序尚未报工，不能选择该工序", icon: "none" });
+    return;
+  }
+  selectedTaskId.value = task.task_id;
   goodQty.value = null;
   defectQty.value = null;
   dispatchQty.value = assignableQty.value > 0 ? assignableQty.value : null;
@@ -259,6 +275,10 @@ async function submitReport() {
   const defect = Number(defectQty.value || 0);
   if (good <= 0 && defect <= 0) {
     uni.showToast({ title: "请填写报工数量", icon: "none" });
+    return;
+  }
+  if (selectedTask.value.has_previous && good + defect > reportLimit.value) {
+    uni.showToast({ title: `最多可报 ${reportLimit.value} 件（按上游最小分支）`, icon: "none" });
     return;
   }
   submitting.value = true;
@@ -375,6 +395,7 @@ function reset() {
   line-height: 1.6;
   margin-top: 20rpx;
 }
+.hint.warn { color: #c05621; }
 .card {
   background: #fff;
   border-radius: 16rpx;
@@ -455,6 +476,8 @@ function reset() {
   border-color: #2b6cb0;
   background: #ebf4ff;
 }
+.process.locked { opacity: 0.55; }
+.process-lock { color: #c05621; font-size: 22rpx; margin-top: 4rpx; }
 .process-main {
   display: flex;
   flex-direction: column;

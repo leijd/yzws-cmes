@@ -1,6 +1,7 @@
 package production
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,6 +13,55 @@ import (
 	"clothp/internal/platform"
 	"github.com/jackc/pgx/v5"
 )
+
+// taskTopologyAvailability 返回当前工序可继续报工的上游可用量与是否满足拓扑前置条件。
+func taskTopologyAvailability(ctx context.Context, api *httpapi.API, tenantID, workOrderID string, prevRaw []byte, sequenceNo int) (int64, bool, bool, error) {
+	var prevIDs []string
+	_ = json.Unmarshal(prevRaw, &prevIDs)
+	if len(prevIDs) > 0 {
+		rows, err := api.DB.Query(ctx, `SELECT p.ppid,COALESCE(SUM(t.approved_good_qty),0)
+			FROM unnest($3::text[]) AS p(ppid)
+			LEFT JOIN production_task t ON t.tenant_id=$1 AND t.work_order_id=$2 AND t.product_process_id=p.ppid
+			GROUP BY p.ppid`, tenantID, workOrderID, prevIDs)
+		if err != nil {
+			return 0, false, true, err
+		}
+		available := int64(-1)
+		ready := true
+		for rows.Next() {
+			var prevID string
+			var qty int64
+			if err := rows.Scan(&prevID, &qty); err != nil {
+				rows.Close()
+				return 0, false, true, err
+			}
+			if available < 0 || qty < available {
+				available = qty
+			}
+			if qty <= 0 {
+				ready = false
+			}
+		}
+		rowErr := rows.Err()
+		rows.Close()
+		if rowErr != nil {
+			return 0, false, true, rowErr
+		}
+		if available < 0 {
+			available = 0
+		}
+		return available, ready, true, nil
+	}
+	var available int64
+	if err := api.DB.QueryRow(ctx, `SELECT COALESCE(SUM(t.approved_good_qty),0) FROM production_task t JOIN work_order_process_snapshot s ON s.tenant_id=t.tenant_id AND s.work_order_id=t.work_order_id AND s.product_process_id=t.product_process_id WHERE t.tenant_id=$1 AND t.work_order_id=$2 AND s.sequence_no<$3 AND (s.route_flags->>'parallel')::boolean=false`, tenantID, workOrderID, sequenceNo).Scan(&available); err != nil {
+		return 0, false, false, err
+	}
+	var hasPrevious bool
+	if err := api.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM work_order_process_snapshot WHERE tenant_id=$1 AND work_order_id=$2 AND sequence_no<$3)`, tenantID, workOrderID, sequenceNo).Scan(&hasPrevious); err != nil {
+		return 0, false, false, err
+	}
+	return available, !hasPrevious || available > 0, hasPrevious, nil
+}
 
 func registerTickets(api *httpapi.API) {
 	loadTicket := func(w http.ResponseWriter, r *http.Request, p auth.Principal, ticketID string) error {
@@ -134,7 +184,7 @@ func registerTickets(api *httpapi.API) {
 			WHERE tk.tenant_id=$1 AND tk.id=$2) t`, p.TenantID, ticketID).Scan(&result); err != nil {
 			return err
 		}
-		rows, err := api.DB.Query(r.Context(), `SELECT t.id,t.version,s.sequence_no,s.process_code,s.process_name,
+		rows, err := api.DB.Query(r.Context(), `SELECT t.id,t.version,s.sequence_no,s.process_code,s.process_name,s.prev_ids::text,
 			t.planned_qty,t.reported_qty,t.planned_qty-t.reported_qty,
 			COALESCE((SELECT SUM(a.planned_qty) FROM task_bundle_assignment a WHERE a.tenant_id=t.tenant_id AND a.bundle_id=$2 AND a.task_id=t.id AND a.status='active'),0)
 			FROM production_task t
@@ -146,11 +196,18 @@ func registerTickets(api *httpapi.API) {
 		}
 		processes := []map[string]any{}
 		tasks := []map[string]any{}
+		workOrderID, _ := result["work_order_id"].(string)
 		for rows.Next() {
 			var taskID, code, name string
 			var sequence int
 			var version, planned, reported, remaining, assigned int64
-			if err := rows.Scan(&taskID, &version, &sequence, &code, &name, &planned, &reported, &remaining, &assigned); err != nil {
+			var prevRaw []byte
+			if err := rows.Scan(&taskID, &version, &sequence, &code, &name, &prevRaw, &planned, &reported, &remaining, &assigned); err != nil {
+				rows.Close()
+				return err
+			}
+			available, previousReady, hasPrevious, err := taskTopologyAvailability(r.Context(), api, p.TenantID, workOrderID, prevRaw, sequence)
+			if err != nil {
 				rows.Close()
 				return err
 			}
@@ -160,7 +217,7 @@ func registerTickets(api *httpapi.API) {
 				"task_id": taskID, "version": version, "sequence_no": sequence,
 				"process_code": code, "process_name": name,
 				"planned_qty": planned, "reported_qty": reported, "remaining_qty": remaining,
-				"assigned_qty": assigned,
+				"assigned_qty": assigned, "available_qty": available, "previous_ready": previousReady, "has_previous": hasPrevious,
 			})
 		}
 		if err := rows.Err(); err != nil {

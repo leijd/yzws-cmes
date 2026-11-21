@@ -11,6 +11,7 @@ const workOrders = ref<any[]>([])
 const tenantProfile = ref<any>(null)
 const editionText: Record<string, string> = { basic: '基础版', standard: '标准版', pro: '专业版' }
 const cards = [
+  ['pending_material_issue', '待确认领料', '线长需确认的物料出库单'],
   ['pending_release', '待下发工单', '需要裁床组处理'],
   ['in_production', '生产中工单', '当前有效生产任务'],
   ['unassigned_tasks', '待派工任务', '尚未分配生产人员'],
@@ -20,11 +21,13 @@ const cards = [
 async function load() {
   loading.value = true; error.value = ''
   try {
-    const [board, progress] = await Promise.all([
+    const [board, progress, pending] = await Promise.all([
       api<{ metrics: Record<string, Metric> }>('/workbench'),
       api<{ items: any[] }>('/progress/work-orders?limit=6'),
+      api<{ count: number }>('/material-issues/pending-confirm-count', {}, { silent: true }).catch(() => ({ count: 0 })),
     ])
-    metrics.value = board.metrics; workOrders.value = progress.items
+    metrics.value = { ...board.metrics, pending_material_issue: pending.count || 0 }
+    workOrders.value = progress.items
     try { tenantProfile.value = await api<any>('/tenant/profile', {}, { silent: true }) } catch { tenantProfile.value = null }
   } catch (e) { error.value = (e as Error).message } finally { loading.value = false }
 }
@@ -39,7 +42,14 @@ onMounted(load)
   </div>
   <PageState :loading="loading" :error="error" @retry="load" />
   <template v-if="!loading && !error">
-    <section class="metrics"><article v-for="card in cards" :key="card[0]" class="metric"><div class="metric-label">{{ card[1] }}<span>↗</span></div><div class="metric-value">{{ metrics[card[0]] ?? 0 }}</div><div class="metric-foot">{{ card[2] }}</div></article></section>
+    <section class="metrics">
+      <template v-for="card in cards" :key="card[0]">
+        <RouterLink v-if="card[0] === 'pending_material_issue'" to="/materials/outbound?tab=confirm" class="metric">
+          <div class="metric-label">{{ card[1] }}<span>↗</span></div><div class="metric-value">{{ metrics[card[0]] ?? 0 }}</div><div class="metric-foot">{{ card[2] }}</div>
+        </RouterLink>
+        <article v-else class="metric"><div class="metric-label">{{ card[1] }}<span>↗</span></div><div class="metric-value">{{ metrics[card[0]] ?? 0 }}</div><div class="metric-foot">{{ card[2] }}</div></article>
+      </template>
+    </section>
     <div class="dashboard-grid">
       <section class="panel"><div class="panel-header"><h2>工单生产进度</h2><RouterLink to="/progress/F01" class="button link">查看全部</RouterLink></div><div class="panel-body"><PageState :empty="!workOrders.length" /><div class="progress-list"><div v-for="order in workOrders" :key="order.id" class="progress-row"><span>{{ order.work_order_code }}<small class="text-muted" style="display:block">{{ order.product_name }}</small></span><div class="progress-track"><div class="progress-bar" :style="{ width: `${Math.min(order.progress_ratio * 100, 100)}%` }"></div></div><strong>{{ Math.round(order.progress_ratio * 100) }}%</strong></div></div></div></section>
       <section class="panel"><div class="panel-header"><h2>快捷操作</h2></div><div class="panel-body progress-list"><RouterLink to="/orders/C03" class="notice">工单下发 <span style="float:right">→</span></RouterLink><RouterLink to="/tasks/D01" class="notice">多人派工与扫码报工 <span style="float:right">→</span></RouterLink><RouterLink to="/reports/D06" class="notice">报工审批与纠错 <span style="float:right">→</span></RouterLink><div class="notice success">中心节点连接正常，业务数据已持久化到 PostgreSQL。</div></div></section>

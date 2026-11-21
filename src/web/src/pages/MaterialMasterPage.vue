@@ -2,6 +2,8 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { api, statusText } from '../api'
 import { usePermissions } from '../permissions'
+import { todayISO } from '../date'
+import DatePicker from '../components/DatePicker.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 import FilterSelect from '../components/FilterSelect.vue'
@@ -78,7 +80,7 @@ async function load() {
 
 function openIssue() {
   error.value = ''
-  Object.assign(issueForm, { issue_no: '', issue_date: new Date().toISOString().slice(0, 10), work_order_id: '', warehouse_id: '', material_id: '', qty: '', purpose: '', operator_employee_id: '', remark: '' })
+  Object.assign(issueForm, { issue_no: '', issue_date: todayISO(), work_order_id: '', warehouse_id: '', material_id: '', qty: '', purpose: '', operator_employee_id: '', remark: '' })
   modal.value = 'issue'
 }
 
@@ -251,7 +253,7 @@ onMounted(load)
     <div v-if="error" class="notice error">{{ error }}</div>
     <div class="form-grid">
       <div class="field"><label class="required">领料单号</label><input v-model.trim="issueForm.issue_no" placeholder="如 MI-20261103-01"></div>
-      <div class="field"><label>领料日期</label><input v-model.trim="issueForm.issue_date" placeholder="YYYY-MM-DD"></div>
+      <div class="field"><label>领料日期</label><DatePicker v-model="issueForm.issue_date"/></div>
       <div class="field full"><label class="required">生产工单</label><FilterSelect v-model="issueForm.work_order_id" :options="workOrderOptions" placeholder="选择工单" /></div>
       <div class="field"><label class="required">仓库</label><FilterSelect v-model="issueForm.warehouse_id" :options="warehouses.map(w => ({ value: w.id, label: `${w.code} · ${w.name}` }))" placeholder="选择仓库" /></div>
       <div class="field"><label class="required">物料</label><FilterSelect v-model="issueForm.material_id" :options="materials.map(m => ({ value: m.id, label: `${m.code} · ${m.name}` }))" placeholder="选择物料" /></div>

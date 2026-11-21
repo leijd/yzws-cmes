@@ -243,6 +243,7 @@ var seedDictionaryItems = []struct {
 	{"position", "仓管", "仓管", 5}, {"position", "整烫工", "整烫工", 6}, {"position", "生产工艺员", "生产工艺员", 7},
 	{"skill_grade", "A", "A 熟练", 1}, {"skill_grade", "B", "B 合格", 2}, {"skill_grade", "C", "C 学徒", 3},
 	{"rate_level", "high", "高档（系数 1.25）", 1}, {"rate_level", "mid", "中档（系数 1.0）", 2}, {"rate_level", "low", "低档（系数 0.85）", 3},
+	{"material_type", "fabric", "面料", 1}, {"material_type", "trim", "辅料", 2}, {"material_type", "packaging", "包装材料", 3}, {"material_type", "other", "其他", 9},
 }
 
 /* ExecSettings 阶段 4：管理级别四级 + 内置功能设置 + 下拉选项字典。 */

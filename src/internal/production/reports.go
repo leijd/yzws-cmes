@@ -107,23 +107,77 @@ func registerReports(api *httpapi.API) {
 	})
 }
 
-func checkPreviousProcess(ctx context.Context, tx pgx.Tx, api *httpapi.API, tenantID, taskID string, requested int64) error {
-	var enabled bool
-	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT (setting_value #>> '{}')::boolean FROM feature_setting WHERE tenant_id=$1 AND setting_domain='report' AND setting_key='check_previous_process' ORDER BY version DESC LIMIT 1),'true')`, tenantID).Scan(&enabled); err != nil || !enabled {
-		return err
-	}
-	var available, current int64
-	err := tx.QueryRow(ctx, `WITH current_task AS (SELECT work_order_id,product_process_id FROM production_task WHERE tenant_id=$1 AND id=$2),current_snap AS (SELECT s.work_order_id,s.sequence_no FROM work_order_process_snapshot s JOIN current_task t ON t.work_order_id=s.work_order_id AND t.product_process_id=s.product_process_id WHERE s.tenant_id=$1),previous AS (SELECT s.product_process_id FROM work_order_process_snapshot s JOIN current_snap c ON c.work_order_id=s.work_order_id WHERE s.tenant_id=$1 AND s.sequence_no<(SELECT sequence_no FROM current_snap) AND (s.route_flags->>'parallel')::boolean=false ORDER BY s.sequence_no DESC LIMIT 1) SELECT COALESCE((SELECT SUM(t.approved_good_qty) FROM production_task t JOIN previous p ON p.product_process_id=t.product_process_id JOIN current_task c ON c.work_order_id=t.work_order_id WHERE t.tenant_id=$1),0),COALESCE((SELECT SUM(t.reported_qty) FROM production_task t JOIN current_task c ON c.work_order_id=t.work_order_id AND c.product_process_id=t.product_process_id WHERE t.tenant_id=$1),0)`, tenantID, taskID).Scan(&available, &current)
+// checkPreviousProcess 按工序拓扑校验：后道工序不能在直接前驱报工前报工；
+// 并行汇合点可用量取所有汇入分支的最小值，而不是合计。
+func checkPreviousProcess(ctx context.Context, tx pgx.Tx, api *httpapi.API, tenantID, taskID string, extra int64) error {
+	/* 当前工序快照：取 work_order_id / product_process_id / sequence_no / prev_ids */
+	var workOrderID, ppID string
+	var sequenceNo int
+	var prevRaw []byte
+	err := tx.QueryRow(ctx, `SELECT s.work_order_id,s.product_process_id,s.sequence_no,s.prev_ids FROM production_task t JOIN work_order_process_snapshot s ON s.tenant_id=t.tenant_id AND s.work_order_id=t.work_order_id AND s.product_process_id=t.product_process_id WHERE t.tenant_id=$1 AND t.id=$2`, tenantID, taskID).Scan(&workOrderID, &ppID, &sequenceNo, &prevRaw)
 	if err != nil {
 		return err
 	}
-	var hasPrevious bool
-	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM production_task t JOIN work_order_process_snapshot s ON s.tenant_id=t.tenant_id AND s.work_order_id=t.work_order_id AND s.product_process_id=t.product_process_id JOIN work_order_process_snapshot prev ON prev.tenant_id=s.tenant_id AND prev.work_order_id=s.work_order_id AND prev.sequence_no<s.sequence_no WHERE t.tenant_id=$1 AND t.id=$2)`, tenantID, taskID).Scan(&hasPrevious); err != nil {
+	var prevIDs []string
+	_ = json.Unmarshal(prevRaw, &prevIDs)
+	var available, current int64
+	branchQty := map[string]int64{}
+	hasPrevious := len(prevIDs) > 0
+	if hasPrevious {
+		/* 拓扑模式：逐条汇入分支统计；并行汇合取最小值，任一分支未报工则后道工序不可报 */
+		rows, err := tx.Query(ctx, `SELECT p.ppid,COALESCE(SUM(t.approved_good_qty),0)
+			FROM unnest($3::text[]) AS p(ppid)
+			LEFT JOIN production_task t ON t.tenant_id=$1 AND t.work_order_id=$2 AND t.product_process_id=p.ppid
+			GROUP BY p.ppid`, tenantID, workOrderID, prevIDs)
+		if err != nil {
+			return err
+		}
+		available = -1
+		unready := []string{}
+		for rows.Next() {
+			var prevID string
+			var qty int64
+			if err := rows.Scan(&prevID, &qty); err != nil {
+				rows.Close()
+				return err
+			}
+			branchQty[prevID] = qty
+			if available < 0 || qty < available {
+				available = qty
+			}
+			if qty <= 0 {
+				unready = append(unready, prevID)
+			}
+		}
+		rowErr := rows.Err()
+		rows.Close()
+		if rowErr != nil {
+			return rowErr
+		}
+		if available < 0 {
+			available = 0
+		}
+		if len(unready) > 0 {
+			appErr := httpapi.Error(400, "PREVIOUS_PROCESS_NOT_REPORTED", "前道工序尚未报工或审批，当前工序不能报工")
+			appErr.Details = map[string]any{"previous_process_ids": unready, "branch_qty": branchQty}
+			return appErr
+		}
+	} else {
+		/* 兼容旧数据：无拓扑边时回退到 sequence_no 更早的非并行前道 */
+		err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(t.approved_good_qty),0) FROM production_task t JOIN work_order_process_snapshot s ON s.tenant_id=t.tenant_id AND s.work_order_id=t.work_order_id AND s.product_process_id=t.product_process_id WHERE t.tenant_id=$1 AND t.work_order_id=$2 AND s.sequence_no<$3 AND (s.route_flags->>'parallel')::boolean=false`, tenantID, workOrderID, sequenceNo).Scan(&available)
+		if err != nil {
+			return err
+		}
+		if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM work_order_process_snapshot WHERE tenant_id=$1 AND work_order_id=$2 AND sequence_no<$3)`, tenantID, workOrderID, sequenceNo).Scan(&hasPrevious); err != nil {
+			return err
+		}
+	}
+	if err = tx.QueryRow(ctx, `SELECT COALESCE(SUM(reported_qty),0) FROM production_task WHERE tenant_id=$1 AND work_order_id=$2 AND product_process_id=$3`, tenantID, workOrderID, ppID).Scan(&current); err != nil {
 		return err
 	}
-	if hasPrevious && current+requested > available {
-		appErr := httpapi.Error(400, "PREVIOUS_PROCESS_INCOMPLETE", "报工数量超过上道工序合格可用量")
-		appErr.Details = map[string]any{"previous_available": available, "current_reported": current, "requested": requested}
+	if hasPrevious && current+extra > available {
+		appErr := httpapi.Error(400, "PREVIOUS_PROCESS_INCOMPLETE", "报工数量超过前道工序可用量（并行汇合取最小分支）")
+		appErr.Details = map[string]any{"previous_available": available, "branch_qty": branchQty, "current_reported": current, "requested": extra}
 		return appErr
 	}
 	return nil
@@ -234,6 +288,9 @@ func reviewReport(api *httpapi.API, w http.ResponseWriter, r *http.Request, p au
 	}
 	switch action {
 	case "approve":
+		if err = checkPreviousProcess(r.Context(), tx, api, p.TenantID, taskID, 0); err != nil {
+			return err
+		}
 		if _, err = tx.Exec(r.Context(), "UPDATE production_task SET pending_qty=pending_qty-$1,approved_good_qty=approved_good_qty+$2,version=version+1,updated_at=$3,updated_by=$4,updated_node=$5 WHERE tenant_id=$6 AND id=$7", good+defect, good, platform.Now(), p.UserID, api.Config.NodeID, p.TenantID, taskID); err != nil {
 			return err
 		}
@@ -254,6 +311,11 @@ func reviewReport(api *httpapi.API, w http.ResponseWriter, r *http.Request, p au
 		delta := newTotal - oldTotal
 		if reported+delta > planned {
 			return httpapi.Error(400, "QUANTITY_EXCEEDED", "纠错后的累计报工超过任务计划量")
+		}
+		if delta > 0 {
+			if err = checkPreviousProcess(r.Context(), tx, api, p.TenantID, taskID, delta); err != nil {
+				return err
+			}
 		}
 		if _, err = tx.Exec(r.Context(), `UPDATE work_report SET employee_id=$1,good_qty=$2,defect_qty=$3,unit_price=$4,actual_work_seconds=COALESCE($5,actual_work_seconds),review_status='approved' WHERE tenant_id=$6 AND id=$7`, employeeID, good, defect, price, in.ActualWorkSeconds, p.TenantID, reportID); err != nil {
 			return err

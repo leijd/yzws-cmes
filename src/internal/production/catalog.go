@@ -29,6 +29,9 @@ func Register(api *httpapi.API) {
 	registerBundleParts(api)
 	registerBundleLabels(api)
 	registerAssignments(api)
+	registerWorkOrderGroups(api)
+	registerWorkOrderResources(api)
+	registerWorkflowBadges(api)
 	registerPrint(api)
 	registerMaterialReceipts(api)
 	registerInventory(api)
@@ -336,8 +339,12 @@ func registerCatalog(api *httpapi.API) {
 	})
 	api.Handle("PUT /api/v1/products/{id}/processes", "product:write", saveProductProcesses)
 	api.Handle("GET /api/v1/products/{id}/processes", "product:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var version int64
+		if err := api.DB.QueryRow(r.Context(), `SELECT version FROM product WHERE tenant_id=$1 AND id=$2`, p.TenantID, r.PathValue("id")).Scan(&version); err != nil {
+			return err
+		}
 		rows, err := api.DB.Query(r.Context(), `SELECT pp.id,pp.process_id,pd.process_code,pd.name,pp.sequence_no,pp.unit_price::text,pp.report_ratio::text,
-			pp.department_id,pp.standard_work_seconds,pp.is_parallel,pp.is_critical,pp.is_required,pp.remark
+			pp.department_id,pp.standard_work_seconds,pp.is_parallel,pp.is_critical,pp.is_required,pp.remark,pp.node_x,pp.node_y
 			FROM product p JOIN product_process pp ON pp.tenant_id=p.tenant_id AND pp.product_id=p.id AND pp.product_version=p.version
 			JOIN process_definition pd ON pd.tenant_id=pp.tenant_id AND pd.id=pp.process_id WHERE p.tenant_id=$1 AND p.id=$2 ORDER BY pp.sequence_no`, p.TenantID, r.PathValue("id"))
 		if err != nil {
@@ -348,29 +355,48 @@ func registerCatalog(api *httpapi.API) {
 		total := decimal.Zero
 		for rows.Next() {
 			var id, processID, code, name, unitPrice, ratio string
-			var sequence int
+			var sequence, nodeX, nodeY int
 			var department, remark *string
 			var seconds int64
 			var parallel, critical, required bool
-			if err := rows.Scan(&id, &processID, &code, &name, &sequence, &unitPrice, &ratio, &department, &seconds, &parallel, &critical, &required, &remark); err != nil {
+			if err := rows.Scan(&id, &processID, &code, &name, &sequence, &unitPrice, &ratio, &department, &seconds, &parallel, &critical, &required, &remark, &nodeX, &nodeY); err != nil {
 				return err
 			}
 			price, _ := decimal.NewFromString(unitPrice)
 			rate, _ := decimal.NewFromString(ratio)
 			total = total.Add(price.Mul(rate))
-			items = append(items, map[string]any{"id": id, "process_id": processID, "process_code": code, "name": name, "sequence_no": sequence, "unit_price": unitPrice, "report_ratio": ratio, "department_id": department, "standard_work_seconds": seconds, "is_parallel": parallel, "is_critical": critical, "is_required": required, "remark": remark})
+			items = append(items, map[string]any{"id": id, "process_id": processID, "process_code": code, "name": name, "sequence_no": sequence, "unit_price": unitPrice, "report_ratio": ratio, "department_id": department, "standard_work_seconds": seconds, "is_parallel": parallel, "is_critical": critical, "is_required": required, "remark": remark, "node_x": nodeX, "node_y": nodeY})
 		}
+		edges := []map[string]any{}
+		/* from_id/to_id 存的是 product_process.id，JOIN 回 process_id 供前端节点匹配 */
+		edgeRows, err := api.DB.Query(r.Context(), `SELECT e.id,fp.process_id,tp.process_id FROM product_process_edge e
+			JOIN product_process fp ON fp.tenant_id=e.tenant_id AND fp.id=e.from_id
+			JOIN product_process tp ON tp.tenant_id=e.tenant_id AND tp.id=e.to_id
+			WHERE e.tenant_id=$1 AND e.product_id=$2 AND e.product_version=$3 ORDER BY e.id`, p.TenantID, r.PathValue("id"), version)
+		if err != nil {
+			return err
+		}
+		for edgeRows.Next() {
+			var eid, from, to string
+			if err := edgeRows.Scan(&eid, &from, &to); err != nil {
+				edgeRows.Close()
+				return err
+			}
+			edges = append(edges, map[string]any{"id": eid, "from": from, "to": to})
+		}
+		edgeRows.Close()
 		var configurerName *string
 		var configuredAt *int64
 		if err := api.DB.QueryRow(r.Context(), `SELECT COALESCE(e.name,u.login_name), pp.created_at FROM product_process pp JOIN user_account u ON u.tenant_id=pp.tenant_id AND u.id=pp.created_by LEFT JOIN employee e ON e.tenant_id=u.tenant_id AND e.id=u.employee_id WHERE pp.tenant_id=$1 AND pp.product_id=$2 AND pp.product_version=(SELECT version FROM product WHERE tenant_id=$1 AND id=$2) ORDER BY pp.sequence_no LIMIT 1`, p.TenantID, r.PathValue("id")).Scan(&configurerName, &configuredAt); err != nil {
 			configurerName, configuredAt = nil, nil
 		}
-		return httpapi.JSON(w, 200, map[string]any{"items": items, "theoretical_price": total.StringFixed(6), "configurer_name": configurerName, "configured_at": configuredAt})
+		return httpapi.JSON(w, 200, map[string]any{"items": items, "edges": edges, "theoretical_price": total.StringFixed(6), "configurer_name": configurerName, "configured_at": configuredAt})
 	})
 	registerProcessDefinitions(api)
 }
 
 type routeItem struct {
+	ID                  string  `json:"id"`
 	ProcessID           string  `json:"process_id"`
 	SequenceNo          int     `json:"sequence_no"`
 	UnitPrice           string  `json:"unit_price"`
@@ -381,6 +407,13 @@ type routeItem struct {
 	IsCritical          bool    `json:"is_critical"`
 	IsRequired          bool    `json:"is_required"`
 	Remark              *string `json:"remark"`
+	NodeX               int     `json:"node_x"`
+	NodeY               int     `json:"node_y"`
+}
+
+type routeEdge struct {
+	From string `json:"from"`
+	To   string `json:"to"`
 }
 
 func saveProductProcesses(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
@@ -388,20 +421,67 @@ func saveProductProcesses(w http.ResponseWriter, r *http.Request, p auth.Princip
 	var in struct {
 		Version int64       `json:"version"`
 		Items   []routeItem `json:"items"`
+		Edges   []routeEdge `json:"edges"`
 	}
 	if err := httpapi.Decode(r, &in); err != nil {
 		return err
 	}
-	sequences := map[int]bool{}
+	/* 节点以 process_id 为唯一标识（产品版本内唯一）；保留 sequence_no>=1 兼容旧逻辑 */
 	processes := map[string]bool{}
 	for _, item := range in.Items {
 		price, err1 := decimal.NewFromString(item.UnitPrice)
 		ratio, err2 := decimal.NewFromString(item.ReportRatio)
-		if item.ProcessID == "" || item.SequenceNo < 1 || sequences[item.SequenceNo] || processes[item.ProcessID] || err1 != nil || err2 != nil || price.IsNegative() || !ratio.IsPositive() {
+		if item.ProcessID == "" || item.SequenceNo < 1 || processes[item.ProcessID] || err1 != nil || err2 != nil || price.IsNegative() || !ratio.IsPositive() {
 			return httpapi.Error(400, "INVALID_ROUTE", "工序、序号、工价或配比不合法")
 		}
-		sequences[item.SequenceNo] = true
 		processes[item.ProcessID] = true
+	}
+	/* edges 端点必须是本次提交的 process_id，且无自环、无重复边 */
+	edgeSeen := map[string]bool{}
+	adj := map[string][]string{}
+	indeg := map[string]int{}
+	for pid := range processes {
+		indeg[pid] = 0
+	}
+	for _, e := range in.Edges {
+		if e.From == "" || e.To == "" || e.From == e.To {
+			return httpapi.Error(400, "INVALID_EDGE", "工序连线端点不合法")
+		}
+		if !processes[e.From] {
+			return httpapi.Error(400, "INVALID_EDGE", "工序连线起点不存在")
+		}
+		if !processes[e.To] {
+			return httpapi.Error(400, "INVALID_EDGE", "工序连线终点不存在")
+		}
+		key := e.From + ">" + e.To
+		if edgeSeen[key] {
+			return httpapi.Error(400, "INVALID_EDGE", "工序连线重复")
+		}
+		edgeSeen[key] = true
+		adj[e.From] = append(adj[e.From], e.To)
+		indeg[e.To]++
+	}
+	/* Kahn 拓扑排序检测有向环 */
+	queue := []string{}
+	for pid := range processes {
+		if indeg[pid] == 0 {
+			queue = append(queue, pid)
+		}
+	}
+	visited := 0
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		visited++
+		for _, nxt := range adj[cur] {
+			indeg[nxt]--
+			if indeg[nxt] == 0 {
+				queue = append(queue, nxt)
+			}
+		}
+	}
+	if visited != len(processes) {
+		return httpapi.Error(400, "CYCLE_IN_ROUTE", "工序拓扑存在循环依赖，请检查连线")
 	}
 	tx, err := api.DB.Begin(r.Context())
 	if err != nil {
@@ -420,10 +500,21 @@ func saveProductProcesses(w http.ResponseWriter, r *http.Request, p auth.Princip
 		return httpapi.Error(409, "VERSION_CONFLICT", "产品已变更")
 	}
 	newVersion := current + 1
+	/* process_id -> 新生成的 product_process.id，供 edges 与画布坐标落库 */
+	ppIDByProcess := map[string]string{}
 	for _, item := range in.Items {
-		if _, err = tx.Exec(r.Context(), `INSERT INTO product_process(tenant_id,id,product_id,product_version,process_id,sequence_no,unit_price,report_ratio,department_id,standard_work_seconds,is_parallel,is_critical,is_required,remark,created_by)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`, p.TenantID, platform.ID(), r.PathValue("id"), newVersion, item.ProcessID, item.SequenceNo, item.UnitPrice, item.ReportRatio, item.DepartmentID, item.StandardWorkSeconds, item.IsParallel, item.IsCritical, item.IsRequired, item.Remark, p.UserID); err != nil {
+		ppID := platform.ID()
+		ppIDByProcess[item.ProcessID] = ppID
+		if _, err = tx.Exec(r.Context(), `INSERT INTO product_process(tenant_id,id,product_id,product_version,process_id,sequence_no,unit_price,report_ratio,department_id,standard_work_seconds,is_parallel,is_critical,is_required,remark,created_by,node_x,node_y)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, p.TenantID, ppID, r.PathValue("id"), newVersion, item.ProcessID, item.SequenceNo, item.UnitPrice, item.ReportRatio, item.DepartmentID, item.StandardWorkSeconds, item.IsParallel, item.IsCritical, item.IsRequired, item.Remark, p.UserID, item.NodeX, item.NodeY); err != nil {
 			return httpapi.Error(400, "INVALID_ROUTE", "工序引用无效")
+		}
+	}
+	/* 写入 DAG 边：from/to 用 product_process.id */
+	for _, e := range in.Edges {
+		if _, err = tx.Exec(r.Context(), `INSERT INTO product_process_edge(tenant_id,id,product_id,product_version,from_id,to_id,created_at) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+			p.TenantID, platform.ID(), r.PathValue("id"), newVersion, ppIDByProcess[e.From], ppIDByProcess[e.To], platform.Now()); err != nil {
+			return err
 		}
 	}
 	status := "active"

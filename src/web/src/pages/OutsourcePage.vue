@@ -4,6 +4,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { api, formatTime } from '../api'
 import { toastError, toastSuccess } from '../toast'
 import { usePermissions } from '../permissions'
+import { todayISO } from '../date'
+import DatePicker from '../components/DatePicker.vue'
 import ModalDialog from '../components/ModalDialog.vue'
 import FilterSelect from '../components/FilterSelect.vue'
 import PageState from '../components/PageState.vue'
@@ -103,7 +105,7 @@ async function orderAction(action: string) {
     await openDetail(detail.value.order); await loadOrders()
   } catch { /* */ }
 }
-const flowForm = reactive({ flow_type: 'issue', item_id: '', material_name: '', qty: 0, flow_date: new Date().toISOString().slice(0, 10), voucher_no: '', remark: '' })
+const flowForm = reactive({ flow_type: 'issue', item_id: '', material_name: '', qty: 0, flow_date: todayISO(), voucher_no: '', remark: '' })
 const flowModal = ref(false)
 async function saveFlow() {
   if (!detail.value) return
@@ -326,7 +328,7 @@ const itemOptions = computed(() => (detail.value?.items || []).map((i: any) => (
         <div class="field"><label class="required">受托方</label><FilterSelect v-model="orderForm.partner_id" :options="partnerOptions" /></div>
         <div class="field"><label class="required">委外范围</label><FilterSelect v-model="orderForm.scope_type" :options="scopeOptions" /></div>
         <div class="field"><label class="required">计价方式</label><FilterSelect v-model="orderForm.pricing_type" :options="pricingOptions" /></div>
-        <div class="field"><label>约定回货日期</label><input v-model="orderForm.agreed_due_date" type="date"></div>
+        <div class="field"><label>约定回货日期</label><DatePicker v-model="orderForm.agreed_due_date"/></div>
         <div class="field full"><label>备注</label><input v-model.trim="orderForm.remark"></div>
       </div>
       <h4 style="margin:12px 0 6px">委外明细</h4>
@@ -388,7 +390,7 @@ const itemOptions = computed(() => (detail.value?.items || []).map((i: any) => (
         <div class="field"><label>关联明细（回货建议指定）</label><FilterSelect v-model="flowForm.item_id" :options="itemOptions" /></div>
         <div class="field"><label class="required">物料名称</label><input v-model.trim="flowForm.material_name"></div>
         <div class="field"><label class="required">数量</label><input v-model.number="flowForm.qty" type="number" min="1"></div>
-        <div class="field"><label class="required">日期</label><input v-model="flowForm.flow_date" type="date"></div>
+        <div class="field"><label class="required">日期</label><DatePicker v-model="flowForm.flow_date"/></div>
         <div class="field"><label>单据号</label><input v-model.trim="flowForm.voucher_no"></div>
       </div>
       <template #footer><button class="button secondary" @click="flowModal = false">取消</button><button class="button" @click="saveFlow">登记</button></template>

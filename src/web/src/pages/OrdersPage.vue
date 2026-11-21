@@ -7,7 +7,7 @@ import PageState from '../components/PageState.vue'
 import DatePicker from '../components/DatePicker.vue'
 import FilterSelect from '../components/FilterSelect.vue'
 import ProductImage from '../components/ProductImage.vue'
-import SceneBadge from '../components/SceneBadge.vue'
+import ImageViewer from '../components/ImageViewer.vue'
 
 const { has, ready } = usePermissions()
 const canProjectRead = computed(() => has('project:read'))
@@ -18,15 +18,6 @@ const canWorkOrderWrite = computed(() => has('work_order:write'))
 const canCuttingWrite = computed(() => has('cutting:write'))
 const canReview = computed(() => has('work_order:review'))
 
-type TabKey = 'projects' | 'work-orders' | 'cutting-orders'
-const availableTabs = computed<TabKey[]>(() => {
-  const tabs: TabKey[] = []
-  if (canWorkOrderRead.value) tabs.push('work-orders')
-  if (canProjectRead.value) tabs.push('projects')
-  if (canCuttingRead.value) tabs.push('cutting-orders')
-  return tabs
-})
-const tab = ref<TabKey>('work-orders')
 const data = reactive<Record<string, any[]>>({ projects: [], 'work-orders': [], 'cutting-orders': [] })
 const products = ref<any[]>([])
 const customers = ref<any[]>([])
@@ -41,13 +32,25 @@ const orderForm = reactive({ work_order_code: '', project_id: '', planned_produc
 const cuttingForm = reactive({ cutting_no: '', work_order_id: '', marker_id: '', cut_qty: 900, color: '黑色', size: 'M', bundle_count: 10 })
 const markers = ref<any[]>([])
 const markerOptions = computed(() => markers.value.map(m => ({ value: m.id, label: `${m.marker_no} · ${m.color}${m.review_status === 'approved' ? '' : '（未审核）'}` })))
-const statusFilter = ref('')
-/* 场景化菜单（设计 6.12.7）：委托方视角工单列表分「本厂/外协」，行带场景徽标与外协角标 */
-const partyFilter = ref('')
-const sceneFilter = ref('')
 const projectAdjust = ref<any>(null)
 const adjustForm = reactive({ customer_name: '', product_name: '', style_no: '', style_name: '', order_qty: 0, required_delivery_date: '', customer_unit_price: '', external_unit_price: '', version: 0, reason: '' })
-function openAdjust(item: any) {
+const adjustImages = ref<any[]>([])
+const adjustViewType = ref('standard')
+const adjustUploading = ref(false)
+const adjustFileInput = ref<HTMLInputElement>()
+const adjustViewer = ref<{ attachment_id: string; title: string } | null>(null)
+const viewNames: Record<string, string> = { standard: '标准图', front: '正面', side: '侧面', back: '后面', top: '顶面', bottom: '底面', interior: '内里', other: '其他' }
+function resolveAdjustProductId(): string | null {
+  if (projectAdjust.value?.product_id) return projectAdjust.value.product_id
+  const name = projectAdjust.value?.product_name
+  return products.value.find(p => p.name === name)?.id || null
+}
+async function loadAdjustImages() {
+  const productId = resolveAdjustProductId()
+  if (!productId) { adjustImages.value = []; return }
+  try { const res = await api<{ items: any[] }>(`/products/${productId}/images`); adjustImages.value = res.items } catch { adjustImages.value = [] }
+}
+async function openAdjust(item: any) {
   projectAdjust.value = item
   Object.assign(adjustForm, {
     customer_name: item.customer_name || '', product_name: item.product_name || '',
@@ -56,7 +59,93 @@ function openAdjust(item: any) {
     customer_unit_price: item.customer_unit_price || '', external_unit_price: item.external_unit_price || '',
     version: item.version, reason: ''
   })
-  error.value = ''
+  error.value = ''; adjustViewType.value = 'standard'
+  await loadAdjustImages()
+}
+async function uploadAdjustImage(event: Event) {
+  const productId = resolveAdjustProductId()
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file || !productId) { if (!productId) error.value = '该项目未关联产品，无法上传图片'; return }
+  if (file.size > 20 * 1024 * 1024) { error.value = '图片不能超过20MB'; return }
+  adjustUploading.value = true; error.value = ''
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const hashBuffer = await crypto.subtle.digest('SHA-256', bytes)
+    const sha256 = Array.from(new Uint8Array(hashBuffer), b => b.toString(16).padStart(2, '0')).join('')
+    const init = await api<{ attachment_id: string; chunk_size: number }>('/attachments/init', { method: 'POST', body: JSON.stringify({ sha256, size_bytes: file.size, mime_type: file.type || 'image/jpeg', owner_type: 'product' }) })
+    const chunkSize = init.chunk_size || 4 * 1024 * 1024
+    let index = 0
+    for (let offset = 0; offset < file.size; offset += chunkSize) {
+      const chunk = file.slice(offset, offset + chunkSize)
+      await fetch(`/api/v1/attachments/${init.attachment_id}/chunks/${index++}`, { method: 'PUT', headers: { Authorization: `Bearer ${localStorage.getItem('clothp_access_token')}`, 'Content-Type': 'application/octet-stream' }, body: chunk }).then(async r => { if (!r.ok) throw new Error((await r.json()).message) })
+    }
+    await api(`/attachments/${init.attachment_id}/complete`, { method: 'POST', body: JSON.stringify({ total_chunks: index }) })
+    await api(`/products/${productId}/images`, { method: 'POST', body: JSON.stringify({ attachment_id: init.attachment_id, view_type: adjustViewType.value, sort_no: adjustImages.value.length + 1 }) })
+    notice.value = `${viewNames[adjustViewType.value]}上传成功`
+    await loadAdjustImages()
+  } catch (e) { error.value = (e as Error).message } finally {
+    adjustUploading.value = false
+    if (adjustFileInput.value) adjustFileInput.value.value = ''
+  }
+}
+async function removeAdjustImage(image: any) {
+  const productId = resolveAdjustProductId()
+  if (!productId) return
+  if (!window.confirm(`确认删除${viewNames[image.view_type] || image.view_type}图片？`)) return
+  try { await api(`/products/${productId}/images/${image.link_id}`, { method: 'DELETE' }); notice.value = '图片已删除'; await loadAdjustImages() } catch (e) { error.value = (e as Error).message }
+}
+function openAdjustViewer(image: any) {
+  adjustViewer.value = { attachment_id: image.attachment_id, title: (viewNames[image.view_type] || image.view_type) + ' · ' + (projectAdjust.value?.product_name || '') }
+}
+/* 新建订单项目弹窗：右侧产品多角度图片区（仅在选了已存在的产品时可上传/展示） */
+const createImages = ref<any[]>([])
+const createViewType = ref('standard')
+const createUploading = ref(false)
+const createFileInput = ref<HTMLInputElement>()
+function resolveCreateProductId(): string | null {
+  if (products.value.some(p => p.id === projectForm.product_id)) return projectForm.product_id
+  return products.value.find(p => p.name === projectForm.product_id)?.id || null
+}
+async function loadCreateImages() {
+  const productId = resolveCreateProductId()
+  if (!productId) { createImages.value = []; return }
+  try { const res = await api<{ items: any[] }>(`/products/${productId}/images`); createImages.value = res.items } catch { createImages.value = [] }
+}
+async function uploadCreateImage(event: Event) {
+  const productId = resolveCreateProductId()
+  const file = (event.target as HTMLInputElement).files?.[0]
+  if (!file || !productId) { if (!productId) error.value = '请先在产品字典中选择已有产品，才能上传图片'; return }
+  if (file.size > 20 * 1024 * 1024) { error.value = '图片不能超过20MB'; return }
+  createUploading.value = true; error.value = ''
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const hashBuffer = await crypto.subtle.digest('SHA-256', bytes)
+    const sha256 = Array.from(new Uint8Array(hashBuffer), b => b.toString(16).padStart(2, '0')).join('')
+    const init = await api<{ attachment_id: string; chunk_size: number }>('/attachments/init', { method: 'POST', body: JSON.stringify({ sha256, size_bytes: file.size, mime_type: file.type || 'image/jpeg', owner_type: 'product' }) })
+    const chunkSize = init.chunk_size || 4 * 1024 * 1024
+    let index = 0
+    for (let offset = 0; offset < file.size; offset += chunkSize) {
+      const chunk = file.slice(offset, offset + chunkSize)
+      await fetch(`/api/v1/attachments/${init.attachment_id}/chunks/${index++}`, { method: 'PUT', headers: { Authorization: `Bearer ${localStorage.getItem('clothp_access_token')}`, 'Content-Type': 'application/octet-stream' }, body: chunk }).then(async r => { if (!r.ok) throw new Error((await r.json()).message) })
+    }
+    await api(`/attachments/${init.attachment_id}/complete`, { method: 'POST', body: JSON.stringify({ total_chunks: index }) })
+    await api(`/products/${productId}/images`, { method: 'POST', body: JSON.stringify({ attachment_id: init.attachment_id, view_type: createViewType.value, sort_no: createImages.value.length + 1 }) })
+    notice.value = `${viewNames[createViewType.value]}上传成功`
+    await loadCreateImages()
+  } catch (e) { error.value = (e as Error).message } finally {
+    createUploading.value = false
+    if (createFileInput.value) createFileInput.value.value = ''
+  }
+}
+async function removeCreateImage(image: any) {
+  const productId = resolveCreateProductId()
+  if (!productId) return
+  if (!window.confirm(`确认删除${viewNames[image.view_type] || image.view_type}图片？`)) return
+  try { await api(`/products/${productId}/images/${image.link_id}`, { method: 'DELETE' }); notice.value = '图片已删除'; await loadCreateImages() } catch (e) { error.value = (e as Error).message }
+}
+function openCreateViewer(image: any) {
+  const productName = products.value.find(p => p.id === resolveCreateProductId())?.name || projectForm.product_id || ''
+  adjustViewer.value = { attachment_id: image.attachment_id, title: (viewNames[image.view_type] || image.view_type) + ' · ' + productName }
 }
 async function saveAdjust() {
   if (!projectAdjust.value) return
@@ -74,9 +163,25 @@ async function saveAdjust() {
     projectAdjust.value = null; notice.value = '项目已更新'; await load()
   } catch (e) { error.value = (e as Error).message } finally { saving.value = false }
 }
-/* 委托方视角：列表分「本厂/外协」，并支持场景筛选（6.12.7） */
-const visibleWorkOrders = computed(() => data['work-orders'].filter(o =>
-  (!partyFilter.value || o.party === partyFilter.value) && (!sceneFilter.value || o.scene_type === sceneFilter.value)))
+const projectKeyword = ref('')
+const projectFilter = ref('')
+const filteredProjects = computed(() => {
+  const kw = projectFilter.value.trim().toLowerCase()
+  if (!kw) return data.projects
+  return data.projects.filter((p: any) =>
+    [p.project_code, p.customer_name, p.style_no, p.style_name, p.product_name]
+      .some(v => String(v || '').toLowerCase().includes(kw)))
+})
+const orderPage = ref(1)
+const orderPageSize = ref(10)
+const pagedProjects = computed(() => {
+  const start = (orderPage.value - 1) * orderPageSize.value
+  return filteredProjects.value.slice(start, start + orderPageSize.value)
+})
+const orderPageCount = computed(() => Math.max(1, Math.ceil(filteredProjects.value.length / orderPageSize.value)))
+function applyProjectSearch() { projectFilter.value = projectKeyword.value; orderPage.value = 1 }
+function changeOrderPage(delta: number) { orderPage.value = Math.min(orderPageCount.value, Math.max(1, orderPage.value + delta)) }
+function onOrderPageSizeChange() { orderPage.value = 1 }
 const projectOptions = computed(() => data.projects.map(item => ({ value: item.id, label: `${item.project_code} · ${item.product_name}` })))
 const productOptions = computed(() => products.value.map(item => ({ value: item.id, label: `${item.product_code} · ${item.name}` })))
 const customerOptions = computed(() => customers.value.map(item => ({ value: item.id, label: item.name })))
@@ -91,48 +196,29 @@ async function loadSection(path: string): Promise<{ items: any[] } | null> {
 }
 async function load() {
   if (!ready.value) return
-  loading.value = true; error.value = ''
+  loading.value = true; error.value = ''; orderPage.value = 1
   const [projects, orders, cuttings, productData, customerData] = await Promise.all([
     canProjectRead.value ? loadSection('/projects') : Promise.resolve(null),
-    canWorkOrderRead.value ? loadSection('/work-orders' + (statusFilter.value ? '?status=' + statusFilter.value : '')) : Promise.resolve(null),
+    canWorkOrderRead.value ? loadSection('/work-orders') : Promise.resolve(null),
     canCuttingRead.value ? loadSection('/cutting-orders') : Promise.resolve(null),
     loadSection('/products'),
     loadSection('/customers'),
   ])
   if (projects) data.projects = projects.items
+  if (orders) data['work-orders'] = orders.items
   if (cuttings) data['cutting-orders'] = cuttings.items
   if (productData) products.value = productData.items
   if (customerData) customers.value = customerData.items
-  /* 补充场景元数据：本厂/外协分组与场景徽标不改变原有工单数据结构 */
-  const sceneRows = canWorkOrderRead.value ? await loadSection('/scene/work-orders') : null
-  if (orders) {
-    const sceneMap = new Map((sceneRows?.items || []).map((s: any) => [s.id, s]))
-    data['work-orders'] = orders.items.map((o: any) => {
-      const s: any = sceneMap.get(o.id)
-      return { ...o, scene_type: s?.scene_type || 'A', scene_sub: s?.scene_sub || 'A1',
-        party: s?.party || '本厂', outsource: !!s?.outsource, counterparty: s?.counterparty || '' }
-    })
-  }
   loading.value = false
   loaded.value = true
 }
-/* 进入页面即加载：权限已就绪时立即加载，未就绪时等权限到位再加载。
- * 当前 tab 无权限时切到第一个有权限的 tab。 */
-watch(ready, (r) => {
-  if (!r) return
-  if (availableTabs.value.length && !availableTabs.value.includes(tab.value)) tab.value = availableTabs.value[0]
-  void load()
-}, { immediate: true })
-/* 切换 tab 时确保数据已加载（进入页面 watch 通常已完成，这里兜底防止空列表） */
-function switchTab(next: TabKey) {
-  tab.value = next
-  if (!loaded.value && !loading.value) void load()
-}
+/* 进入页面即加载：权限已就绪时立即加载，未就绪时等权限到位再加载 */
+watch(ready, (r) => { if (r) void load() }, { immediate: true })
 function open(type: string) {
   error.value = ''
   if (type === 'project' && !customers.value.length) { error.value = '请先在“员工与客户”中新增客户'; return }
   if (type === 'order' && !data.projects.length) { error.value = '请先创建项目'; return }
-  if (type === 'project') Object.assign(projectForm, { project_code: '', customer_id: '', product_id: '', style_no: '', style_name: '', order_qty: 900, customer_unit_price: '0', external_unit_price: '0', required_delivery_date: '' })
+  if (type === 'project') { Object.assign(projectForm, { project_code: '', customer_id: '', product_id: '', style_no: '', style_name: '', order_qty: 900, customer_unit_price: '0', external_unit_price: '0', required_delivery_date: '' }); createImages.value = []; createViewType.value = 'standard' }
   if (type === 'cutting') { cuttingForm.marker_id = ''; markers.value = [] }
   modal.value = type
 }
@@ -154,9 +240,10 @@ async function reviewOrder(item: any) {
 }
 function onProjectProductChange() {
   const product = products.value.find(item => item.id === projectForm.product_id)
-  if (!product) return
+  if (!product) { createImages.value = []; return }
   if (!projectForm.style_no) projectForm.style_no = product.product_code || ''
   if (!projectForm.style_name) projectForm.style_name = product.name || ''
+  void loadCreateImages()
 }
 async function createProject() {
   saving.value = true; error.value = ''
@@ -176,7 +263,7 @@ async function createCutting() {
   if (!cuttingForm.marker_id) { error.value = '请选择已审核的唛架'; return }
   saving.value = true; error.value = ''
   const payload = { cutting_no: cuttingForm.cutting_no, work_order_id: cuttingForm.work_order_id, marker_id: cuttingForm.marker_id, cutting_date: Date.now() * 1000, fabric_layers: 1, cut_qty: Number(cuttingForm.cut_qty), details: [{ color: cuttingForm.color, size: cuttingForm.size, bundle_count: Number(cuttingForm.bundle_count), piece_qty: Number(cuttingForm.cut_qty), sort_no: 1 }] }
-  try { await api('/cutting-orders', { method: 'POST', body: JSON.stringify(payload) }); modal.value = ''; notice.value = '裁床草稿已创建，请核对后确认'; tab.value = 'cutting-orders'; await load() } catch (e) { error.value = (e as Error).message } finally { saving.value = false }
+  try { await api('/cutting-orders', { method: 'POST', body: JSON.stringify(payload) }); modal.value = ''; notice.value = '裁床草稿已创建，请核对后确认'; await load() } catch (e) { error.value = (e as Error).message } finally { saving.value = false }
 }
 async function confirmCutting(item: any) {
   if (!window.confirm(`确认裁床单 ${item.cutting_no}？将按配码生成扎和菲票。`)) return
@@ -213,29 +300,103 @@ async function release(item: any) {
 <template>
   <div class="page-header"><div><h1>产品订单管理</h1><p>产品订单、裁床确认、工单下发与工序快照一体化管理</p></div><div class="header-actions"><button v-if="canProjectWrite" class="button secondary" @click="open('project')">+ 项目</button><button v-if="canWorkOrderWrite" class="button secondary" @click="open('order')">+ 工单</button><button v-if="canCuttingWrite" class="button" @click="open('cutting')">+ 裁床</button></div></div>
   <div v-if="error" class="notice error">{{ error }}</div><div v-if="notice" class="notice success">{{ notice }}</div>
-  <section class="panel"><div class="tabs"><button v-if="canWorkOrderRead" :class="{ active: tab === 'work-orders' }" @click="switchTab('work-orders')">生产工单</button><button v-if="canProjectRead" :class="{ active: tab === 'projects' }" @click="switchTab('projects')">产品订单</button><button v-if="canCuttingRead" :class="{ active: tab === 'cutting-orders' }" @click="switchTab('cutting-orders')">裁床与分扎</button></div><div class="toolbar"><FilterSelect v-model="statusFilter" :options="[{value:'',label:'全部状态'},{value:'pending_release',label:'待下发'},{value:'in_production',label:'生产中'}]" @change="load"/><select v-model="partyFilter" class="button secondary" title="委托方视角分组"><option value="">本厂 + 外协</option><option value="本厂">本厂</option><option value="外协">外协</option></select><select v-model="sceneFilter" class="button secondary" title="业务场景筛选"><option value="">全部场景</option><option value="A">A 接服贸客商单</option><option value="B">B 接外包单</option><option value="C">C 接外包工序</option></select><input class="search-input" placeholder="搜索编号或产品"><span class="spacer"></span><button class="button secondary" @click="load">刷新</button></div><PageState :loading="loading" />
-    <div v-if="!loading && tab === 'work-orders'" class="table-wrap"><table><thead><tr><th>工单编号</th><th>场景 / 归属</th><th>产品</th><th>计划数</th><th>良品数</th><th>综合进度</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in visibleWorkOrders" :key="item.id"><td><strong>{{ item.outsource ? '[外协]' : '' }}{{ item.work_order_code }}</strong><small class="text-muted" style="display:block">优先级：{{ item.priority }}</small></td><td><SceneBadge :scene-type="item.scene_type" :scene-sub="item.scene_sub" :outsource="item.outsource" :party="item.party" compact /><small v-if="item.counterparty" class="text-muted" style="display:block">对方：{{ item.counterparty }}</small></td><td><div style="display:flex;align-items:center;gap:10px"><ProductImage :attachment-id="item.image_attachment_id" :width="40" :height="40" /><span>{{ item.product_name }}</span></div></td><td>{{ item.planned_product_qty }}</td><td>{{ item.approved_good_qty }}</td><td><div class="progress-track" style="width:110px"><div class="progress-bar" :style="{ width: `${Math.min(item.progress_ratio * 100, 100)}%` }"></div></div></td><td><span class="status" :class="item.status">{{ statusText[item.status] }}</span></td><td><span v-if="item.review_status" class="status" :class="item.review_status" style="margin-right:6px">{{ item.review_status === 'approved' ? '已审核' : (item.review_status === 'rejected' ? '已驳回' : '待审核') }}</span><button v-if="item.status === 'pending_release' && item.review_status !== 'approved' && canReview" class="button small" @click="reviewOrder(item)">审核</button><button v-if="item.status === 'pending_release' && item.review_status === 'approved'" class="button small" @click="release(item)">下发</button><button v-if="item.status === 'pending_release' && canWorkOrderWrite" class="button link text-danger" @click="removeOrder(item)">删除</button><button v-if="canWorkOrderWrite && ['pending_release','in_production'].includes(item.status)" class="button link text-danger" @click="cancelOrder(item)">取消</button><span v-if="item.status !== 'pending_release'" class="text-muted">v{{ item.version }}</span></td></tr></tbody></table><PageState :empty="!visibleWorkOrders.length" /></div>
-    <div v-if="!loading && tab === 'projects'" class="table-wrap"><table><thead><tr><th>项目号</th><th>客户</th><th>款号</th><th>款式</th><th>产品</th><th>订单数</th><th>未出货</th><th>货期</th><th>操作</th></tr></thead><tbody><tr v-for="item in data.projects" :key="item.id"><td>{{ item.project_code }}</td><td>{{ item.customer_name }}</td><td>{{ item.style_no || '—' }}</td><td>{{ item.style_name || '—' }}</td><td><div style="display:flex;align-items:center;gap:10px"><ProductImage :attachment-id="item.image_attachment_id" :width="40" :height="40" /><span>{{ item.product_name }}</span></div></td><td>{{ item.order_qty }}</td><td>{{ item.unshipped_qty }}</td><td>{{ item.required_delivery_date || '—' }}</td><td><button v-if="canProjectWrite" class="button link" @click="openAdjust(item)">编辑</button><button v-if="canProjectWrite" class="button link text-danger" @click="removeProject(item)">删除</button></td></tr></tbody></table><PageState :empty="!data.projects.length" /></div>
-    <div v-if="!loading && tab === 'cutting-orders'" class="table-wrap"><table><thead><tr><th>裁床单号</th><th>工单 ID</th><th>裁片数</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in data['cutting-orders']" :key="item.id"><td>{{ item.cutting_no }}</td><td class="text-muted">{{ item.work_order_id }}</td><td>{{ item.cut_qty }}</td><td><span class="status" :class="item.status">{{ statusText[item.status] || item.status }}</span></td><td><button v-if="item.status === 'draft'" class="button small" @click="confirmCutting(item)">确认并生成菲票</button><button v-if="item.status === 'draft' && canCuttingWrite" class="button link text-danger" @click="removeCutting(item)">删除</button><span v-if="item.status !== 'draft'" class="text-muted">扎/票已生成</span></td></tr></tbody></table><PageState :empty="!data['cutting-orders'].length" /></div>
+  <section class="panel"><div class="toolbar"><input v-model="projectKeyword" class="search-input" placeholder="搜索订单号或产品" @keyup.enter="applyProjectSearch"><button class="button secondary" @click="applyProjectSearch">检索</button><span class="spacer"></span><button class="button secondary" @click="load">刷新</button></div><PageState :loading="loading" />
+    <div v-if="!loading">
+      <div class="table-wrap"><table><thead><tr><th>订单号</th><th>客户</th><th>款号</th><th>款式</th><th>产品</th><th>订单数</th><th>未出货</th><th>货期</th><th>操作</th></tr></thead><tbody><tr v-for="item in pagedProjects" :key="item.id"><td>{{ item.project_code }}</td><td>{{ item.customer_name }}</td><td>{{ item.style_no || '—' }}</td><td>{{ item.style_name || '—' }}</td><td><div style="display:flex;align-items:center;gap:10px"><ProductImage :attachment-id="item.image_attachment_id" :width="40" :height="40" /><span>{{ item.product_name }}</span></div></td><td>{{ item.order_qty }}</td><td>{{ item.unshipped_qty }}</td><td>{{ item.required_delivery_date || '—' }}</td><td><button v-if="canProjectWrite" class="button link" @click="openAdjust(item)">编辑</button><button v-if="canProjectWrite" class="button link text-danger" @click="removeProject(item)">删除</button></td></tr></tbody></table><PageState :empty="!filteredProjects.length" /></div>
+      <div v-if="filteredProjects.length" class="table-pager">
+        <span class="pager-info">共 {{ filteredProjects.length }} 条 · 第 {{ orderPage }} / {{ orderPageCount }} 页</span>
+        <select v-model.number="orderPageSize" class="pager-size" @change="onOrderPageSizeChange"><option :value="5">5 条/页</option><option :value="10">10 条/页</option><option :value="20">20 条/页</option><option :value="50">50 条/页</option></select>
+        <button class="button secondary" :disabled="orderPage <= 1" @click="changeOrderPage(-1)">上一页</button>
+        <button class="button secondary" :disabled="orderPage >= orderPageCount" @click="changeOrderPage(1)">下一页</button>
+      </div>
+    </div>
   </section>
-  <ModalDialog v-if="modal === 'project'" title="新建订单项目" @close="modal = ''"><div class="form-grid"><div class="field full"><label>项目号</label><input v-model.trim="projectForm.project_code" placeholder="留空自动生成"></div><div class="field"><label class="required">客户</label><FilterSelect v-model="projectForm.customer_id" :options="customerOptions" allow-create placeholder="输入客户名称（可参照客户列表）"/></div><div class="field full"><label class="required">产品</label><FilterSelect v-model="projectForm.product_id" :options="productOptions" allow-create wide placeholder="输入产品名称（可参照产品字典）" @change="onProjectProductChange"/></div><div class="field"><label>款号</label><input v-model.trim="projectForm.style_no" placeholder="选产品自动带出，可修改"></div><div class="field"><label>款式</label><input v-model.trim="projectForm.style_name" placeholder="选产品自动带出，可修改"></div><div class="field"><label class="required">订单数</label><input v-model.number="projectForm.order_qty" type="number" min="1"></div><div class="field"><label>要求货期</label><DatePicker v-model="projectForm.required_delivery_date"/></div><div class="field"><label>客户单价</label><input v-model="projectForm.customer_unit_price"></div><div class="field"><label>外发单价</label><input v-model="projectForm.external_unit_price"></div></div><template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving" @click="createProject">保存项目</button></template></ModalDialog>
+  <ModalDialog v-if="modal === 'project'" title="新建订单项目" wide width="min(1360px, 96vw)" @close="modal = ''">
+    <div class="adjust-wrap">
+      <div class="adjust-form">
+        <div class="form-grid">
+          <div class="field full"><label>订单号</label><input v-model.trim="projectForm.project_code" placeholder="留空自动生成"></div>
+          <div class="field full"><label class="required">客户</label><FilterSelect v-model="projectForm.customer_id" :options="customerOptions" allow-create wide placeholder="输入客户名称（可参照客户列表）"/></div>
+          <div class="field full"><label class="required">产品</label><FilterSelect v-model="projectForm.product_id" :options="productOptions" allow-create wide placeholder="输入产品名称（可参照产品字典）" @change="onProjectProductChange"/></div>
+          <div class="field"><label>款号</label><input v-model.trim="projectForm.style_no" placeholder="选产品自动带出，可修改"></div>
+          <div class="field"><label>款式</label><input v-model.trim="projectForm.style_name" placeholder="选产品自动带出，可修改"></div>
+          <div class="field"><label class="required">订单数</label><input v-model.number="projectForm.order_qty" type="number" min="1"></div>
+          <div class="field"><label>要求货期</label><DatePicker v-model="projectForm.required_delivery_date"/></div>
+          <div class="field"><label>客户单价</label><input v-model="projectForm.customer_unit_price"></div>
+          <div class="field"><label>外发单价</label><input v-model="projectForm.external_unit_price"></div>
+        </div>
+      </div>
+      <div class="adjust-images">
+        <h3>产品图片</h3>
+        <div class="image-toolbar">
+          <FilterSelect v-model="createViewType" :options="Object.entries(viewNames).map(([value, label]) => ({ value, label }))" />
+          <label class="button secondary">{{ createUploading ? '正在上传…' : '上传图片' }}<input ref="createFileInput" type="file" accept="image/*" hidden :disabled="createUploading" @change="uploadCreateImage"></label>
+        </div>
+        <div class="image-grid">
+          <div v-for="image in createImages" :key="image.link_id" class="image-item">
+            <ProductImage :attachment-id="image.attachment_id" :width="150" :height="150" style="cursor:zoom-in" @click="openCreateViewer(image)" />
+            <button class="image-delete" title="删除图片" @click="removeCreateImage(image)">×</button>
+            <p>{{ viewNames[image.view_type] || image.view_type }}</p>
+          </div>
+          <div v-if="!createImages.length" class="text-muted">{{ resolveCreateProductId() ? '暂无图片，可选择角度上传各角度图片' : '选择已有产品后可上传/展示各角度图片' }}</div>
+        </div>
+      </div>
+    </div>
+    <template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving" @click="createProject">保存项目</button></template>
+  </ModalDialog>
   <ModalDialog v-if="modal === 'order'" title="新建生产工单" @close="modal = ''"><div class="form-grid"><div class="field full"><label class="required">工单编号</label><input v-model.trim="orderForm.work_order_code" placeholder="GD202611001"></div><div class="field full"><label class="required">所属项目</label><FilterSelect v-model="orderForm.project_id" :options="projectOptions"/></div><div class="field"><label class="required">计划产品数</label><input v-model.number="orderForm.planned_product_qty" type="number" min="1"><small>服务端按产品工序配比计算任务计划量</small></div><div class="field"><label>紧急程度</label><FilterSelect v-model="orderForm.priority" :options="[{value:'normal',label:'普通'},{value:'urgent',label:'紧急'}]"/></div></div><template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving" @click="createOrder">提交待下发</button></template></ModalDialog>
   <ModalDialog v-if="modal === 'cutting'" title="新建裁床单" @close="modal = ''"><div class="form-grid"><div class="field full"><label class="required">裁床单号</label><input v-model.trim="cuttingForm.cutting_no" placeholder="CC202611001"></div><div class="field full"><label class="required">生产工单</label><FilterSelect v-model="cuttingForm.work_order_id" :options="cuttingOrderOptions" @change="onCuttingOrderChange"/></div><div class="field full"><label class="required">唛架</label><FilterSelect v-model="cuttingForm.marker_id" :options="markerOptions" placeholder="选择已审核唛架"/><small v-if="cuttingForm.work_order_id && !markerOptions.length" class="text-danger">该工单没有已审核唛架，请先在唛架管理提交并审核</small></div><div class="field"><label class="required">裁片数</label><input v-model.number="cuttingForm.cut_qty" type="number" min="1"></div><div class="field"><label>扎数</label><input v-model.number="cuttingForm.bundle_count" type="number" min="1"></div><div class="field"><label>颜色</label><input v-model.trim="cuttingForm.color"></div><div class="field"><label>尺码</label><input v-model.trim="cuttingForm.size"></div></div><div class="notice" style="margin-top:16px">本页使用单颜色/尺码配码；明细合计必须等于裁片数。</div><template #footer><button class="button secondary" @click="modal = ''">取消</button><button class="button" :disabled="saving || !cuttingForm.marker_id" @click="createCutting">保存裁床草稿</button></template></ModalDialog>
-  <ModalDialog v-if="projectAdjust" :title="`编辑订单 · ${projectAdjust.project_code}`" @close="projectAdjust = null">
-    <div v-if="error" class="notice error">{{ error }}</div>
-    <div class="form-grid">
-      <div class="field full"><label>项目号</label><input :value="projectAdjust.project_code" readonly disabled></div>
-      <div class="field"><label class="required">客户</label><FilterSelect v-model="adjustForm.customer_name" :options="customerNameOptions" allow-create placeholder="输入客户名称（可参照客户列表）"/></div>
-      <div class="field full"><label class="required">产品</label><FilterSelect v-model="adjustForm.product_name" :options="productNameOptions" allow-create wide placeholder="输入产品名称（可参照产品字典）"/></div>
-      <div class="field"><label>款号</label><input v-model.trim="adjustForm.style_no" placeholder="选产品自动带出，可修改"></div>
-      <div class="field"><label>款式</label><input v-model.trim="adjustForm.style_name" placeholder="选产品自动带出，可修改"></div>
-      <div class="field"><label class="required">订单数</label><input v-model.number="adjustForm.order_qty" type="number" min="1"></div>
-      <div class="field"><label>要求货期</label><DatePicker v-model="adjustForm.required_delivery_date"/></div>
-      <div class="field"><label>客户单价</label><input v-model="adjustForm.customer_unit_price"></div>
-      <div class="field"><label>外发单价</label><input v-model="adjustForm.external_unit_price"></div>
-      <div class="field full"><label class="required">变更原因</label><input v-model.trim="adjustForm.reason" placeholder="如 客户追加订单"></div>
+  <ModalDialog v-if="projectAdjust" :title="`编辑订单 · ${projectAdjust.project_code}`" wide width="min(1360px, 96vw)" @close="projectAdjust = null">
+    <div class="adjust-wrap">
+      <div class="adjust-form">
+        <div v-if="error" class="notice error">{{ error }}</div>
+        <div class="form-grid">
+          <div class="field full"><label>订单号</label><input :value="projectAdjust.project_code" readonly disabled></div>
+          <div class="field full"><label class="required">客户</label><FilterSelect v-model="adjustForm.customer_name" :options="customerNameOptions" allow-create wide placeholder="输入客户名称（可参照客户列表）"/></div>
+          <div class="field full"><label class="required">产品</label><FilterSelect v-model="adjustForm.product_name" :options="productNameOptions" allow-create wide placeholder="输入产品名称（可参照产品字典）"/></div>
+          <div class="field"><label>款号</label><input v-model.trim="adjustForm.style_no" placeholder="选产品自动带出，可修改"></div>
+          <div class="field"><label>款式</label><input v-model.trim="adjustForm.style_name" placeholder="选产品自动带出，可修改"></div>
+          <div class="field"><label class="required">订单数</label><input v-model.number="adjustForm.order_qty" type="number" min="1"></div>
+          <div class="field"><label>要求货期</label><DatePicker v-model="adjustForm.required_delivery_date"/></div>
+          <div class="field"><label>客户单价</label><input v-model="adjustForm.customer_unit_price"></div>
+          <div class="field"><label>外发单价</label><input v-model="adjustForm.external_unit_price"></div>
+          <div class="field full"><label class="required">变更原因</label><input v-model.trim="adjustForm.reason" placeholder="如 客户追加订单"></div>
+        </div>
+        <div class="notice">订单号不可修改；客户/产品按名称保存；订单数不能小于已出货数或已排产数；修改会写入审计。</div>
+      </div>
+      <div class="adjust-images">
+        <h3>产品图片</h3>
+        <div class="image-toolbar">
+          <FilterSelect v-model="adjustViewType" :options="Object.entries(viewNames).map(([value, label]) => ({ value, label }))" />
+          <label class="button secondary">{{ adjustUploading ? '正在上传…' : '上传图片' }}<input ref="adjustFileInput" type="file" accept="image/*" hidden :disabled="adjustUploading" @change="uploadAdjustImage"></label>
+        </div>
+        <div class="image-grid">
+          <div v-for="image in adjustImages" :key="image.link_id" class="image-item">
+            <ProductImage :attachment-id="image.attachment_id" :width="150" :height="150" style="cursor:zoom-in" @click="openAdjustViewer(image)" />
+            <button class="image-delete" title="删除图片" @click="removeAdjustImage(image)">×</button>
+            <p>{{ viewNames[image.view_type] || image.view_type }}</p>
+          </div>
+          <div v-if="!adjustImages.length" class="text-muted">暂无图片，可选择角度上传各角度图片</div>
+        </div>
+      </div>
     </div>
-    <div class="notice">项目号不可修改；客户/产品按名称保存；订单数不能小于已出货数或已排产数；修改会写入审计。</div>
     <template #footer><button class="button secondary" @click="projectAdjust = null">取消</button><button class="button" :disabled="saving || !adjustForm.reason" @click="saveAdjust">保存修改</button></template>
   </ModalDialog>
+  <ImageViewer v-if="adjustViewer" :attachment-id="adjustViewer.attachment_id" :title="adjustViewer.title" @close="adjustViewer = null" />
 </template>
+<style scoped>
+.table-pager{display:flex;gap:10px;align-items:center;justify-content:flex-end;padding:12px 20px;border-top:1px solid var(--border);background:rgba(255,255,255,.6)}
+.pager-info{margin-right:auto;color:#667085;font-size:12px}
+.pager-size{padding:6px 9px;min-width:auto}
+.table-pager .button{padding:6px 12px;min-width:auto}
+.adjust-wrap{display:flex;gap:20px;align-items:flex-start}
+.adjust-form{flex:1;min-width:0}
+.adjust-images{width:420px;flex:none;border-left:1px solid var(--border);padding-left:18px}
+.adjust-images h3{margin:0 0 12px;font-size:14px;color:#17255f}
+.image-toolbar{display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.image-toolbar .button{position:relative}
+.image-grid{display:flex;gap:12px;flex-wrap:wrap}
+.image-item{text-align:center;position:relative}
+.image-item p{margin:4px 0 0;font-size:12px;color:#667085}
+.image-delete{position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;border:0;background:#d92d20;color:#fff;font-size:13px;line-height:20px;cursor:pointer}
+</style>

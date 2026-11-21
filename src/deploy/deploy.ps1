@@ -25,6 +25,8 @@ param(
   [switch]$UploadConfig                       # 首次部署：把本地 config.yaml（改好端口）一起上传
 )
 $ErrorActionPreference = 'Stop'
+# 远端 bash 需要无 BOM 的 UTF-8 且仅 LF 换行，否则首行 set -e 会被当作 BOM 字符
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $Root     = $PSScriptRoot | Split-Path        # src 目录
 $BuildDir = Join-Path $Root 'deploy\build'
 $Stamp    = Get-Date -Format 'yyyyMMddHHmmss'
@@ -103,7 +105,9 @@ curl -fsS "http://127.0.0.1:$PORT/api/v1/system/health/ready" && echo " <- backe
 '@
 $Remote = $Remote.Replace('__WEB_DIR__', $FrontendDir).Replace('__SRV_DIR__', $BackendDir).
   Replace('__SVC__', $ServiceName).Replace('__PORT__', "$BackendPort").Replace('__TS__', $Stamp)
-$Remote | ssh @SshBase "$ServerUser@$ServerHost" 'bash -s'
+$Remote = $Remote.Replace("`r", '')
+$RemoteB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Remote))
+ssh @SshBase "$ServerUser@$ServerHost" "echo $RemoteB64 | base64 -d | bash -s"
 if ($LASTEXITCODE -ne 0) { throw '服务器端部署失败（可ssh登录服务器检查日志：journalctl -u clothp -n 50）' }
 
 # 6. 后端端口变化时提醒同步 Caddy upstream

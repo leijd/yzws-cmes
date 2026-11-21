@@ -150,6 +150,190 @@ func registerMaterialReceipts(api *httpapi.API) {
 		return masterdata.CreateFor(api, w, r, p, "suppliers", body)
 	})
 
+	// 入库窗口内快捷新增物料：名称由用户填写，编码留空自动生成，单位默认“件”。
+	api.Handle("POST /api/v1/material-receipts/materials", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in map[string]any
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		body := map[string]any{
+			"code":          strings.TrimSpace(stringValue(in["code"])),
+			"name":          strings.TrimSpace(stringValue(in["name"])),
+			"unit":          defaultString(strings.TrimSpace(stringValue(in["unit"])), "件"),
+			"category":      strings.TrimSpace(stringValue(in["category"])),
+			"material_type": strings.TrimSpace(stringValue(in["material_type"])),
+			"specification": strings.TrimSpace(stringValue(in["specification"])),
+		}
+		if supplier := strings.TrimSpace(stringValue(in["default_supplier_id"])); supplier != "" {
+			body["default_supplier_id"] = supplier
+		}
+		return masterdata.CreateFor(api, w, r, p, "materials", body)
+	})
+
+	// 物料入库明细列设置：按人员持久化（顺序、显示、固定列）。
+	api.Handle("GET /api/v1/material-receipts/column-prefs", "inventory:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var raw []byte
+		err := api.DB.QueryRow(r.Context(), "SELECT pref_value::text FROM user_ui_preference WHERE tenant_id=$1 AND user_id=$2 AND pref_key='material_receipt_columns'", p.TenantID, p.UserID).Scan(&raw)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpapi.JSON(w, 200, map[string]any{"columns": nil, "fixed_count": 0})
+			}
+			return err
+		}
+		var pref struct {
+			Columns    []string `json:"columns"`
+			FixedCount int      `json:"fixed_count"`
+		}
+		if err := json.Unmarshal(raw, &pref); err != nil {
+			return httpapi.JSON(w, 200, map[string]any{"columns": nil, "fixed_count": 0})
+		}
+		return httpapi.JSON(w, 200, map[string]any{"columns": pref.Columns, "fixed_count": pref.FixedCount})
+	})
+	api.Handle("PUT /api/v1/material-receipts/column-prefs", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in struct {
+			Columns    []string `json:"columns"`
+			FixedCount int      `json:"fixed_count"`
+		}
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		value, err := json.Marshal(map[string]any{"columns": in.Columns, "fixed_count": in.FixedCount})
+		if err != nil {
+			return err
+		}
+		_, err = api.DB.Exec(r.Context(), `INSERT INTO user_ui_preference(tenant_id,user_id,pref_key,pref_value,updated_at) VALUES($1,$2,'material_receipt_columns',$3::jsonb,$4)
+			ON CONFLICT (tenant_id,user_id,pref_key) DO UPDATE SET pref_value=EXCLUDED.pref_value,updated_at=EXCLUDED.updated_at`, p.TenantID, p.UserID, string(value), platform.Now())
+		if err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 200, map[string]any{"ok": true})
+	})
+
+	// 入库窗口内物料列表：按物料类型/关键字筛选，分页，供选料弹窗表格化管理。
+	api.Handle("GET /api/v1/material-receipts/materials", "inventory:read", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
+		category := strings.TrimSpace(r.URL.Query().Get("category"))
+		materialType := strings.TrimSpace(r.URL.Query().Get("material_type"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+		if pageSize < 1 || pageSize > 100 {
+			pageSize = 20
+		}
+		/* 表头排序字段走白名单，避免拼接外部输入；默认按编码升序，并以编码兜底保证分页稳定 */
+		orderBy := "code"
+		switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort"))) {
+		case "name":
+			orderBy = "name"
+		case "specification":
+			orderBy = "COALESCE(specification,'')"
+		case "unit":
+			orderBy = "unit"
+		case "material_type":
+			orderBy = "COALESCE(material_type,'')"
+		}
+		direction := "ASC"
+		if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("order")), "desc") {
+			direction = "DESC"
+		}
+		orderClause := orderBy + " " + direction + ", code"
+		where := "tenant_id=$1"
+		args := []any{p.TenantID}
+		if category != "" {
+			args = append(args, category)
+			where += fmt.Sprintf(" AND COALESCE(category,'')=$%d", len(args))
+		}
+		if materialType != "" {
+			args = append(args, materialType)
+			where += fmt.Sprintf(" AND material_type=$%d", len(args))
+		}
+		if keyword != "" {
+			kw := "%" + keyword + "%"
+			args = append(args, kw)
+			where += fmt.Sprintf(" AND (name ILIKE $%d OR code ILIKE $%d OR COALESCE(specification,'') ILIKE $%d)", len(args), len(args), len(args))
+		}
+		var total int64
+		if err := api.DB.QueryRow(r.Context(), "SELECT count(*) FROM material WHERE "+where, args...).Scan(&total); err != nil {
+			return err
+		}
+		limitArg, offsetArg := len(args)+1, len(args)+2
+		queryArgs := append(append([]any{}, args...), pageSize, (page-1)*pageSize)
+		rows, err := api.DB.Query(r.Context(), fmt.Sprintf(`SELECT id,code,name,COALESCE(category,''),COALESCE(material_type,''),COALESCE(specification,''),unit,status,version FROM material WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d`, where, orderClause, limitArg, offsetArg), queryArgs...)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		items := []map[string]any{}
+		for rows.Next() {
+			var id, code, name, cat, matType, spec, unit, status string
+			var version int64
+			if err := rows.Scan(&id, &code, &name, &cat, &matType, &spec, &unit, &status, &version); err != nil {
+				return err
+			}
+			items = append(items, map[string]any{"id": id, "code": code, "name": name, "category": cat, "material_type": matType, "specification": spec, "unit": unit, "status": status, "version": version})
+		}
+		return httpapi.JSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
+	})
+
+	// 入库窗口内修改物料（乐观锁）。
+	api.Handle("PATCH /api/v1/material-receipts/materials/{id}", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		var in map[string]any
+		if err := httpapi.Decode(r, &in); err != nil {
+			return err
+		}
+		version, ok := in["version"].(float64)
+		if !ok || version <= 0 {
+			return httpapi.Error(400, "VERSION_REQUIRED", "必须提供版本号")
+		}
+		name := strings.TrimSpace(stringValue(in["name"]))
+		if name == "" {
+			return httpapi.Error(400, "VALIDATION_ERROR", "物料名称必填")
+		}
+		unit := defaultString(strings.TrimSpace(stringValue(in["unit"])), "件")
+		spec := strings.TrimSpace(stringValue(in["specification"]))
+		cat := strings.TrimSpace(stringValue(in["category"]))
+		matType := strings.TrimSpace(stringValue(in["material_type"]))
+		tag, err := api.DB.Exec(r.Context(), `UPDATE material SET name=$1,specification=$2,unit=$3,category=$4,material_type=$5,version=version+1,updated_at=$6,updated_by=$7,updated_node=$8 WHERE tenant_id=$9 AND id=$10 AND version=$11`,
+			name, spec, unit, cat, matType, platform.Now(), p.UserID, api.Config.NodeID, p.TenantID, r.PathValue("id"), int64(version))
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return httpapi.Error(409, "VERSION_CONFLICT", "物料已被其他操作修改，请刷新后重试")
+		}
+		return httpapi.JSON(w, 200, map[string]any{"id": r.PathValue("id"), "version": int64(version) + 1})
+	})
+
+	// 入库窗口内删除物料：被业务单据引用时禁止删除。
+	api.Handle("DELETE /api/v1/material-receipts/materials/{id}", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
+		tenantID, id := p.TenantID, r.PathValue("id")
+		var code, name string
+		if err := api.DB.QueryRow(r.Context(), "SELECT code,name FROM material WHERE tenant_id=$1 AND id=$2", tenantID, id).Scan(&code, &name); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpapi.Error(404, "NOT_FOUND", "物料不存在")
+			}
+			return err
+		}
+		var used int64
+		if err := api.DB.QueryRow(r.Context(), `SELECT
+			(SELECT count(*) FROM material_receipt_line WHERE tenant_id=$1 AND material_id IN ($2,$3,$4)) +
+			(SELECT count(*) FROM inventory_ledger WHERE tenant_id=$1 AND material_id IN ($2,$3,$4)) +
+			(SELECT count(*) FROM material_issue WHERE tenant_id=$1 AND material_id IN ($2,$3,$4)) +
+			(SELECT count(*) FROM marker WHERE tenant_id=$1 AND material_id IN ($2,$3,$4)) +
+			(SELECT count(*) FROM outsourcing_material_flow WHERE tenant_id=$1 AND (material_id IN ($2,$3,$4) OR material_name=$4))`, tenantID, id, code, name).Scan(&used); err != nil {
+			return err
+		}
+		if used > 0 {
+			return httpapi.Error(409, "MATERIAL_IN_USE", "该物料已被业务单据使用，不允许删除")
+		}
+		if _, err := api.DB.Exec(r.Context(), "DELETE FROM material WHERE tenant_id=$1 AND id=$2", tenantID, id); err != nil {
+			return err
+		}
+		return httpapi.JSON(w, 200, map[string]any{"id": id})
+	})
+
 	// 供应商提供的物料：历史入库物料 + 默认供应商为该物料的主数据，按最近提供时间倒序，支持关键字筛选与分页。
 	api.Handle("GET /api/v1/material-receipts/supplier-materials", "inventory:receipt", func(w http.ResponseWriter, r *http.Request, p auth.Principal) error {
 		supplierID := r.URL.Query().Get("supplier_id")
@@ -178,11 +362,12 @@ func registerMaterialReceipts(api *httpapi.API) {
 			), filtered AS (
 				SELECT merged.material_id, COALESCE(NULLIF(m.code,''),merged.material_id) AS code,
 					COALESCE(m.name,merged.material_id) AS name,COALESCE(m.specification,'') AS specification,
-					COALESCE(m.unit,'') AS unit,merged.supplied_at,COUNT(*) OVER() AS total
+					COALESCE(m.unit,'') AS unit,COALESCE(m.material_type,'') AS material_type,
+					merged.supplied_at,COUNT(*) OVER() AS total
 				FROM merged LEFT JOIN material m ON m.tenant_id=$1 AND m.id=merged.material_id
 				WHERE $3='' OR COALESCE(m.name,'') ILIKE '%'||$3||'%' OR COALESCE(m.code,'') ILIKE '%'||$3||'%' OR merged.material_id ILIKE '%'||$3||'%'
 			)
-			SELECT material_id,code,name,specification,unit,supplied_at,total FROM filtered
+			SELECT material_id,code,name,specification,unit,material_type,supplied_at,total FROM filtered
 			ORDER BY supplied_at DESC,code LIMIT $4 OFFSET $5`, p.TenantID, supplierID, keyword, pageSize, (page-1)*pageSize)
 		if err != nil {
 			return err
@@ -191,13 +376,13 @@ func registerMaterialReceipts(api *httpapi.API) {
 		items := []map[string]any{}
 		total := int64(0)
 		for rows.Next() {
-			var materialID, code, name, spec, unit string
+			var materialID, code, name, spec, unit, materialType string
 			var suppliedAt, rowTotal int64
-			if err := rows.Scan(&materialID, &code, &name, &spec, &unit, &suppliedAt, &rowTotal); err != nil {
+			if err := rows.Scan(&materialID, &code, &name, &spec, &unit, &materialType, &suppliedAt, &rowTotal); err != nil {
 				return err
 			}
 			total = rowTotal
-			items = append(items, map[string]any{"material_id": materialID, "code": code, "name": name, "specification": spec, "unit": unit, "supplied_at": suppliedAt})
+			items = append(items, map[string]any{"material_id": materialID, "code": code, "name": name, "specification": spec, "unit": unit, "material_type": materialType, "supplied_at": suppliedAt})
 		}
 		return httpapi.JSON(w, 200, map[string]any{"items": items, "total": total, "page": page, "page_size": pageSize})
 	})
@@ -297,23 +482,23 @@ func registerMaterialReceipts(api *httpapi.API) {
 			}
 			return err
 		}
-		rows, err := api.DB.Query(r.Context(), `SELECT l.id,l.material_id,COALESCE(NULLIF(m.code,''),l.material_id),COALESCE(m.name,l.material_id),COALESCE(m.category,''),COALESCE(m.specification,''),COALESCE(m.unit,''),COALESCE(l.bed_no,''),COALESCE(l.color_no,''),COALESCE(l.batch_no,''),
+		rows, err := api.DB.Query(r.Context(), `SELECT DISTINCT ON (l.id) l.id,l.material_id,COALESCE(NULLIF(m.code,''),l.material_id),COALESCE(m.name,l.material_id),COALESCE(m.category,''),COALESCE(m.material_type,''),COALESCE(m.specification,''),COALESCE(m.unit,''),COALESCE(l.bed_no,''),COALESCE(l.color_no,''),COALESCE(l.batch_no,''),
 			l.received_qty::text,l.pass_qty::text,l.reject_qty::text,l.concession_qty::text,l.pending_qty::text,l.accepted_qty::text,l.unit_price::text,l.amount::text,COALESCE(l.remark,''),
 			COALESCE((SELECT i.result FROM iqc_result i WHERE i.tenant_id=l.tenant_id AND i.receipt_line_id=l.id ORDER BY i.inspected_at DESC LIMIT 1),''),
 			COALESCE((SELECT e2.name FROM iqc_result i JOIN employee e2 ON e2.tenant_id=i.tenant_id AND e2.id=i.inspector_employee_id WHERE i.tenant_id=l.tenant_id AND i.receipt_line_id=l.id ORDER BY i.inspected_at DESC LIMIT 1),'')
 			FROM material_receipt_line l LEFT JOIN material m ON m.tenant_id=l.tenant_id AND m.id=l.material_id
-			WHERE l.tenant_id=$1 AND l.receipt_id=$2 ORDER BY l.created_at,l.id`, p.TenantID, r.PathValue("id"))
+			WHERE l.tenant_id=$1 AND l.receipt_id=$2 ORDER BY l.id,l.created_at`, p.TenantID, r.PathValue("id"))
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		lines := []map[string]any{}
 		for rows.Next() {
-			var id, materialID, code, name, category, spec, unit, bed, color, batch, received, pass, reject, concession, pending, accepted, price, amount, remark, iqcResult, inspector string
-			if err := rows.Scan(&id, &materialID, &code, &name, &category, &spec, &unit, &bed, &color, &batch, &received, &pass, &reject, &concession, &pending, &accepted, &price, &amount, &remark, &iqcResult, &inspector); err != nil {
+			var id, materialID, code, name, category, materialType, spec, unit, bed, color, batch, received, pass, reject, concession, pending, accepted, price, amount, remark, iqcResult, inspector string
+			if err := rows.Scan(&id, &materialID, &code, &name, &category, &materialType, &spec, &unit, &bed, &color, &batch, &received, &pass, &reject, &concession, &pending, &accepted, &price, &amount, &remark, &iqcResult, &inspector); err != nil {
 				return err
 			}
-			lines = append(lines, map[string]any{"id": id, "material_id": materialID, "material_code": code, "material_name": name, "category": category, "specification": spec, "unit": unit, "bed_no": bed, "color_no": color, "batch_no": batch, "received_qty": received, "pass_qty": pass, "reject_qty": reject, "concession_qty": concession, "pending_qty": pending, "accepted_qty": accepted, "unit_price": price, "amount": amount, "remark": remark, "iqc_result": iqcResult, "inspector_name": inspector})
+			lines = append(lines, map[string]any{"id": id, "material_id": materialID, "material_code": code, "material_name": name, "category": category, "material_type": materialType, "specification": spec, "unit": unit, "bed_no": bed, "color_no": color, "batch_no": batch, "received_qty": received, "pass_qty": pass, "reject_qty": reject, "concession_qty": concession, "pending_qty": pending, "accepted_qty": accepted, "unit_price": price, "amount": amount, "remark": remark, "iqc_result": iqcResult, "inspector_name": inspector})
 		}
 		return httpapi.JSON(w, 200, map[string]any{"header": header, "lines": lines})
 	})

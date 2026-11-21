@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 客户资料（基础资料）：客户编码/名称/联系人/电话/地址维护。
+ * 客户资料（基础资料）：客户名称（租户内唯一）/联系人/电话/地址维护。
  * 客户是制衣厂基础资料的独立模块（订单与项目引用它），不属于员工信息。
  * 权限：查看 masterdata:read，新增 masterdata:write。
  */
@@ -10,7 +10,7 @@ import { usePermissions } from '../permissions'
 import ModalDialog from '../components/ModalDialog.vue'
 import PageState from '../components/PageState.vue'
 
-interface Customer { id: string; code: string; name: string; status: string; version: number }
+interface Customer { id: string; name: string; status: string; version: number }
 
 const { has } = usePermissions()
 const canWrite = computed(() => has('masterdata:write'))
@@ -21,7 +21,7 @@ const saving = ref(false)
 const error = ref('')
 const notice = ref('')
 const keyword = ref('')
-const form = reactive({ code: '', name: '', contact_name: '', phone: '', address: '', remark: '' })
+const form = reactive({ name: '', contact_name: '', phone: '', address: '', remark: '' })
 const showForm = ref(false)
 
 const statusText: Record<string, string> = { active: '启用', disabled: '停用' }
@@ -33,7 +33,7 @@ async function load() {
 }
 
 function openCreate() {
-  Object.assign(form, { code: '', name: '', contact_name: '', phone: '', address: '', remark: '' })
+  Object.assign(form, { name: '', contact_name: '', phone: '', address: '', remark: '' })
   error.value = ''
   showForm.value = true
 }
@@ -52,7 +52,7 @@ async function save() {
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase()
   if (!k) return items.value
-  return items.value.filter(c => c.code.toLowerCase().includes(k) || c.name.toLowerCase().includes(k))
+  return items.value.filter(c => c.name.toLowerCase().includes(k))
 })
 
 onMounted(load)
@@ -60,7 +60,7 @@ onMounted(load)
 
 <template>
   <div class="page-header">
-    <div><h1>客户资料</h1><p>客户编码、名称与联系方式维护；订单与项目建档时引用这里的数据</p></div>
+    <div><h1>客户资料</h1><p>客户名称（租户内唯一）与联系方式维护；订单与项目建档时引用这里的数据</p></div>
     <div class="header-actions"><button v-if="canWrite" class="button" @click="openCreate">+ 新增客户</button></div>
   </div>
   <div v-if="error" class="notice error">{{ error }}</div>
@@ -68,17 +68,16 @@ onMounted(load)
 
   <section class="panel">
     <div class="toolbar">
-      <input v-model.trim="keyword" class="search-input" placeholder="搜索编码或名称">
+      <input v-model.trim="keyword" class="search-input" placeholder="搜索客户名称">
       <span class="spacer"></span>
       <button class="button secondary" @click="load">刷新</button>
     </div>
     <PageState :loading="loading" :empty="!filtered.length" />
     <div v-if="!loading && filtered.length" class="table-wrap">
       <table>
-        <thead><tr><th>客户编码</th><th>名称</th><th>状态</th><th>版本</th></tr></thead>
+        <thead><tr><th>客户名称</th><th>状态</th><th>版本</th></tr></thead>
         <tbody>
           <tr v-for="item in filtered" :key="item.id">
-            <td>{{ item.code }}</td>
             <td>{{ item.name }}</td>
             <td><span class="status" :class="item.status">{{ statusText[item.status] || item.status }}</span></td>
             <td>v{{ item.version }}</td>
@@ -91,8 +90,7 @@ onMounted(load)
   <ModalDialog v-if="showForm" title="新增客户" @close="showForm = false">
     <div v-if="error" class="notice error">{{ error }}</div>
     <div class="form-grid">
-      <div class="field"><label>客户编码</label><input v-model.trim="form.code" placeholder="留空自动生成（如 KH-00001）"></div>
-      <div class="field"><label class="required">客户名称</label><input v-model.trim="form.name"></div>
+      <div class="field full"><label class="required">客户名称</label><input v-model.trim="form.name" placeholder="租户内唯一"></div>
       <div class="field"><label>联系人</label><input v-model.trim="form.contact_name"></div>
       <div class="field"><label>联系电话</label><input v-model.trim="form.phone"></div>
       <div class="field full"><label>地址</label><input v-model.trim="form.address"></div>
